@@ -285,14 +285,21 @@ class ToolRegistry(IToolRegistry):
  the core tool-surface floor must survive a tenant ``visible``
  whitelist, not just the retrieval clip (see
  :meth:`_floored_visible_tools`).
- 2. If ``top_k`` is ``None`` or list ≤ top_k: return floored set
- sorted by name (no retrieval).
+ 2. If ``top_k`` is ``None``, or the tools that are not pinned number
+ no more than ``top_k``: return the floored set sorted by name (no
+ retrieval).
  3. Otherwise: pinned (policy.pinned) + forced_pinned + ``always_load``
- tools always included; the remaining slots go to the best-ranked
- of the rest for ``query`` (the same ranking as :meth:`search`,
- fallback stage included). A query that matches nothing, or an
- empty one, leaves pinned tools only — respectively the pinned
- tools plus the first others by name.
+ tools always included, and ``top_k`` more go to the best-ranked of
+ the rest for ``query`` (the same ranking as :meth:`search`, fallback
+ stage included). A query that matches nothing leaves pinned tools
+ only; an empty one, the pinned tools plus the first others by name.
+
+ Clipping per message is opt-in and not recommended: it re-ranks the
+ surface on every user message, which changes the tool list and with
+ it the provider's prompt cache, and a message in one language
+ against descriptions in another finds too little. Deferring whole
+ groups behind ToolSearch (:mod:`protocore.runtime.tool_deferral`)
+ is the supported way to keep a large catalogue off the surface.
 
  ``always_load``: a tool whose class sets ``always_load = True``
  (e.g. ``ToolSearch``) is ALWAYS part of the advertised surface,
@@ -310,7 +317,7 @@ class ToolRegistry(IToolRegistry):
         visible_tools = self._floored_visible_tools(tenant_id, policy)
 
         # Layer 2 + 3: clipping + retrieval
-        if top_k is None or len(visible_tools) <= top_k:
+        if top_k is None:
             return [t.definition for t in visible_tools]
 
         # Layer-3 pins + the core floor. ``forced_pinned`` is already in the
@@ -329,7 +336,13 @@ class ToolRegistry(IToolRegistry):
         )
         chosen = [t for t in visible_tools if t.name in pinned_names]
         others = [t for t in visible_tools if t.name not in pinned_names]
-        remaining = max(0, top_k - len(chosen))
+        # ``top_k`` counts retrieved tools only. It used to count the pinned
+        # ones too, so a floor of fourteen pinned tools under the default of
+        # twelve left no room at all and the clip retrieved nothing, whatever
+        # the message said.
+        if len(others) <= top_k:
+            return [t.definition for t in visible_tools]
+        remaining = top_k
         if remaining and others:
             if query.strip():
                 # ``search_hint`` joins this corpus too, not only ToolSearch's:

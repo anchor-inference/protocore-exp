@@ -466,9 +466,17 @@ class LoopConstants(BaseModel):
 
  # ----- Tool retrieval / surface -----
     tool_retrieval_top_k: int = Field(
-        default=12,
-        gt=0,
-        description="BM25 tool retrieval top-K (per-call surface).",
+        default=0,
+        ge=0,
+        description=(
+            "Per-message clip of the advertised tool surface: how many tools "
+            "retrieval picks for the latest user message, beyond the pinned, "
+            "forced and always-load ones, which never count against it. 0 "
+            "turns the clip off, and off is the recommended setting: the clip "
+            "re-ranks the surface on every user message, so the tool list and "
+            "the provider's prompt cache change with it, and a message in one "
+            "language finds too little among descriptions written in another."
+        ),
     )
     tool_retrieval_name_weight: float = Field(
         default=1.0,

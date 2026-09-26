@@ -2301,7 +2301,7 @@ async def _drive_turn(engine: QueryEngine) -> AsyncIterator[TurnEvent]:
             tenant_id=engine.config.tenant_id,
             policy=engine.effective_tool_policy,
             query=engine.latest_user_message.text if engine.latest_user_message else "",
-            top_k=engine.config.rc.tool_retrieval_top_k,
+            top_k=engine.config.rc.tool_retrieval_top_k or None,
             retrieval=RetrievalSettings.from_constants(engine.config.rc),
         )
     )
@@ -4486,7 +4486,7 @@ async def _stream_one_assistant_message(
                 tenant_id=engine.config.tenant_id,
                 policy=engine.effective_tool_policy,
                 query=engine.latest_user_message.text if engine.latest_user_message else "",
-                top_k=engine.config.rc.tool_retrieval_top_k,
+                top_k=engine.config.rc.tool_retrieval_top_k or None,
                 retrieval=RetrievalSettings.from_constants(engine.config.rc),
             )
         )
@@ -5981,7 +5981,7 @@ async def _rebuild_context_for_recovery(
             tenant_id=engine.config.tenant_id,
             policy=engine.effective_tool_policy,
             query=engine.latest_user_message.text if engine.latest_user_message else "",
-            top_k=engine.config.rc.tool_retrieval_top_k,
+            top_k=engine.config.rc.tool_retrieval_top_k or None,
             retrieval=RetrievalSettings.from_constants(engine.config.rc),
         )
     )

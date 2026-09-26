@@ -157,8 +157,10 @@ class IToolRegistry(Protocol):
         """3-layer filter: policy → clipping → progressive discovery.
 
         ``query`` is the recent user message (for retrieval); ``top_k`` is
-        the clip threshold, ``None`` meaning no clip. ``retrieval`` carries
-        the run's ranking settings; ``None`` means the defaults.
+        how many tools the clip retrieves BESIDES the pinned ones (pinned,
+        forced and always-load tools never count against it), ``None``
+        meaning no clip. ``retrieval`` carries the run's ranking settings;
+        ``None`` means the defaults.
         """
         ...
 

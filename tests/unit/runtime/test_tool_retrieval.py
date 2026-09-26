@@ -412,9 +412,37 @@ def test_clip_keeps_name_order() -> None:
 
 
 def test_empty_query_clip_fills_by_name() -> None:
-    reg = ToolRegistry([MockTool(tool_name=name) for name in ("Charlie", "Alpha", "Bravo")])
+    reg = ToolRegistry([MockTool(tool_name=name) for name in ("Delta", "Charlie", "Alpha", "Bravo")])
     defs = reg.compute_effective_surface("t", ToolVisibilityPolicy(pinned={"Charlie"}), query=" ", top_k=2)
-    assert [d.name for d in defs] == ["Alpha", "Charlie"]
+    assert [d.name for d in defs] == ["Alpha", "Bravo", "Charlie"]
+
+
+def test_pinned_tools_do_not_count_against_the_clip() -> None:
+    """``top_k`` is how many tools retrieval adds. Counted with the pins, a
+    floor as large as the default left no room at all and the clip retrieved
+    nothing, whatever the message asked for."""
+    pinned = {f"Core{i:02d}" for i in range(14)}
+    tools = [MockTool(tool_name=name) for name in sorted(pinned)]
+    tools.append(MockTool(tool_name="ScheduleCreate", description="Schedule a job to run later."))
+    tools.extend(MockTool(tool_name=f"Other{i:02d}", description="Unrelated.") for i in range(20))
+    reg = ToolRegistry(tools)
+
+    defs = reg.compute_effective_surface(
+        "t", ToolVisibilityPolicy(forced_pinned=frozenset(pinned)), query="schedule a job", top_k=12
+    )
+
+    names = [d.name for d in defs]
+    assert "ScheduleCreate" in names
+    assert pinned <= set(names)
+    assert len(names) <= len(pinned) + 12
+
+
+def test_no_clip_when_the_unpinned_tools_already_fit() -> None:
+    reg = ToolRegistry([MockTool(tool_name=name) for name in ("A", "B", "C", "D")])
+    defs = reg.compute_effective_surface(
+        "t", ToolVisibilityPolicy(pinned={"A", "B"}), query="anything", top_k=2
+    )
+    assert [d.name for d in defs] == ["A", "B", "C", "D"]
 
 
 def test_settings_default_to_the_constants_model() -> None:

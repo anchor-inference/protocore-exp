@@ -2173,10 +2173,20 @@ class InMemoryToolRegistry(IToolRegistry):
     ) -> Sequence[ToolDefinition]:
         del query, retrieval
         tools = self.list_for_tenant(tenant_id, policy)
-        defs = [t.definition for t in tools]
-        if top_k is not None:
-            defs = defs[:top_k]
-        return defs
+        if top_k is None:
+            return [t.definition for t in tools]
+        # The clip keeps what is pinned and ``top_k`` others in registration
+        # order: pinned tools do not count against it, as in the real registry.
+        pinned = set(policy.pinned) | set(policy.forced_pinned)
+        kept: list[ToolDefinition] = []
+        others = 0
+        for tool in tools:
+            if tool.name in pinned or bool(getattr(tool, "always_load", False)):
+                kept.append(tool.definition)
+            elif others < top_k:
+                kept.append(tool.definition)
+                others += 1
+        return kept
 
 
 # ---------------------------------------------------------------------------
