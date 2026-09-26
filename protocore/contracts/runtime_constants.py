@@ -475,7 +475,57 @@ class LoopConstants(BaseModel):
             "turns the clip off, and off is the recommended setting: the clip "
             "re-ranks the surface on every user message, so the tool list and "
             "the provider's prompt cache change with it, and a message in one "
-            "language finds too little among descriptions written in another."
+            "language finds too little among descriptions written in another. "
+            "Keep a large catalogue off the surface with tool_deferral_mode "
+            "and ToolSearch instead."
+        ),
+    )
+    tool_deferral_mode: Literal["off", "auto"] = Field(
+        default="auto",
+        description=(
+            "Whether declared tool groups may be held back from the advertised "
+            "surface and named in the system prompt instead, to be loaded "
+            "with ToolSearch. 'auto' holds back every dynamic group, then "
+            "other groups, largest first, while the surface is over "
+            "tool_definitions_ratio of the context window or over "
+            "max_advertised_tools; it does nothing when no group is declared, "
+            "when nothing is over, or when no ToolSearch-like tool (role "
+            "discovers_tools) is registered. 'off' always advertises the "
+            "whole surface."
+        ),
+    )
+    max_advertised_tools: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "The most tool definitions the provider accepts in one request, "
+            "or 0 for no limit. Some providers refuse a request above a fixed "
+            "count (128 and 350 are both seen in practice); over it, "
+            "tool_deferral_mode 'auto' holds back groups until the surface "
+            "plus pinned_tool_max_count loaded tools fits."
+        ),
+    )
+    tool_search_max_results: int = Field(
+        default=8,
+        gt=0,
+        description="Most tools one ToolSearch call lists, best match first.",
+    )
+    tool_search_autoload_count: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            "How many of a ToolSearch query's best matches are loaded at once, "
+            "without a separate select: call. A model that searched finds the "
+            "tool it needs among the first three nearly every time."
+        ),
+    )
+    tool_catalogue_max_listed_names: int = Field(
+        default=12,
+        gt=0,
+        description=(
+            "Above this many held-back tools, a group that declares a name "
+            "prefix is listed in the system prompt's tool catalogue by that "
+            "prefix and a count instead of by every name."
         ),
     )
     max_tool_calls_per_turn: int = Field(
@@ -1184,10 +1234,18 @@ class LoopConstants(BaseModel):
         description="Loaded skill bodies budget as fraction of context window.",
     )
     tool_definitions_ratio: float = Field(
-        default=0.05,
+        default=0.25,
         gt=0.0,
         le=1.0,
-        description="Tool definitions budget as fraction of context window.",
+        description=(
+            "Tool definitions budget as fraction of context window. Enforced "
+            "by tool_deferral_mode 'auto': a surface over it holds back "
+            "declared tool groups. A quarter, because advertising every tool "
+            "was measured to answer at least as well as searching for them "
+            "for as long as the definitions fit; the budget exists to stop "
+            "the definitions from crowding out the conversation, not to "
+            "keep the list short."
+        ),
     )
     user_context_ratio: float = Field(
         default=0.01,
@@ -1318,9 +1376,11 @@ class LoopConstants(BaseModel):
         default=15,
         gt=0,
         description=(
-            "Maximum number of pinned tools (always-include) carried into "
-            "the tool pool. Caps cache-prefix bloat from "
-            "ToolSearch-pinned tools."
+            "Most tools a run keeps loaded after discovering them (through "
+            "ToolSearch, or by calling a tool that was not advertised). Over "
+            "it, the least recently used are unloaded — only where the "
+            "prompt prefix is rebuilt anyway, at compaction and at the start "
+            "of a run, never between two requests of one run."
         ),
     )
     tool_surface_forced_pins: tuple[str, ...] = Field(

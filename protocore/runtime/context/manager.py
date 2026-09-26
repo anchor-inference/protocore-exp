@@ -6,7 +6,6 @@ correctness-affecting decisions).
 """
 from __future__ import annotations
 
-from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -88,13 +87,12 @@ class ContextManager:
  Compaction state IS persisted on the :class:`QueryEngine` (retry
  counter, summarised-turn IDs) — passed in as :class:`CompactionState`.
 
- pin LRU state IS persisted on the
- manager so :meth:`pin_tool` can cap the per-run pin list at
- :attr:`LoopConstants.pinned_tool_max_count` and evict the
- least-recently-pinned entry on overflow. Pin state lives on the
- manager because the QueryEngine builds at-most-one ContextManager
- per run, so the pin list is naturally per-run scoped without
- needing extra plumbing on :class:`CompactionState`.
+ The tools the run DISCOVERED live on the manager too — the ones
+ ToolSearch loaded or the model called without their being advertised
+ — in the order they were discovered, each with when it was last used.
+ The QueryEngine builds at-most-one ContextManager per run, so the list
+ is naturally per-run scoped without extra plumbing on
+ :class:`CompactionState`.
  """
 
     def __init__(
@@ -118,12 +116,11 @@ class ContextManager:
         # the same reason: every call site renders unconditionally instead of
         # carrying a branch for the host that configured nothing.
         self._prompts = prompts
-        # LRU pin tracking. OrderedDict
-        # gives us O(1) ``move_to_end`` for re-pins and FIFO eviction
-        # on overflow. Stored as ``dict[str, None]`` because we only
-        # care about names + their relative order; the actual tool
-        # descriptors live in the :class:`ToolRegistry`.
-        self._pinned_tools: OrderedDict[str, None] = OrderedDict()
+        # Discovered tools, in discovery order (dict insertion order), each
+        # mapped to the tick of its last use. Discovery order is what the
+        # surface appends them in; the tick is what eviction reads.
+        self._discovered_tools: dict[str, int] = {}
+        self._discovery_clock = 0
         # One estimator per manager, and a manager is built once per run: two
         # runs sharing a process never consult each other's remembered
         # estimates, whatever object identity would have allowed.
@@ -150,59 +147,95 @@ class ContextManager:
         self._rc = rc
 
     # ------------------------------------------------------------------
-    # pin LRU
+    # discovered tools
     # ------------------------------------------------------------------
 
-    def pin_tool(self, name: str) -> str | None:
-        """Pin a tool by name with LRU + cap enforcement.
+    def discover_tool(self, name: str) -> bool:
+        """Load ``name`` for the rest of the run; ``True`` when it is new.
 
- The ``ToolVisibilityPolicy.pinned`` set can grow unbounded without a cap —
- a latent KV-cache bloat risk (every pinned tool stays in the prompt prefix
- regardless of retrieval scoring). The cap is taken fresh from
- :attr:`LoopConstants.pinned_tool_max_count` so an operator
- tightening the value via the dashboard takes effect on the
- next pin call without a redeploy.
+        A new tool goes to the END of the discovery order and stays there:
+        the advertised surface appends discovered tools in this order, and a
+        tool that moved every time it was used would change the tool list,
+        and with it the provider's cached prefix, on every call. Rediscovering
+        a tool only counts as a use.
 
- Behaviour:
-
- * Re-pinning an already-pinned name moves it to the
- most-recently-used position (no eviction).
- * Pinning a new name when the list is already at the cap
- evicts the oldest entry and returns its name so the caller
- can update the visibility policy that consumes the list.
- * Pinning when the cap is at or below zero is a no-op
- (defensive — the RC field is ``gt=0`` so this only fires
- for adversarial test setups).
- """
-
+        Nothing is evicted here, however many tools are loaded. The cap
+        (:attr:`LoopConstants.pinned_tool_max_count`) is applied by
+        :meth:`evict_discovered_tools`, which the loop calls only where the
+        prompt prefix is rebuilt anyway; unloading a tool mid-run would pull
+        a schema out from under a model that may be about to call it, and
+        would cost the cache exactly what the cap was meant to save.
+        """
         if not name:
-            return None
+            return False
+        self._discovery_clock += 1
+        new = name not in self._discovered_tools
+        self._discovered_tools[name] = self._discovery_clock
+        return new
+
+    def note_tool_used(self, name: str) -> None:
+        """Record a call of ``name``, when it is a discovered tool."""
+        if name in self._discovered_tools:
+            self._discovery_clock += 1
+            self._discovered_tools[name] = self._discovery_clock
+
+    def discovered_tool_names(self) -> tuple[str, ...]:
+        """The discovered tools, in the order they were discovered."""
+        return tuple(self._discovered_tools)
+
+    def discovered_tool_last_used(self) -> dict[str, int]:
+        """Each discovered tool's last use, as a tick of this run's clock."""
+        return dict(self._discovered_tools)
+
+    def discovered_tool_state(self) -> list[dict[str, object]]:
+        """The discovered tools as plain rows: name and last use, discovery order."""
+        return [
+            {"name": name, "last_used": tick}
+            for name, tick in self._discovered_tools.items()
+        ]
+
+    def restore_discovered_tools(self, rows: Sequence[object], *, replace: bool = False) -> None:
+        """Put back what :meth:`discovered_tool_state` wrote, or a bare name list.
+
+        Bare names are what a host seeds a new run of a session with; they are
+        taken as used in the order given, so the first is the first evicted.
+        ``replace`` drops whatever is loaded first: a snapshot is the whole
+        truth about the run it came from, and a seed the host also passed to
+        the resuming engine would otherwise reorder it.
+        """
+        if replace:
+            self._discovered_tools.clear()
+            self._discovery_clock = 0
+        for row in rows:
+            if isinstance(row, str):
+                self.discover_tool(row)
+                continue
+            if not isinstance(row, dict):
+                continue
+            name = row.get("name")
+            tick = row.get("last_used")
+            if not isinstance(name, str) or not name:
+                continue
+            if isinstance(tick, bool) or not isinstance(tick, int):
+                tick = 0
+            self._discovered_tools[name] = tick
+            self._discovery_clock = max(self._discovery_clock, tick)
+
+    def evict_discovered_tools(self) -> tuple[str, ...]:
+        """Unload the least recently used tools over the cap; return their names.
+
+        The survivors keep their discovery order. A cap at or below zero is
+        treated as no room at all, which the constants model already refuses.
+        """
         cap = max(0, int(self._rc.pinned_tool_max_count))
-        if cap <= 0:
-            return None
-        if name in self._pinned_tools:
-            self._pinned_tools.move_to_end(name)
-            return None
-        evicted: str | None = None
-        if len(self._pinned_tools) >= cap:
-            # popitem(last=False) returns the OLDEST insertion — that's
-            # the LRU because every re-pin moves the entry to the end.
-            evicted_name, _ = self._pinned_tools.popitem(last=False)
-            evicted = evicted_name
-        self._pinned_tools[name] = None
+        excess = len(self._discovered_tools) - cap
+        if excess <= 0:
+            return ()
+        by_age = sorted(self._discovered_tools.items(), key=lambda item: item[1])
+        evicted = tuple(name for name, _ in by_age[:excess])
+        for name in evicted:
+            del self._discovered_tools[name]
         return evicted
-
-    def pinned_tool_names(self) -> tuple[str, ...]:
-        """Return the current LRU-ordered pinned tool names.
-
- Oldest-first (insertion order with
- re-pin promoting to the end). Callers building
- :class:`ToolVisibilityPolicy` pass ``frozenset(...)`` because
- the policy field is a set; the order is preserved here so the
- caller MAY render or log the recency.
- """
-
-        return tuple(self._pinned_tools.keys())
 
     def build_context(
         self,

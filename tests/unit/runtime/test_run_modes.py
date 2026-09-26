@@ -138,9 +138,9 @@ def test_engine_effective_tool_policy_unions_explicit_forced_pins() -> None:
 
 
 def test_engine_effective_tool_policy_unions_toolsearch_dynamic_pins() -> None:
-    """ToolSearch pins must enter the next per-turn surface policy."""
+    """Discovered tools enter the policy's pins, so dispatch admits them."""
     engine = _build_engine()
-    engine.context_manager.pin_tool("LibrarySearch")
+    engine.context_manager.discover_tool("LibrarySearch")
 
     assert "LibrarySearch" in engine.effective_tool_policy.pinned
 

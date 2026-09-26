@@ -61,6 +61,7 @@ EXPECTED_READ = frozenset(
         "memory_enabled",
         "memory_write_similarity_threshold",
         "memory_max_records_per_scope",
+        "tool_visibility_policy",
     }
 )
 

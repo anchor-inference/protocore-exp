@@ -62,7 +62,13 @@ _PROCESS_LOCAL: dict[str, str] = {
     "tools": (
         "the registry is built by the host from its own catalog. What the run "
         "did to that surface is carried separately — the broken tools, the "
-        "pinned result ids and the pin LRU all travel."
+        "pinned result ids, the discovered tools and the held-back groups all "
+        "travel."
+    ),
+    "_tool_deferral_key": (
+        "the identity of the host's catalogue the deferral was decided against, "
+        "read off the registry again in the new process. The decision itself "
+        "travels, as deferred_tool_groups, and is replayed rather than remade."
     ),
     "events": "the event stream is the host's transport, not run state.",
     "hooks": "the hook manager is injected by the host.",
@@ -206,17 +212,23 @@ async def test_a_resumed_run_still_has_the_rules_it_activated(engine_factory) ->
     assert resumed.discovered_rules == source.discovered_rules
 
 
-async def test_a_resumed_run_keeps_the_tools_it_pinned(engine_factory) -> None:
-    """The pin LRU is the agent keeping the tools it went looking for, and its
-    ORDER decides which one the next overflow evicts."""
+async def test_a_resumed_run_keeps_the_tools_it_discovered(engine_factory) -> None:
+    """The discovered tools are the agent keeping the tools it went looking for.
+    Their ORDER is where the surface appends them, and their last use decides
+    which one the next eviction takes."""
     source = engine_factory(run_id="run-1", tenant_id="scope-1", session_id="session-1")
     for name in ("Grep", "Read", "Write"):
-        source.context_manager.pin_tool(name)
+        source.context_manager.discover_tool(name)
+    source.context_manager.note_tool_used("Grep")
 
     resumed = engine_factory(run_id="run-1", tenant_id="scope-1", session_id="session-1")
     await resumed.resume_from_snapshot(source.snapshot())
 
-    assert resumed.context_manager.pinned_tool_names() == ("Grep", "Read", "Write")
+    assert resumed.context_manager.discovered_tool_names() == ("Grep", "Read", "Write")
+    assert (
+        resumed.context_manager.discovered_tool_last_used()
+        == source.context_manager.discovered_tool_last_used()
+    )
 
 
 async def test_a_resumed_run_keeps_the_records_it_made(engine_factory) -> None:
@@ -275,7 +287,7 @@ async def test_a_version_one_payload_is_lifted_and_resumes_empty(engine_factory)
     source = engine_factory(run_id="run-1", tenant_id="scope-1", session_id="session-1")
     source.turn_count = 5
     payload = source.snapshot()
-    assert payload["schema_version"] == SNAPSHOT_SCHEMA_VERSION == 6
+    assert payload["schema_version"] == SNAPSHOT_SCHEMA_VERSION == 7
     # A version-1 payload named the run's two allowances at the top level.
     run_state_payload = payload.pop(RUN_SCOPED_STATE_SNAPSHOT_KEY)
     payload["run_work_ledger"] = run_state_payload["run_work_ledger"]
@@ -287,7 +299,8 @@ async def test_a_version_one_payload_is_lifted_and_resumes_empty(engine_factory)
         "session_grants",
         "profile_audit",
         "spans",
-        "context_manager_pinned_tools",
+        "discovered_tools",
+        "deferred_tool_groups",
         "skill_catalog_block_sha256",
     ):
         del payload[key]
@@ -299,7 +312,7 @@ async def test_a_version_one_payload_is_lifted_and_resumes_empty(engine_factory)
     assert resumed.turn_count == 5
     assert resumed.compact_checkpoint is None
     assert resumed.active_rule_paths == []
-    assert resumed.context_manager.pinned_tool_names() == ()
+    assert resumed.context_manager.discovered_tool_names() == ()
 
 
 # ── the mirror axis: what travels out has to come back in ───────────────────
@@ -318,7 +331,8 @@ _RESTORED_BY_HELPER: dict[str, str] = {
     ),
     "context_manager": (
         "not replaced: the manager the host built is kept, and the run's "
-        "effect on it is replayed through it — pin_tool for each carried pin."
+        "effect on it is replayed through it — restore_discovered_tools puts back "
+        "the discovered tools with their recency."
     ),
     "run_state": (
         "not replaced: the object is shared by reference with subagents that "

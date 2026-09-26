@@ -52,6 +52,12 @@ from protocore.tests_support.adapters import (
     InMemoryToolRegistry,
 )
 
+#: The last schema version whose paused run named its wait with one bare call
+#: id. Stated as the number rather than as "the version before the current
+#: one": later versions change other fields, and the shape these tests build is
+#: this one's.
+_UNTYPED_WAIT_SCHEMA_VERSION = 5
+
 
 class _CountingTool(Tool):
     def __init__(self, name: str = "MyTool") -> None:
@@ -269,7 +275,7 @@ async def test_a_run_paused_under_the_older_shape_comes_back_as_a_typed_wait() -
     # The shape a store written before the wait had a type still holds.
     older = {key: value for key, value in stored.items() if key != PENDING_INTERRUPTS_SNAPSHOT_KEY}
     older["pending_approval_tool_call_id"] = "toolu_a"
-    older[SNAPSHOT_SCHEMA_KEY] = SNAPSHOT_SCHEMA_VERSION - 1
+    older[SNAPSHOT_SCHEMA_KEY] = _UNTYPED_WAIT_SCHEMA_VERSION
 
     successor = runtime.engine()
     await successor.resume_from_snapshot(older)
@@ -318,7 +324,7 @@ async def test_an_ask_user_pause_written_under_the_older_shape_can_be_answered()
             "state": "PAUSED_ASK_USER",
         }
     ]
-    older[SNAPSHOT_SCHEMA_KEY] = SNAPSHOT_SCHEMA_VERSION - 1
+    older[SNAPSHOT_SCHEMA_KEY] = _UNTYPED_WAIT_SCHEMA_VERSION
 
     successor = runtime.engine()
     await successor.resume_from_snapshot(older)

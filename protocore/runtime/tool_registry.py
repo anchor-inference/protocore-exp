@@ -39,6 +39,7 @@ from typing import Final, Literal
 from protocore.contracts.runtime_constants import LoopConstants
 from protocore.contracts.tool_registry import (
     IToolRegistry,
+    ToolGroup,
     ToolVisibilityPolicy,
     policy_admits,
 )
@@ -119,6 +120,7 @@ class ToolRegistry(IToolRegistry):
     ) -> None:
         self._lock = threading.RLock()
         self._tools: dict[str, Tool] = {}
+        self._groups: dict[str, ToolGroup] = {}
         # Bumped by every register/unregister; an index built for an older
         # generation is never used again.
         self._generation = 0
@@ -160,6 +162,36 @@ class ToolRegistry(IToolRegistry):
         """Fetch tool by name; ``None`` if not registered."""
         with self._lock:
             return self._tools.get(name)
+
+    # ------------------------------------------------------------------
+    # IToolRegistry — groups
+    # ------------------------------------------------------------------
+
+    def declare_group(
+        self,
+        name: str,
+        description: str,
+        *,
+        dynamic: bool = False,
+        prefix: str = "",
+    ) -> None:
+        """Declare a tool group, replacing any earlier declaration of ``name``.
+
+        A group changes no search result and no advertised definition, so
+        declaring one does not bump the catalogue generation.
+        """
+        if not name:
+            raise ValueError("a tool group needs a name")
+        with self._lock:
+            self._groups[name] = ToolGroup(
+                name=name, description=description, dynamic=dynamic, prefix=prefix
+            )
+
+    def tool_groups(self) -> Sequence[ToolGroup]:
+        """Every declared group, sorted by name."""
+        with self._lock:
+            groups = list(self._groups.values())
+        return sorted(groups, key=lambda group: group.name)
 
     # ------------------------------------------------------------------
     # IToolRegistry — listing / filtering

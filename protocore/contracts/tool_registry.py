@@ -3,6 +3,11 @@
 Core implements the concrete 3-layer filter (policy + clipping + progressive
 discovery) in :mod:`protocore.runtime.tool_registry`; this Protocol exists
 for tests and future plugins that may want to substitute the registry wholesale.
+
+The registry also holds the catalogue's GROUPS: named sets of tools the loop may
+leave off the advertised surface as a unit when the whole catalogue no longer
+fits, and name in the system prompt instead (see
+:mod:`protocore.runtime.tool_deferral`).
 """
 from __future__ import annotations
 
@@ -21,6 +26,12 @@ from protocore.contracts.types import ToolDefinition
 #: (tools-initiative A2 — closes the blocked-schema info leak). The value is
 #: the policy MODEL instance — a live object, never a serialised copy.
 TOOL_VISIBILITY_POLICY_METADATA_KEY: Final[str] = "tool_visibility_policy"
+
+#: ``ToolResult.metadata`` key under which a discovery tool (role
+#: ``discovers_tools``) lists the tool names it loaded. The loop reads it from
+#: discovery tools only and keeps only names the live policy admits, so a tool
+#: cannot widen the surface by writing this key into its result.
+TOOLS_LOADED_METADATA_KEY: Final[str] = "protocore.tools_loaded"
 
 
 class ToolVisibilityPolicy(BaseModel):
@@ -80,6 +91,59 @@ def policy_admits(policy: ToolVisibilityPolicy | None, name: str) -> bool:
             or name in policy.forced_pinned
         )
     return True
+
+
+class ToolGroup(BaseModel):
+    """A named set of tools that is advertised, or held back, as one unit.
+
+    A tool joins a group in one of two ways: its class names it with the
+    optional ``tool_group`` attribute (read with ``getattr``, like
+    ``search_hint``), or its name starts with the group's :attr:`prefix`. The
+    first is for tools a host writes; the second is for tools it does not —
+    the proxies an MCP client registers for a server arrive by the dozen under
+    one name prefix, and nobody sets a class attribute on them.
+
+    Membership never reaches the wire: it is not part of a tool's definition,
+    so it cannot change the advertised surface or its digest.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    description: str = ""
+    """One line the system prompt shows for the group when it is held back."""
+
+    dynamic: bool = False
+    """The group's membership is not the host's own code — an MCP server's tools.
+
+    Such a group is the part of a catalogue that grows without anyone deciding
+    it should, and its tools are the likeliest to crowd a search result with
+    near-matches, so it is the first thing held back and is held back whenever
+    deferral is on at all.
+    """
+
+    prefix: str = ""
+    """Tools whose name starts with this join the group; empty joins none this way."""
+
+
+def tool_group_of(tool: Tool, groups: Sequence[ToolGroup]) -> str:
+    """The name of the group ``tool`` belongs to, or ``""`` for none.
+
+    An explicit ``tool_group`` attribute wins over a prefix: a host that says
+    where a tool belongs has settled the question. Among prefixes the longest
+    match wins, so ``Mcp_Github_`` and ``Mcp_`` can both be declared and a
+    GitHub proxy lands in the narrower one.
+    """
+    explicit = getattr(tool, "tool_group", "")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    best = ""
+    best_length = 0
+    for group in groups:
+        if group.prefix and tool.name.startswith(group.prefix) and len(group.prefix) > best_length:
+            best = group.name
+            best_length = len(group.prefix)
+    return best
 
 
 @runtime_checkable
@@ -164,10 +228,28 @@ class IToolRegistry(Protocol):
         """
         ...
 
+    def declare_group(
+        self,
+        name: str,
+        description: str,
+        *,
+        dynamic: bool = False,
+        prefix: str = "",
+    ) -> None:
+        """Declare (or redeclare) a tool group. See :class:`ToolGroup`."""
+        ...
+
+    def tool_groups(self) -> Sequence[ToolGroup]:
+        """Every declared group, sorted by name."""
+        ...
+
 
 __all__ = [
+    "TOOLS_LOADED_METADATA_KEY",
     "TOOL_VISIBILITY_POLICY_METADATA_KEY",
     "IToolRegistry",
+    "ToolGroup",
     "ToolVisibilityPolicy",
     "policy_admits",
+    "tool_group_of",
 ]

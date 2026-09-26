@@ -37,7 +37,7 @@ from typing import Any
 SNAPSHOT_SCHEMA_KEY = "schema_version"
 
 #: The schema version this build writes and can read after upcasting.
-SNAPSHOT_SCHEMA_VERSION = 6
+SNAPSHOT_SCHEMA_VERSION = 7
 
 #: Where the run's own state sits inside the snapshot payload: the tree's
 #: cumulative work ledger and the capacity of its concurrency budget, the two
@@ -367,6 +367,37 @@ def _v5_to_v6(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 UPCASTERS.register(5, _v5_to_v6)
+
+
+def _v6_to_v7(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Version 7 keeps discovered tools in discovery order and states what was held back.
+
+    Up to version 6 the run carried one list of tool names, in least-recently
+    pinned order, because the tools the agent loaded were kept by recency and
+    placed by name. Version 7 places them by the order they were discovered
+    and evicts by last use, so each needs both facts; and it records which
+    tool groups the run held back, because the catalogue naming them sits at
+    the head of the cached prompt and must come back the same.
+
+    The version 6 order is the only order there is, so it is taken for both:
+    discovery order and recency, the first name the least recently used. Nothing
+    was held back under version 6 — the mechanism did not exist — so the lift
+    says exactly that, an empty list, and the resumed run keeps the whole
+    surface it had rather than deciding afresh partway through.
+    """
+    lifted = {key: value for key, value in snapshot.items() if key != "context_manager_pinned_tools"}
+    names = snapshot.get("context_manager_pinned_tools")
+    rows = [
+        {"name": name, "last_used": tick}
+        for tick, name in enumerate(names if isinstance(names, list) else [], start=1)
+        if isinstance(name, str)
+    ]
+    lifted.setdefault("discovered_tools", rows)
+    lifted.setdefault("deferred_tool_groups", [])
+    return lifted
+
+
+UPCASTERS.register(6, _v6_to_v7)
 
 
 def migrate_snapshot(

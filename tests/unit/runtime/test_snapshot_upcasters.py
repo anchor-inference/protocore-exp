@@ -150,6 +150,31 @@ def test_a_versionless_payload_reaches_the_current_version_with_nothing_invented
         "session_grants",
         "profile_audit",
         "spans",
-        "context_manager_pinned_tools",
+        "discovered_tools",
+        "deferred_tool_groups",
     ):
         assert upgraded[key] == []
+    assert "context_manager_pinned_tools" not in upgraded
+
+
+def test_a_version_six_pin_list_becomes_discovered_tools_in_the_same_order() -> None:
+    """Version 6 knew one order, least recently pinned first. It is the only
+    order there is, so it is both the discovery order and the recency; and
+    version 6 held nothing back, so the lift says so rather than leaving the
+    resumed run to decide afresh partway through."""
+    upgraded = migrate_snapshot(
+        {
+            SNAPSHOT_SCHEMA_KEY: 6,
+            "run_id": "run-1",
+            "context_manager_pinned_tools": ["Grep", "Read", 3, "Write"],
+        }
+    )
+
+    assert upgraded[SNAPSHOT_SCHEMA_KEY] == SNAPSHOT_SCHEMA_VERSION
+    assert upgraded["discovered_tools"] == [
+        {"name": "Grep", "last_used": 1},
+        {"name": "Read", "last_used": 2},
+        {"name": "Write", "last_used": 4},
+    ]
+    assert upgraded["deferred_tool_groups"] == []
+    assert "context_manager_pinned_tools" not in upgraded

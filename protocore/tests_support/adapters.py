@@ -81,6 +81,7 @@ from protocore.contracts.skills import (
 from protocore.contracts.todo import ITodoStorage
 from protocore.contracts.tool_registry import (
     IToolRegistry,
+    ToolGroup,
     ToolVisibilityPolicy,
     policy_admits,
 )
@@ -2104,9 +2105,27 @@ class InMemoryToolRegistry(IToolRegistry):
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self._groups: dict[str, ToolGroup] = {}
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
+
+    def declare_group(
+        self,
+        name: str,
+        description: str,
+        *,
+        dynamic: bool = False,
+        prefix: str = "",
+    ) -> None:
+        if not name:
+            raise ValueError("a tool group needs a name")
+        self._groups[name] = ToolGroup(
+            name=name, description=description, dynamic=dynamic, prefix=prefix
+        )
+
+    def tool_groups(self) -> Sequence[ToolGroup]:
+        return sorted(self._groups.values(), key=lambda group: group.name)
 
     def unregister(self, name: str) -> None:
         self._tools.pop(name, None)

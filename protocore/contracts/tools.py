@@ -1,8 +1,10 @@
 """Tool ABC + ToolError hierarchy.
 
-Core defines the contract only. The baseline tools a host is expected to
-provide (Read, Write, Edit, Grep, Glob, Bash, WebFetch, Skill, Agent,
-ToolSearch, TodoWrite) are all host-side adapters.
+Core defines the contract and ships only the tools whose whole surface is the
+protocol itself: ``AskUser``, the memory tools and ``ToolSearch`` (see
+:mod:`protocore.tools`). The baseline tools a host is expected to provide
+(Read, Write, Edit, Grep, Glob, Bash, WebFetch, Skill, Agent, TodoWrite) are
+host-side adapters.
 """
 from __future__ import annotations
 
@@ -63,6 +65,7 @@ CORE_TOOL_CONTEXT_METADATA_KEYS: Final[frozenset[str]] = frozenset(
         "memory_enabled",
         "memory_write_similarity_threshold",
         "memory_max_records_per_scope",
+        "tool_visibility_policy",
     }
 )
 

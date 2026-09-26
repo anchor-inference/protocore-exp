@@ -4,7 +4,8 @@ Concrete adapter tools (Read/Write/Edit/Bash/...) live in the host; the
 core package owns only the :class:`Tool` ABC (in
 :mod:`protocore.contracts.tools`), the :func:`tool` decorator helper, and
 the small set of tools whose entire surface is the protocol contract
-itself (``AskUser`` — pauses the loop, no infra handles needed).
+itself: ``AskUser`` (pauses the loop), the memory tools, and ``ToolSearch``
+(loads tools the run holds back; register it as ``ToolSearchTool(registry)``).
 """
 from __future__ import annotations
 
@@ -29,6 +30,12 @@ from protocore.tools.memory import (
     RememberTool,
     build_memory_tools,
 )
+from protocore.tools.tool_search import (
+    SELECT_PREFIX,
+    TOOL_SEARCH_TOOL_NAME,
+    ToolSearchInput,
+    ToolSearchTool,
+)
 
 __all__ = [
     "ASK_USER_TOOL_NAME",
@@ -36,6 +43,8 @@ __all__ = [
     "MEMORY_TOOL_NAMES",
     "RECALL_TOOL_NAME",
     "REMEMBER_TOOL_NAME",
+    "SELECT_PREFIX",
+    "TOOL_SEARCH_TOOL_NAME",
     "AskUserInput",
     "AskUserOutput",
     "AskUserPauseRequested",
@@ -46,6 +55,8 @@ __all__ = [
     "RecallTool",
     "RememberInput",
     "RememberTool",
+    "ToolSearchInput",
+    "ToolSearchTool",
     "build_memory_tools",
     "tool",
 ]

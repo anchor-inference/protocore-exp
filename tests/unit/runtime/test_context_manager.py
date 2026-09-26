@@ -270,7 +270,7 @@ async def test_run_compaction_tier1_failure_early_return_sets_tokens_after() -> 
 
 
 # ---------------------------------------------------------------------------
-# pin LRU + cap enforcement
+# Discovered tools: discovery order, last use, eviction only on request
 # ---------------------------------------------------------------------------
 
 
@@ -283,61 +283,74 @@ def _new_manager(*, cap: int) -> ContextManager:
     )
 
 
-def test_pin_tool_under_cap_does_not_evict() -> None:
-    """Pinning below the cap is a plain append; no eviction returned."""
+def test_discovered_tools_keep_the_order_they_were_found_in() -> None:
     mgr = _new_manager(cap=3)
-    assert mgr.pin_tool("A") is None
-    assert mgr.pin_tool("B") is None
-    assert mgr.pinned_tool_names() == ("A", "B")
+    assert mgr.discover_tool("B") is True
+    assert mgr.discover_tool("A") is True
+    # Finding one again is a use, not a move: the surface appends in this
+    # order, and a tool that moved would change the cached tool list.
+    assert mgr.discover_tool("B") is False
+    assert mgr.discovered_tool_names() == ("B", "A")
 
 
-def test_pin_tool_at_cap_evicts_oldest() -> None:
-    """F8 happy path — pinning a new tool when the list is at the cap
-    evicts the LRU (oldest) entry and surfaces the evicted name."""
+def test_discovering_past_the_cap_evicts_nothing_until_asked() -> None:
+    """Unloading mid-run would pull a schema out from under the model."""
+    mgr = _new_manager(cap=2)
+    for name in ("A", "B", "C", "D"):
+        mgr.discover_tool(name)
+    assert mgr.discovered_tool_names() == ("A", "B", "C", "D")
+    assert mgr.evict_discovered_tools() == ("A", "B")
+    assert mgr.discovered_tool_names() == ("C", "D")
+    assert mgr.evict_discovered_tools() == ()
+
+
+def test_eviction_takes_the_least_recently_used_and_keeps_discovery_order() -> None:
+    mgr = _new_manager(cap=2)
+    for name in ("A", "B", "C"):
+        mgr.discover_tool(name)
+    mgr.note_tool_used("A")
+    assert mgr.evict_discovered_tools() == ("B",)
+    assert mgr.discovered_tool_names() == ("A", "C")
+
+
+def test_a_use_of_a_tool_that_was_never_discovered_changes_nothing() -> None:
+    mgr = _new_manager(cap=2)
+    mgr.note_tool_used("Read")
+    assert mgr.discovered_tool_names() == ()
+
+
+def test_discovered_state_round_trips_with_its_recency() -> None:
+    mgr = _new_manager(cap=2)
+    for name in ("A", "B", "C"):
+        mgr.discover_tool(name)
+    mgr.note_tool_used("A")
+    restored = _new_manager(cap=2)
+    restored.restore_discovered_tools(mgr.discovered_tool_state())
+    assert restored.discovered_tool_names() == ("A", "B", "C")
+    # The clock continues past the restored ticks, so a later use still wins.
+    restored.discover_tool("D")
+    assert restored.evict_discovered_tools() == ("B", "C")
+
+
+def test_a_snapshot_replaces_what_was_loaded_rather_than_adding_to_it() -> None:
+    mgr = _new_manager(cap=5)
+    mgr.discover_tool("Seeded")
+    mgr.restore_discovered_tools([{"name": "A", "last_used": 4}, {"name": "B", "last_used": "x"}], replace=True)
+    assert mgr.discovered_tool_names() == ("A", "B")
+    assert mgr.discovered_tool_last_used() == {"A": 4, "B": 0}
+
+
+def test_a_seed_of_bare_names_is_taken_as_used_in_the_order_given() -> None:
+    mgr = _new_manager(cap=2)
+    mgr.restore_discovered_tools(["A", "B", "C", 7, {"name": ""}])
+    assert mgr.discovered_tool_names() == ("A", "B", "C")
+    assert mgr.evict_discovered_tools() == ("A",)
+
+
+def test_an_empty_name_is_not_discovered() -> None:
     mgr = _new_manager(cap=3)
-    mgr.pin_tool("A")
-    mgr.pin_tool("B")
-    mgr.pin_tool("C")
-    # Cap is 3; pinning a 4th evicts A.
-    evicted = mgr.pin_tool("D")
-    assert evicted == "A"
-    assert mgr.pinned_tool_names() == ("B", "C", "D")
-
-
-def test_pin_tool_repin_promotes_to_mru() -> None:
-    """Re-pinning an already-pinned name moves it to the MRU end so
-    the next eviction skips it."""
-    mgr = _new_manager(cap=3)
-    mgr.pin_tool("A")
-    mgr.pin_tool("B")
-    mgr.pin_tool("C")
-    # Re-pin A → moves to end; A is no longer the LRU.
-    assert mgr.pin_tool("A") is None
-    assert mgr.pinned_tool_names() == ("B", "C", "A")
-    # Now pinning D evicts B (the new LRU).
-    assert mgr.pin_tool("D") == "B"
-    assert mgr.pinned_tool_names() == ("C", "A", "D")
-
-
-def test_pin_tool_saturation_evicts_in_strict_order() -> None:
-    """F8 saturation: cycle 16 distinct pins through a cap of 15 and
-    confirm the eviction order matches strict LRU."""
-    mgr = _new_manager(cap=15)
-    for i in range(15):
-        assert mgr.pin_tool(f"T{i}") is None
-    assert len(mgr.pinned_tool_names()) == 15
-    # 16th pin evicts T0.
-    assert mgr.pin_tool("T15") == "T0"
-    assert "T0" not in mgr.pinned_tool_names()
-    assert mgr.pinned_tool_names()[-1] == "T15"
-
-
-def test_pin_tool_empty_name_is_noop() -> None:
-    """Defensive guard: empty name is rejected silently (no LRU shift,
-    no return)."""
-    mgr = _new_manager(cap=3)
-    assert mgr.pin_tool("") is None
-    assert mgr.pinned_tool_names() == ()
+    assert mgr.discover_tool("") is False
+    assert mgr.discovered_tool_names() == ()
 
 
 # ---------------------------------------------------------------------------
