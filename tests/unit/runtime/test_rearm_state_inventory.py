@@ -47,6 +47,9 @@ from ._tool_fixtures import MockTool
 # "I thought about it" the thing that fails, not the thing that is assumed.
 _RESET_ON_REARM: frozenset[str] = frozenset(
     {
+        # The calls of the last message past the per-message cap. They describe
+        # one message of one turn; the next turn's messages state their own.
+        "_over_cap_tool_call_ids",
         # Proactive compaction's own memory: a suspension waiting for a
         # rejection, and the last probe that found nothing to do. The next
         # question starts with a fresh budget, so both start over with it.

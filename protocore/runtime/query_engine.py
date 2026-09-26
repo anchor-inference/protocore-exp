@@ -1473,6 +1473,9 @@ class QueryEngine:
             prompts=self.prompt_provider,
             tool_roles=config.tool_roles,
         )
+        # Calls of the current model message past ``max_tool_calls_per_turn``:
+        # answered with an error each instead of being dispatched.
+        self._over_cap_tool_call_ids: set[str] = set()
 
     # ------------------------------------------------------------------
     # Turn boundary — shared by every entry that opens a turn

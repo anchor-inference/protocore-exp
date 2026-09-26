@@ -478,6 +478,17 @@ class LoopConstants(BaseModel):
             "language finds too little among descriptions written in another."
         ),
     )
+    max_tool_calls_per_turn: int = Field(
+        default=64,
+        ge=0,
+        description=(
+            "Most tool calls dispatched from one model message; 0 for no "
+            "limit. Calls past it are answered with an error each, so every "
+            "call still has its result, and none of them runs. A model can "
+            "emit a runaway batch of identical calls — over a thousand in one "
+            "message has been seen — and each would otherwise run."
+        ),
+    )
     tool_retrieval_name_weight: float = Field(
         default=1.0,
         ge=0.0,

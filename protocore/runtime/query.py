@@ -3801,6 +3801,11 @@ async def _stream_one_assistant_message(
         # discarded.
         flags.approval_pending = False
         flags.terminal_tool_completed = False
+        # Calls past the per-message cap are not run. Each is still answered —
+        # with an error, through the ordinary serial path so it lands in the
+        # order the model asked — because a call without a result is a
+        # transcript the provider refuses.
+        engine._over_cap_tool_call_ids = _calls_over_cap(engine, pending_tool_calls)
         # Set True when a bounded pre-terminal self-verify turn was injected
         # at a would-be-terminal site. It breaks the dispatch loop WITHOUT
         # finalising; flow then falls through to the
@@ -3864,6 +3869,15 @@ async def _stream_one_assistant_message(
             ]
         else:
             delegation_eligible = [False] * len(pending_tool_calls)
+        if engine._over_cap_tool_call_ids:
+            parallel_eligible = [
+                eligible and tc.id not in engine._over_cap_tool_call_ids
+                for eligible, tc in zip(parallel_eligible, pending_tool_calls, strict=True)
+            ]
+            delegation_eligible = [
+                eligible and tc.id not in engine._over_cap_tool_call_ids
+                for eligible, tc in zip(delegation_eligible, pending_tool_calls, strict=True)
+            ]
 
         # Record that this run hands work to subagents, once, for the whole run.
         # Set from the RAW structural predicate rather than from
@@ -10766,6 +10780,65 @@ def _insert_tool_result_after_use(
     return False
 
 
+def _calls_over_cap(engine: QueryEngine, calls: Sequence[ToolCall]) -> set[str]:
+    """The ids of the calls past ``max_tool_calls_per_turn``, in one model message."""
+    cap = engine.config.rc.max_tool_calls_per_turn
+    if cap <= 0 or len(calls) <= cap:
+        return set()
+    over = {tc.id for tc in calls[cap:]}
+    _logger.warning(
+        "DIAG query.tool_call_cap.exceeded run=%s turn=%s calls=%d cap=%d refused=%d",
+        engine.config.run_id,
+        engine.turn_id(),
+        len(calls),
+        cap,
+        len(over),
+    )
+    return over
+
+
+async def _refuse_call_over_cap(
+    engine: QueryEngine, tool_call: ToolCall
+) -> AsyncIterator[TurnEvent]:
+    """Answer one call past the per-message cap with an error, without running it.
+
+    Nothing about the call counts as the tool failing: it is not charged to the
+    circuit breaker or the error streaks, because the tool never ran, and a
+    thousand refused copies of one search would otherwise disable that search
+    for the rest of the run. The snapshot is written once, after the last of
+    them, rather than once per refusal.
+    """
+    engine._over_cap_tool_call_ids.discard(tool_call.id)
+    cap = engine.config.rc.max_tool_calls_per_turn
+    message = (
+        f"Not run: one message may make at most {cap} tool calls, and this "
+        "call came after that. Make the calls you still need in a later "
+        "message, fewer at a time."
+    )
+    yield TurnEvent(
+        type=EventType.TOOL_RESULT,
+        run_id=engine.config.run_id,
+        payload={
+            "tool_call_id": tool_call.id,
+            "success": False,
+            "is_error": True,
+            "error": {"kind": "tool_call_cap", "message": message},
+            "content_blocks": [{"type": "text", "text": message}],
+        },
+    )
+    engine.history.append(
+        Message(
+            role=MessageRole.tool,
+            content_blocks=[
+                ToolResultBlock(tool_call_id=tool_call.id, content=message, is_error=True)
+            ],
+        )
+    )
+    engine.forget_tool_name(tool_call.id)
+    if not engine._over_cap_tool_call_ids:
+        await engine._persist_snapshot()
+
+
 async def _dispatch_tool(
     engine: QueryEngine,
     tool_call: ToolCall,
@@ -10791,6 +10864,10 @@ async def _dispatch_tool(
  ``tool_transport_starting`` is emitted by the **host's transport**
  (never by core) on cold start only.
  """
+    if tool_call.id in engine._over_cap_tool_call_ids:
+        async for evt in _refuse_call_over_cap(engine, tool_call):
+            yield evt
+        return
     _pin_keep_flag(engine, tool_call)
     # Terminal-only finalisation guard. Once the terminal-answer nudge has
     # fired and no terminal tool result is in history yet, every
