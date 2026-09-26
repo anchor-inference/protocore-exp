@@ -1097,6 +1097,35 @@ async def test_non_contract_unknown_tool_unchanged() -> None:
         assert "is not a tool" not in outcome.content
 
 
+@pytest.mark.asyncio
+async def test_an_unknown_tool_is_answered_with_the_nearest_admitted_names() -> None:
+    """A wrong case or a missing word is the usual mistake; the right spelling in
+    the error is what stops the model guessing again. Blocked names are never
+    offered, however close."""
+    dispatcher, _, _ = _build_dispatcher(
+        [
+            MockTool(tool_name="Mcp_Github_list_issues"),
+            MockTool(tool_name="Mcp_Github_list_pulls"),
+            MockTool(tool_name="Mcp_Github_secret_list_issues"),
+            MockTool(tool_name="Read"),
+        ]
+    )
+    call = ToolCall(name="Mcp_github_list_issue", arguments={})
+
+    _events, outcome = await _drain(
+        dispatcher,
+        tool_call=call,
+        visibility_policy=ToolVisibilityPolicy(blocked={"Mcp_Github_secret_list_issues"}),
+    )
+
+    assert outcome.error_kind is DispatchErrorKind.unknown_tool
+    assert outcome.content.startswith(
+        "unknown tool: 'Mcp_github_list_issue'. Did you mean: Mcp_Github_list_issues"
+    )
+    assert "secret" not in outcome.content
+    assert "Read" not in outcome.content
+
+
 def _ctx_with_finalize_terminal_rc() -> ToolContext:
     """A ctx whose constants opt into the typed-``Finalize`` terminal."""
     from protocore.contracts.runtime_constants import LoopConstants

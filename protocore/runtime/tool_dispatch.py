@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import difflib
 import hashlib
 import json
 import re
@@ -84,6 +85,7 @@ from protocore.contracts.tool_registry import (
     TOOL_VISIBILITY_POLICY_METADATA_KEY,
     IToolRegistry,
     ToolVisibilityPolicy,
+    policy_admits,
 )
 from protocore.contracts.tool_roles import EMPTY_TOOL_ROLE_MAP, ToolRole, ToolRoleMap
 from protocore.contracts.tools import ToolContext, ToolPolicyDenied, copy_metadata
@@ -747,6 +749,11 @@ STRUCTURED_ERROR_REASON_KEY: str = "reason"
 #: uses ``LoopConstants.tool_cancel_drain_seconds``; this mirrors its default
 #: so behaviour is identical when the RC is unreachable.
 _TOOL_CANCEL_DRAIN_FALLBACK_SECONDS: Final[float] = 2.0
+
+# How many near names an unknown-tool error offers. Three is enough to contain
+# the right one when a case or a word was wrong, and few enough that the model
+# is not handed a menu to pick a plausible stranger from.
+_UNKNOWN_TOOL_SUGGESTIONS: Final[int] = 3
 
 
 def _dispatch_replay_metadata(
@@ -1539,6 +1546,26 @@ class ToolDispatcher:
             )
         return produced[0]
 
+    def _nearest_admitted_names(
+        self, name: str, policy: ToolVisibilityPolicy | None
+    ) -> list[str]:
+        """Up to three registered names close to ``name`` that the policy admits.
+
+        A model that misremembers a name is usually one case change or one
+        word away — ``Mcp_github_x`` for ``Mcp_Github_x`` — and without the
+        right spelling in front of it, it tends to keep guessing. Only admitted
+        names are offered, so a blocked tool is never revealed by being near.
+        """
+        admitted = {
+            tool.name.casefold(): tool.name
+            for tool in self._registry.list_all()
+            if policy_admits(policy, tool.name)
+        }
+        close = difflib.get_close_matches(
+            name.casefold(), list(admitted), n=_UNKNOWN_TOOL_SUGGESTIONS, cutoff=0.6
+        )
+        return [admitted[candidate] for candidate in close]
+
     async def dispatch(
         self,
         *,
@@ -1616,6 +1643,9 @@ class ToolDispatcher:
                 )
             else:
                 msg = f"unknown tool: {tool_call.name!r}"
+                nearest = self._nearest_admitted_names(tool_call.name, visibility_policy)
+                if nearest:
+                    msg += f". Did you mean: {', '.join(nearest)}?"
             final_kind, final_msg = self._apply_consecutive_error_cap(
                 ctx, tool_call.name, DispatchErrorKind.unknown_tool, msg
             )
