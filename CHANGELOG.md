@@ -36,8 +36,53 @@ All notable changes to this project are recorded here. The format follows
 - `IToolRegistry.search` and `compute_effective_surface` take an optional
   `retrieval: RetrievalSettings`; the loop passes
   `RetrievalSettings.from_constants(rc)`.
+- **The per-message clip is off by default, and pinned tools no longer count
+  against it.** `tool_retrieval_top_k` defaults to `0` (off) and now counts only
+  the tools retrieval adds; counted with the pins, a floor of fourteen under the
+  old default of twelve left the clip no room to retrieve anything. Clipping per
+  user message is kept as an opt-in and documented as not recommended.
+- **`tool_definitions_ratio` is enforced** and defaults to `0.25`. It was
+  derived into a budget that nothing held the surface to.
+- **Discovered tools are appended to the surface in discovery order** instead of
+  being sorted into it, so loading a tool changes only the end of the tool list.
+  The context manager's pin LRU (`pin_tool`, `pinned_tool_names`) is replaced by
+  `discover_tool`, `note_tool_used`, `discovered_tool_names` and
+  `evict_discovered_tools`; `pinned_tool_max_count` is applied, least recently
+  used first, only after compaction, at a turn boundary and when a run starts.
+- **The snapshot schema is version 7.** `context_manager_pinned_tools` becomes
+  `discovered_tools` (name and last use, discovery order) beside the new
+  `deferred_tool_groups`; the upcaster lifts a version 6 payload.
+- **`tool_surface_advertised`** carries `discovered_tool_names` (discovery
+  order) in place of `toolsearch_pinned_tool_names`, the held-back groups
+  (`deferred_tool_groups`, `deferred_tool_count`, `tool_deferral_reasons`), and
+  the source `discovered` in place of `toolsearch_pin`.
+- **An unknown tool name is answered with up to three near names** the policy
+  admits: `unknown tool: 'X'. Did you mean: A, B, C?`
+- An engine built without a host run state now carries its own constants on
+  `run_state.rc`, so core tools read the run's tunables.
 
 ### Added
+
+- **Tool groups and deferral.** `ToolGroup`, `IToolRegistry.declare_group` and
+  `tool_groups`; a tool joins a group by its `tool_group` class attribute or a
+  declared name prefix. With `tool_deferral_mode = "auto"` (the default, inert
+  until a group is declared and a discovery tool registered) dynamic groups are
+  held back, and other groups largest first while the surface is over
+  `tool_definitions_ratio` of the window or over `max_advertised_tools`.
+  Held-back groups are named in a byte-stable catalogue block in the system
+  prompt, with exact tool names or an exact prefix and count
+  (`tool_catalogue_max_listed_names`). See `docs/tools.md`.
+- **`ToolSearch`** (`protocore.tools.ToolSearchTool`): free-text search with up
+  to `tool_search_max_results` hits in rank order, one line each, loading the
+  first `tool_search_autoload_count`; `select:Name1,Name2` loads exact names and
+  answers an unknown one with the nearest admitted names. It respects the live
+  visibility policy and is advertised only while something is held back.
+- A call of a registered tool the request did not advertise still runs and now
+  loads the tool; events `tool_discovered` and `tool_unadvertised_call`.
+- `QueryEngineConfig.discovered_tools` seeds a new run with the tools the last
+  run of the session loaded.
+- `max_tool_calls_per_turn` (default 64): calls past it in one model message are
+  each answered with an error and not run.
 
 - `IToolRetriever` and `reciprocal_rank_fusion` (`contracts/tool_retrieval.py`):
   a host may pass its own ranker, for example an embedding model, as

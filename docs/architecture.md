@@ -320,7 +320,8 @@ governing `LoopConstants` field(s) and their safe/off default.
 |---|---|---|---|---|
 | ReAct loop / orchestrator / query engine | `runtime/query.py`, `runtime/query_engine.py`, `runtime/loop_state.py`, `runtime/loop_strategies.py` | n/a (always on); recovery branches RC-gated | Yes | Yes |
 | Tool dispatch + gating | `runtime/tool_dispatch.py`, `runtime/tool_permission.py` | gate always on; consecutive-error cap RC | Yes | Yes |
-| Tool retrieval / registry | `runtime/tool_registry.py`, `runtime/tool_retrieval.py`, `runtime/text_analysis.py`, `runtime/stemmers.py` | `tool_retrieval_top_k` (clip threshold); `tool_retrieval_name_weight`, `tool_retrieval_search_hint_weight`, `tool_retrieval_summary_weight`, `tool_retrieval_description_weight`, `tool_retrieval_parameters_weight`, `tool_retrieval_bm25_k1`, `tool_retrieval_bm25_b` (BM25F); `tool_retrieval_lexicon_weight` (query expansion); `tool_retrieval_fusion_rank_constant` (host ranker fusion) | Yes | Yes |
+| Tool retrieval / registry | `runtime/tool_registry.py`, `runtime/tool_retrieval.py`, `runtime/text_analysis.py`, `runtime/stemmers.py` | `tool_retrieval_top_k` = `0` (per-message clip, off); `tool_retrieval_name_weight`, `tool_retrieval_search_hint_weight`, `tool_retrieval_summary_weight`, `tool_retrieval_description_weight`, `tool_retrieval_parameters_weight`, `tool_retrieval_bm25_k1`, `tool_retrieval_bm25_b` (BM25F); `tool_retrieval_lexicon_weight` (query expansion); `tool_retrieval_fusion_rank_constant` (host ranker fusion) | Yes | Yes |
+| Tool deferral / ToolSearch | `runtime/tool_deferral.py`, `tools/tool_search.py`, `runtime/context/manager.py` | `tool_deferral_mode` = `"auto"` (inert without a declared group and a registered discovery tool); `tool_definitions_ratio`, `max_advertised_tools` = `0` (the two limits); `tool_search_max_results`, `tool_search_autoload_count`, `tool_catalogue_max_listed_names`; `pinned_tool_max_count` (loaded-tool cap); `max_tool_calls_per_turn` = `64` | Yes | Yes |
 | Tool preconditions | `runtime/tool_preconditions.py`, `runtime/run_tool_preconditions.py` | `tool_preconditions_enabled` = `False`; run-level `QueryEngineConfig.tool_preconditions` empty | DAG + run-level forcer: Yes | Yes |
 | Turn policies | `contracts/turn_policy.py`, `runtime/turn_policies/*` | each policy reads its own RC fields; the ORDER is core-owned (`TURN_POLICY_ORDER`) | Yes — the driver consults the registry at 14 coordinates | Yes |
 | Tool roles + argument spellings | `contracts/tool_roles.py`, `runtime/child_capabilities.py` | none — the map is `QueryEngineConfig.tool_roles`, declared by the host at registration | Yes | Yes |
@@ -938,7 +939,16 @@ owner, a scope, and a disposer, or by implementing `IHookManager` in the host.
   `interrupt_parked` — emitted whenever the run records something it is waiting
   for, carrying that interrupt's id, kind and tool call, so a host learns WHAT
   the run stopped on at the moment it stops rather than by reading the snapshot
-  back. Each value is the `event:` line surfaced to SSE clients.
+  back. `tool_surface_advertised` (one per request) names the tools sent, why
+  each is there (`sources`: `discovered`, `configured_pin`, `forced_pin`,
+  `retrieved_or_visible`), the tools the run has discovered in discovery order
+  (`discovered_tool_names`) and the groups it holds back
+  (`deferred_tool_groups`, `deferred_tool_count`, `tool_deferral_reasons`).
+  `tool_discovered` follows a discovery tool's result with the names it loaded;
+  `tool_unadvertised_call` follows a call of a registered tool the request did
+  not advertise, which ran and is now loaded (see
+  [`tools.md`](tools.md#holding-tool-groups-back)). Each value is the `event:`
+  line surfaced to SSE clients.
 - `runtime/events/envelope.py` — `TurnEvent` (the frozen wire envelope).
 - `runtime/llm/delta_bridge.py` — translates a provider's stream into
   `ProviderDelta` → `TurnEvent` (`_normalise_finish_reason`, `is_block_end`,

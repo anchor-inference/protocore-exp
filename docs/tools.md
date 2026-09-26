@@ -5,7 +5,8 @@
 > Scope: the current core library (`protocore/`). The core owns
 > tool *contracts, names, dispatch, gating, retrieval, and ordering*. It ships a
 > few concrete tools whose entire surface **is** the protocol contract — ask-user
-> (`tools/ask_user.py`) and memory (`tools/memory.py`) — but it registers **no**
+> (`tools/ask_user.py`), memory (`tools/memory.py`) and tool search
+> (`tools/tool_search.py`) — but it registers **no**
 > concrete backend-bound
 > (sandbox / exec / read / write) tool itself; those production, backend-bound
 > tools live in the sibling the host repo. (The `IWorkspace` **contract** lives
@@ -19,7 +20,7 @@ deterministic ordering keeps the KV-prefix cache reusable across turns. For the
 default backend-bound surface (sandbox / exec / read / write) the core registers no
 concrete tool — it defines the *shape* and the machinery that runs one tool call
 safely, and the host binds the backend-backed implementations. (The core does
-ship its own protocol-surface tools — ask-user and memory — see the
+ship its own protocol-surface tools — ask-user, memory and tool search — see the
 [scope note](#tool-surface) above.)
 
 ---
@@ -153,12 +154,15 @@ applies three layers:
 1. **Policy** — apply the `ToolVisibilityPolicy` (`visible` allow-list /
    `blocked` deny-list / `pinned` always-include), yielding the tenant's
    visible set.
-2. **Clipping** — if `top_k is None` or the visible set is already `<= top_k`,
-   return it sorted by name (no retrieval at all).
+2. **Clipping** — if `top_k is None`, or the tools that are not pinned
+   already number `<= top_k`, return the set sorted by name (no retrieval at
+   all).
 3. **Progressive discovery** — otherwise always include the `pinned`,
-   `forced_pinned` and `always_load` tools, and fill the remaining slots with
-   the best-ranked of the rest for the recent user `query` (see
-   [Tool retrieval](#tool-retrieval)).
+   `forced_pinned` and `always_load` tools, and add the `top_k` best-ranked of
+   the rest for the recent user `query` (see
+   [Tool retrieval](#tool-retrieval)). Pinned tools never count against
+   `top_k`; they once did, and a floor as large as the default left the clip
+   no room to retrieve anything.
 
 ```python
 def compute_effective_surface(
@@ -175,8 +179,15 @@ def compute_effective_surface(
 Whichever layer runs, the **final ordering is always name-ascending** — the
 retrieval order drives *selection*, but the emitted list is sorted by name so
 the LLM context stays byte-stable and the KV-prefix cache survives across turns.
-The clip threshold is the RC `tool_retrieval_top_k` passed by the loop, and
-`retrieval` is `RetrievalSettings.from_constants(rc)`.
+The clip threshold is the RC `tool_retrieval_top_k` passed by the loop — `0`,
+the default, passes `None` and turns the clip off (see
+[why](#why-per-message-clipping-is-discouraged)) — and `retrieval` is
+`RetrievalSettings.from_constants(rc)`.
+
+The loop does not send this list as it is. `runtime/tool_deferral.py` builds the
+request's tools from it: it leaves out any tool group the run
+[holds back](#holding-tool-groups-back), and appends the tools the run has
+discovered after it, in discovery order.
 
 `ToolRegistry.search(query, top_k=...)` — the path a `ToolSearch`-style tool
 calls — differs in one respect: it returns tools in **rank order**, best first,
@@ -268,6 +279,189 @@ the person or model searching. Every host tool should carry one:
   глянь, коммит, пулреквест, напоминалка).
 - **Avoid generic words** that would match other tools as well — "запрос",
   "задача", "сервер" without a qualifier pull queries towards the wrong tool.
+
+---
+
+## Holding tool groups back
+
+Advertising every tool is the best surface there is for as long as it fits:
+measured on several models, a surface of about two hundred tools answered at
+least as well as any scheme for finding tools on demand. It stops fitting in two
+ways, and both are walls rather than slopes. The definitions can take enough of
+the window that the conversation no longer has room, and some providers refuse a
+request outright above a fixed number of tools (128 and 350 are both seen). A
+host that connects a large MCP server reaches either on the first request.
+
+So the loop can hold whole **groups** of tools back: leave them off `tools`,
+name them in one block of the system prompt, and load them on request through
+`ToolSearch`. Nothing of this happens while the surface fits.
+
+### Groups
+
+A tool joins a group by its class attribute `tool_group` (read with `getattr`,
+like `search_hint`), or by a name prefix the host declares:
+
+```python
+registry.declare_group("scheduling", "Timed and recurring jobs")
+registry.declare_group(
+    "github", "GitHub issues and pull requests", dynamic=True, prefix="Mcp_Github_"
+)
+registry.register(ToolSearchTool(registry))
+```
+
+`ToolGroup(name, description, dynamic, prefix)` lives in
+`contracts/tool_registry.py`, and `IToolRegistry` gains `declare_group` and
+`tool_groups`. An explicit `tool_group` wins over a prefix; among prefixes the
+longest wins. Membership never reaches the wire and is not part of the surface
+digest. A **dynamic** group is one whose membership is not the host's own code —
+an MCP server's proxies.
+
+### When groups are held back
+
+`tool_deferral_mode` is `"auto"` by default and `"off"` turns it off. In `auto`,
+once per run — and again only if the registry's catalogue changes — the loop
+measures the surface it would otherwise send:
+
+1. every **dynamic** group is held back, largest first;
+2. then, while the surface is over — its definitions above
+   `tool_definitions_ratio` of the context window, or its count above
+   `max_advertised_tools` with room left for `pinned_tool_max_count` loaded
+   tools — the other groups go, largest first.
+
+Never held back: the forced floor (`forced_pinned`), explicitly pinned tools,
+`always_load` tools, the discovery tool itself, and any tool in no group. A host
+that wants a tool deferrable says so by grouping it. Nothing is held back at all
+unless a discovery tool (role `discovers_tools`) is registered and admitted,
+because a catalogue that points at a tool the model cannot call is worse than no
+catalogue.
+
+Held-back tools stay **admitted** by the visibility policy: they are only not
+advertised. A model that calls one by its exact name is served (see
+[below](#calls-of-tools-that-were-not-advertised)).
+
+The decision is made once, not per request, because the catalogue it produces
+sits at the head of the cached prompt: remade per request, it would move every
+time the answer flipped.
+
+### The catalogue
+
+When anything is held back, one `<system-reminder>` block follows the skill
+catalogue in the system prompt: a sentence saying how to load a tool, a sentence
+saying that a dedicated tool beats a workaround with a general one, and one line
+per held-back group with its description and its **exact** tool names — or, for
+a group declared by prefix with more than `tool_catalogue_max_listed_names`
+held-back tools, the exact prefix and a count:
+
+```text
+- github: GitHub issues and pull requests. Tools: Mcp_Github_* (26 tools)
+- scheduling: Timed and recurring jobs. Tools: IntentCreate, ScheduleCreate
+```
+
+Exact names matter: a model that has to guess a name gets its case wrong. The
+second sentence matters more than it looks — a model that cannot see a tool
+reaches for the nearest one it can (a service started with a shell command, two
+edits instead of one multi-edit), and that, rather than a failed search, is the
+usual way a held-back tool goes unused. The block is built from the decision, in
+name order, so it is byte-identical on every request and after a resume. When
+nothing is held back no block is emitted, and the prompt is exactly what it
+would be without groups.
+
+### `ToolSearch`
+
+`protocore/tools/tool_search.py` ships the discovery tool:
+`ToolSearchTool(registry)`, named `ToolSearch`, carrying the role
+`discovers_tools` in its own `tool_roles`, `always_load`, and concurrent-safe.
+The loop advertises it **only while something is held back**; with the whole
+catalogue on the surface it has nothing to find, and a model offered a search
+it does not need spends turns on it.
+
+- `query` in free text returns up to `tool_search_max_results` matches, best
+  first, one line each — `Name(param1, param2*) — first sentence`, required
+  parameters starred — and loads the first `tool_search_autoload_count` of them.
+  A model that searches finds the tool it needs among the first three nearly
+  every time.
+- `select:Name1,Name2` loads exactly those tools (a name in the wrong case is
+  still accepted). An unknown name is answered with its nearest admitted names.
+- The first line of the result says which tools are now loaded and callable.
+- The live visibility policy is read from `ToolContext.metadata`
+  (`TOOL_VISIBILITY_POLICY_METADATA_KEY`), so the search never lists, suggests
+  or loads a tool the dispatch gate would refuse, and a blocked name is never
+  offered as "close".
+
+The tool only ranks and reports. It names what it loaded under
+`TOOLS_LOADED_METADATA_KEY` in its result's metadata, and the loop — which owns
+the surface — loads them, believing that key only from a tool in the
+`discovers_tools` role and only for names the policy (and a child's declared
+tool set) admits. The tunables are read off the run's constants on
+`ToolContext.run_state.rc`; an engine built without a host run state carries its
+own constants there.
+
+### Discovery order and the prompt cache
+
+Loaded tools are **appended** to the end of the advertised list, in the order
+they were discovered, and stay there. The base surface stays name-sorted and
+does not move when a tool is loaded, and a loaded tool does not move when
+another one is, so a prefix-caching provider re-reads only the tail: one loaded
+schema costs on the order of a couple of thousand uncached tokens, not the whole
+prefix. A tool the run searched for that is already on the surface is not loaded
+again.
+
+The run keeps loaded tools in discovery order with each one's last use
+(`ContextManager.discover_tool`, `note_tool_used`). `pinned_tool_max_count` caps
+them, but the cap is applied — least recently used first — only where the prompt
+prefix starts over anyway: after compaction, at a turn boundary (`rearm`), and
+when a run starts. Unloading a tool in the middle of a run would pull a schema
+out from under a model that may be about to call it, and would cost the cache
+exactly what the cap exists to save. The one exception is a provider limit:
+when base plus loaded tools would exceed `max_advertised_tools`, the least
+recently used loaded tools are left off that request (they stay loaded).
+
+The loaded tools and the held-back groups travel in the snapshot
+(`discovered_tools`, `deferred_tool_groups`), and a resumed run replays the
+decision instead of measuring again. A host that wants the next run of a session
+to start with the same tools passes the last run's list as
+`QueryEngineConfig.discovered_tools`; it is in the snapshot and in every
+`tool_surface_advertised` event (`discovered_tool_names`, discovery order).
+
+### Calls of tools that were not advertised
+
+Dispatch checks the visibility policy, not the advertised list, so a call of a
+held-back tool by its exact name is served, as it always was. It is also
+**loaded**, so its schema is in front of the model from the next request, and
+the loop emits `tool_unadvertised_call`. A name that is not registered at all is
+answered with `unknown tool: 'X'. Did you mean: A, B, C?` — up to three
+registered names the policy admits, compared case-insensitively.
+
+### A runaway batch
+
+`max_tool_calls_per_turn` (default 64) bounds the tool calls dispatched from one
+model message. The calls past it are each answered with an error and never run,
+so every call still has its result and the transcript stays valid. They do not
+count as the tool failing — a thousand refused copies of one search would
+otherwise trip the circuit breaker on it. More than a thousand parallel calls in
+one message has been seen in practice.
+
+### Why per-message clipping is discouraged
+
+`tool_retrieval_top_k` still clips the surface to the tools that best match the
+latest user message, but it is off by default and not recommended. It re-ranks
+the surface on every user message, so the tool list — and with it the provider's
+cached prefix — changes whenever the message does. It ranks the user's words,
+not the model's: a Russian message against English descriptions leaves the right
+tool out about half the time, and a model that cannot see the tool it needs
+tends to invent a name for it. A model searching with `ToolSearch` writes its own
+query, usually in English, and finds the tool. Hold groups back instead.
+
+### Schemas as text
+
+Delivering a loaded tool as text in a result, called through a generic
+`CallTool(name, arguments)`, would keep the tool list constant. It is not
+implemented. Measured against loading, it answered worse on weaker models, which
+filled arguments without the provider's constrained decoding, and the cache it
+saves on a prefix-caching provider is the few thousand tokens appending already
+costs. Doing it properly would also mean rewriting each `CallTool` into the real
+call before the permission gate, hooks, circuit breaker and preconditions see
+it, and validating arguments against a schema the provider no longer enforces.
 
 ---
 

@@ -27,9 +27,11 @@ exhaustively and reused across products.
 - **A ReAct runtime** — `QueryEngine` owns the per-run mutable state, `query()`
   drives one turn and yields a stream of typed `TurnEvent`s. Snapshot and resume
   are first-class, so a run survives a process restart.
-- **A three-layer tool surface** — tenant policy, then a lean clipped surface,
-  then progressive discovery over BM25 retrieval, with a permission gate in
-  front of dispatch.
+- **A tool surface that scales with the catalogue** — tenant policy, the whole
+  surface while it fits, and past a token budget or a provider's tool limit,
+  declared tool groups held back behind a catalogue line and loaded on demand
+  with `ToolSearch` (BM25F retrieval, English and Russian), appended so the
+  cached prompt prefix survives; a permission gate in front of dispatch.
 - **Two-tier context compaction** — the loop keeps working when the transcript
   outgrows the window, and the compaction is deterministic enough to test.
 - **524 runtime constants** — every tunable value is a field on a frozen
