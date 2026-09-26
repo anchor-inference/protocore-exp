@@ -155,9 +155,10 @@ applies three layers:
    visible set.
 2. **Clipping** — if `top_k is None` or the visible set is already `<= top_k`,
    return it sorted by name (no retrieval at all).
-3. **Progressive discovery** — otherwise BM25-rank the visible set by the recent
-   user `query` (`runtime/tool_retrieval.py`), always include the `pinned`
-   tools, and keep the top-K by score.
+3. **Progressive discovery** — otherwise always include the `pinned`,
+   `forced_pinned` and `always_load` tools, and fill the remaining slots with
+   the best-ranked of the rest for the recent user `query` (see
+   [Tool retrieval](#tool-retrieval)).
 
 ```python
 def compute_effective_surface(
@@ -167,17 +168,106 @@ def compute_effective_surface(
     *,
     query: str = "",
     top_k: int | None = None,
+    retrieval: RetrievalSettings | None = None,
 ) -> Sequence[ToolDefinition]: ...
 ```
 
 Whichever layer runs, the **final ordering is always name-ascending** — the
 retrieval order drives *selection*, but the emitted list is sorted by name so
 the LLM context stays byte-stable and the KV-prefix cache survives across turns.
-The clip threshold is the RC `tool_retrieval_top_k` passed by the loop.
+The clip threshold is the RC `tool_retrieval_top_k` passed by the loop, and
+`retrieval` is `RetrievalSettings.from_constants(rc)`.
 
-See the
-[Tool retrieval / pool / registry / 3-layer surface](architecture.md#technology-inventory)
-section for the retrieval internals.
+`ToolRegistry.search(query, top_k=...)` — the path a `ToolSearch`-style tool
+calls — differs in one respect: it returns tools in **rank order**, best first,
+ties broken by name. A search result is read once by the model, and the order is
+the only way it learns which hit fits best.
+
+---
+
+## Tool retrieval
+
+`runtime/tool_retrieval.py` ranks tools lexically, in pure Python, with no
+dependency beyond the standard library. The same engine serves the per-turn clip
+and `search`.
+
+**What is indexed.** Each tool is five fields: its name, its `search_hint`, the
+first sentence of its description, the rest of the description, and its
+parameter names and parameter descriptions. The hint and the parameters are for
+finding the tool only; neither is added to the schema the model sees.
+
+**How text is analysed** (`runtime/text_analysis.py`, the same steps for the
+catalogue and the query):
+
+- identifiers are split — CamelCase, `snake_case`, `kebab-case`, dotted paths,
+  letter/digit boundaries — and the joined form is kept as well, so
+  `BrowserOpen` matches both `browser open` and `browseropen`;
+- text is case-folded and `ё` is spelled `е`;
+- English and Russian stopwords are dropped, including conversational fillers
+  ("please", "слушай", "короче", "плз");
+- words are stemmed (`runtime/stemmers.py`): the Snowball Russian stemmer for
+  Cyrillic, the original Porter stemmer for English. Tokens shorter than three
+  letters are left alone.
+
+**How a query is scored.** BM25F: a term's frequency in each field is
+normalised by that field's average length, weighted, summed across fields and
+saturated once. The weights and the BM25 parameters are constants:
+
+| Constant | Default |
+|---|---|
+| `tool_retrieval_name_weight` | 1.0 |
+| `tool_retrieval_search_hint_weight` | 1.0 |
+| `tool_retrieval_summary_weight` (first sentence) | 1.0 |
+| `tool_retrieval_description_weight` (the rest) | 0.6 |
+| `tool_retrieval_parameters_weight` | 0.3 |
+| `tool_retrieval_bm25_k1` | 1.5 |
+| `tool_retrieval_bm25_b` | 0.3 |
+| `tool_retrieval_lexicon_weight` | 0.5 |
+
+They were chosen together by cross-validation over labelled English and Russian
+queries against a catalogue of about 700 tools. With the lexicon turned off, a
+hint weight of 2 does better than 1.
+
+**Russian queries against English tools.** A Russian query shares no words with
+an English description. The registry expands each Russian stem of the query to
+the English stems it translates to, at `tool_retrieval_lexicon_weight` relative
+to the query's own terms. The lexicon ships as package data
+(`runtime/tool_retrieval_lexicon.json`, about two thousand English words with
+their Russian equivalents); it is generic developer vocabulary translated from
+the English of tool descriptions, never from queries. It is the one thing that
+lets a Russian query find a third-party tool that will never carry a Russian
+hint. A host passes its own with `ToolRegistry(lexicon=Lexicon.from_translations(...))`,
+or turns expansion off with `lexicon=None` or a weight of 0.
+
+**When nothing scores**, a second stage matches loose substrings and shared
+prefixes (`normalized_fallback_match`), which still finds a partial tool name or
+an inflection the stemmer does not reduce. It serves both `search` and the clip.
+
+**Cost.** The analysed catalogue and the scoring constants are built once per
+catalogue version and settings and cached on the registry instance; `register`
+and `unregister` start a new version. At about 700 tools a build takes around
+150 ms and a query about a third of a millisecond.
+
+**A host ranker.** `ToolRegistry(retriever=...)` accepts an `IToolRetriever`
+(`contracts/tool_retrieval.py`): a synchronous `rank(query, documents, limit)`
+returning names, best first. Its ranking is fused with the lexical one by
+reciprocal rank fusion (`reciprocal_rank_fusion`, `k` =
+`tool_retrieval_fusion_rank_constant`). An embedding ranker is the intended use;
+the core ships none.
+
+### Writing a `search_hint`
+
+Descriptions are written for the model, in English; the hint is written for
+the person or model searching. Every host tool should carry one:
+
+- **8–14 English synonyms** for the action and its object, not repeating the
+  tool's name ("screenshot capture snap picture image page").
+- **10–16 Russian words**: the dictionary form **and** the imperative of each
+  verb (открыть открой, напомнить напомни), the nouns of the objects it acts on,
+  and the slang and loanwords people actually type (скинуть скинь, глянуть
+  глянь, коммит, пулреквест, напоминалка).
+- **Avoid generic words** that would match other tools as well — "запрос",
+  "задача", "сервер" without a qualifier pull queries towards the wrong tool.
 
 ---
 

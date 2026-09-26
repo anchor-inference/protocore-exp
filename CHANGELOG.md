@@ -6,6 +6,52 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Tool retrieval is BM25F over five fields, with stemming and Russian query
+  expansion.** A tool is indexed as its name, `search_hint`, the first sentence
+  of its description, the rest of it, and its parameter names and
+  descriptions, each weighted (`tool_retrieval_name_weight`,
+  `tool_retrieval_search_hint_weight`, `tool_retrieval_summary_weight`,
+  `tool_retrieval_description_weight`, `tool_retrieval_parameters_weight`,
+  `tool_retrieval_bm25_k1`, `tool_retrieval_bm25_b`). Identifiers are split
+  (`BrowserOpen` matches "browser open"), `ё` is folded, conversational
+  fillers are stopwords, and both sides are stemmed with the Snowball Russian
+  and Porter English stemmers. A Russian query is expanded through a bundled
+  Russian-to-English lexicon (`tool_retrieval_lexicon_weight`), which is what
+  lets it find tools described only in English. On a labelled set of 656
+  English and Russian queries against about 700 tools, Recall@5 rose from 0.41
+  to 0.67, and to 0.78 with a Russian `search_hint` on every host tool. See
+  `docs/tools.md`.
+- **`ToolRegistry.search` returns tools in rank order**, best first, ties by
+  name. It used to re-sort its result by name, which hid which hit fit best.
+  The advertised surface from `compute_effective_surface` stays in name order.
+- **The index is built once per catalogue version** and cached on the registry
+  instance, instead of re-tokenising every tool on every query: about 0.3 ms per
+  query at 700 tools, down from 15–20 ms.
+- **The per-turn clip uses the normalized fallback too** when nothing scores,
+  as `search` already did. The fallback no longer counts one- and two-letter
+  words and stopwords of a description, which made the article "a" match any
+  query token containing the letter.
+- `IToolRegistry.search` and `compute_effective_surface` take an optional
+  `retrieval: RetrievalSettings`; the loop passes
+  `RetrievalSettings.from_constants(rc)`.
+
+### Added
+
+- `IToolRetriever` and `reciprocal_rank_fusion` (`contracts/tool_retrieval.py`):
+  a host may pass its own ranker, for example an embedding model, as
+  `ToolRegistry(retriever=...)`, and its ranking is fused with the lexical one
+  (`tool_retrieval_fusion_rank_constant`). `ToolRegistry(lexicon=...)` takes a
+  host's own `Lexicon`, or `None` to turn expansion off.
+
+### Removed
+
+- `retrieve_tools`, `bm25_score`, `compute_idf`, `compute_avgdl`,
+  `reduce_query`, `build_candidate` and `ToolRetrievalCandidate`: replaced by
+  `ToolIndex`, `AnalyzedCatalogue` and `ToolDocument`.
+  `normalized_fallback_match` now takes `ToolDocument`s and returns names.
+
 ## [2.0.0a22] - 2026-09-26
 
 ### Changed

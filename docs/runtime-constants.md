@@ -221,6 +221,23 @@ The literal in the "wrong" example is exactly what the model exists to
 eliminate: the bound lives on the `max_turns_per_run` field, not in the
 branch.
 
+## Knobs that are tuned together
+
+Most fields stand alone: one threshold, one effect. The tool-retrieval ranking
+fields do not. `tool_retrieval_name_weight`,
+`tool_retrieval_search_hint_weight`, `tool_retrieval_summary_weight`,
+`tool_retrieval_description_weight`, `tool_retrieval_parameters_weight`,
+`tool_retrieval_bm25_k1` and `tool_retrieval_bm25_b` were chosen as one set, by
+cross-validation over labelled English and Russian queries, and moving one
+changes what the others should be. `tool_retrieval_lexicon_weight` switches the
+Russian-to-English query expansion (0 turns it off); with it off, a hint weight
+of 2 is the better fit. `tool_retrieval_fusion_rank_constant` matters only when
+a host supplies its own ranker. The loop passes all of them to the registry as
+one `RetrievalSettings` value per call, and the registry keeps an index per
+distinct value, so a tenant with its own weights gets its own index rather than
+another tenant's. What the fields weigh is described in
+[`tools.md`](tools.md#tool-retrieval).
+
 ## See also
 
 - [`architecture.md`](architecture.md) — the LoopConstants system in the

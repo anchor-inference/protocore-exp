@@ -84,6 +84,7 @@ from protocore.contracts.tool_registry import (
     ToolVisibilityPolicy,
     policy_admits,
 )
+from protocore.contracts.tool_retrieval import RetrievalSettings
 from protocore.contracts.tools import Tool
 from protocore.contracts.types import (
     BlobMetadata,
@@ -2141,8 +2142,9 @@ class InMemoryToolRegistry(IToolRegistry):
         tenant_id: str = "",
         whitelist: Sequence[str] | None = None,
         policy: ToolVisibilityPolicy | None = None,
+        retrieval: RetrievalSettings | None = None,
     ) -> Sequence[Tool]:
-        del tenant_id
+        del tenant_id, retrieval
         pool: list[Tool] = list(self._tools.values())
         if whitelist is not None:
             allow = frozenset(whitelist)
@@ -2167,8 +2169,9 @@ class InMemoryToolRegistry(IToolRegistry):
         *,
         query: str = "",
         top_k: int | None = None,
+        retrieval: RetrievalSettings | None = None,
     ) -> Sequence[ToolDefinition]:
-        del query
+        del query, retrieval
         tools = self.list_for_tenant(tenant_id, policy)
         defs = [t.definition for t in tools]
         if top_k is not None:

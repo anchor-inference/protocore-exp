@@ -70,7 +70,7 @@ vocabulary (`RegistrationKind`, `LifecycleVerdict`, `LifecycleContext`,
 `DefaultShellSafetyPolicy`, the `@tool` decorator, the envelope/JSON
 utilities, and the token-counting helpers (`LanguageProfile`,
 `chars_per_token`, `detect_profile`, `estimate_tokens`). It does **not**
-re-export `derive_budgets`, `retrieve_tools`, or `bm25_score` — those are
+re-export `derive_budgets` or the tool-retrieval engine (`ToolIndex`, `Lexicon`) — those are
 imported directly from their runtime modules (`runtime/context/budgets.py`,
 `runtime/tool_retrieval.py`).
 
@@ -223,7 +223,7 @@ the emitted `TurnEvent`s out over SSE (Redis pub/sub at the host layer).
    (3) UserPromptSubmit HOOK ────────────►│  _safe_hook_invoke → deny? → FAILED
                                           │
    (4) BUILD CONTEXT ────────────────────►│  tools = registry.compute_effective_surface
-                                          │     (policy → clip → BM25 retrieval)
+                                          │     (policy → clip → BM25F retrieval)
                                           │  skill catalog (alpha Skill() lines) ◄── SKILLS
                                           │  context_manager.build_context(history,…)
                                           │     ◄── MEMORY auto-recall injected (the host)
@@ -320,7 +320,7 @@ governing `LoopConstants` field(s) and their safe/off default.
 |---|---|---|---|---|
 | ReAct loop / orchestrator / query engine | `runtime/query.py`, `runtime/query_engine.py`, `runtime/loop_state.py`, `runtime/loop_strategies.py` | n/a (always on); recovery branches RC-gated | Yes | Yes |
 | Tool dispatch + gating | `runtime/tool_dispatch.py`, `runtime/tool_permission.py` | gate always on; consecutive-error cap RC | Yes | Yes |
-| Tool retrieval / registry | `runtime/tool_registry.py`, `runtime/tool_retrieval.py` | `tool_retrieval_top_k` (clip threshold) | Yes | Yes |
+| Tool retrieval / registry | `runtime/tool_registry.py`, `runtime/tool_retrieval.py`, `runtime/text_analysis.py`, `runtime/stemmers.py` | `tool_retrieval_top_k` (clip threshold); `tool_retrieval_name_weight`, `tool_retrieval_search_hint_weight`, `tool_retrieval_summary_weight`, `tool_retrieval_description_weight`, `tool_retrieval_parameters_weight`, `tool_retrieval_bm25_k1`, `tool_retrieval_bm25_b` (BM25F); `tool_retrieval_lexicon_weight` (query expansion); `tool_retrieval_fusion_rank_constant` (host ranker fusion) | Yes | Yes |
 | Tool preconditions | `runtime/tool_preconditions.py`, `runtime/run_tool_preconditions.py` | `tool_preconditions_enabled` = `False`; run-level `QueryEngineConfig.tool_preconditions` empty | DAG + run-level forcer: Yes | Yes |
 | Turn policies | `contracts/turn_policy.py`, `runtime/turn_policies/*` | each policy reads its own RC fields; the ORDER is core-owned (`TURN_POLICY_ORDER`) | Yes — the driver consults the registry at 14 coordinates | Yes |
 | Tool roles + argument spellings | `contracts/tool_roles.py`, `runtime/child_capabilities.py` | none — the map is `QueryEngineConfig.tool_roles`, declared by the host at registration | Yes | Yes |

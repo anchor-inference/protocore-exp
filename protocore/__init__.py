@@ -20,7 +20,7 @@ Public API:
     - :mod:`protocore.runtime.context.budgets.derive_budgets`
     - :mod:`protocore.runtime.wire_format` compaction placeholders
     - :mod:`protocore.runtime.chain_parser` shell-grammar parser
-    - :mod:`protocore.runtime.tool_retrieval` BM25 multilingual retrieval
+    - :mod:`protocore.runtime.tool_retrieval` BM25F multilingual tool retrieval
 
 Loop machinery (QueryEngine + query()) is available in :mod:`protocore.runtime.query_engine`.
 """

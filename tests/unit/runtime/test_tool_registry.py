@@ -184,11 +184,10 @@ def test_search_breaks_bm25_ties_by_name_asc_not_registration_order() -> None:
     """BM25 tie-breaking must be name-ASC (docstring invariant).
 
  The :meth:`ToolRegistry.search` docstring promises that ties within
- ranked groups are broken by ``name`` ASC. The BM25 stable sort in
- :func:`retrieve_tools` preserves the candidate list order for
- equal-score rows, so the candidate list MUST be name-ASC for the
- contract to hold across pods that registered the same tools in
- different orders.
+ ranked groups are broken by ``name`` ASC. A stable sort by score alone
+ would keep equal-score rows in registration order, so the tie-break
+ has to be the name itself for the contract to hold across pods that
+ registered the same tools in different orders.
 
  Regression test for with three tools sharing an identical
  description (hence identical BM25 score for any matching query),

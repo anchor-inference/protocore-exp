@@ -1,7 +1,7 @@
 """Concrete :class:`ToolRegistry` — in-core implementation of :class:`IToolRegistry`.
 
 Implements the 3-layer tool surface (policy → clipping →
-progressive discovery) using BM25 retrieval from
+progressive discovery) using the BM25F retrieval of
 :mod:`protocore.runtime.tool_retrieval`.
 
 This is the **default** registry shipped by core. A host may substitute a
@@ -17,6 +17,9 @@ Thread / async safety
 * Snapshot reads (``list_all`` / ``compute_effective_surface``) take a
  copy under the lock and operate lock-free thereafter — keeps the hot
  per-turn path cheap.
+* The retrieval index is built outside both locks and cached per catalogue
+ generation (see :meth:`ToolRegistry._index_for`), so a registration never
+ waits for an index build and a query never rebuilds one it can reuse.
 
 Tenant scoping
 --------------
@@ -31,20 +34,34 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Iterable, Sequence
+from typing import Final, Literal
 
+from protocore.contracts.runtime_constants import LoopConstants
 from protocore.contracts.tool_registry import (
     IToolRegistry,
     ToolVisibilityPolicy,
     policy_admits,
 )
+from protocore.contracts.tool_retrieval import (
+    IToolRetriever,
+    RetrievalSettings,
+    ToolDocument,
+    reciprocal_rank_fusion,
+)
 from protocore.contracts.tools import Tool
 from protocore.contracts.types import ToolDefinition
 from protocore.runtime.tool_retrieval import (
-    ToolRetrievalCandidate,
-    build_candidate,
-    normalized_fallback_match,
-    retrieve_tools,
+    AnalyzedCatalogue,
+    Lexicon,
+    ToolIndex,
+    parameter_text,
 )
+
+# Indexes kept per catalogue generation, one per distinct settings. A pod
+# normally serves one settings value; a few tenants with their own weights fit,
+# and the bound keeps a stream of distinct weights from growing the cache
+# without limit. Not a tunable: it bounds memory, not behaviour.
+_MAX_CACHED_INDEXES: Final[int] = 4
 
 
 def _search_hint(tool: Tool) -> str:
@@ -52,10 +69,21 @@ def _search_hint(tool: Tool) -> str:
 
     Read via ``getattr`` so plain core tools without the ClassVar stay
     supported. The hint joins the DISCOVERY corpus only (never the wire
-    description) — see :func:`build_candidate`.
+    description) — see :class:`~protocore.contracts.tool_retrieval.ToolDocument`.
     """
     raw = getattr(tool, "search_hint", "")
     return raw if isinstance(raw, str) else ""
+
+
+def tool_document(tool: Tool) -> ToolDocument:
+    """The searchable form of ``tool``: its wire text plus hint and parameters."""
+    definition = tool.definition
+    return ToolDocument(
+        name=tool.name,
+        description=definition.description,
+        search_hint=_search_hint(tool),
+        parameters=parameter_text(definition.parameters.properties),
+    )
 
 
 class ToolRegistry(IToolRegistry):
@@ -67,17 +95,42 @@ class ToolRegistry(IToolRegistry):
  * Tools registered at startup via :meth:`register` (idempotent on
  ``tool.name`` — re-registration overwrites the previous binding).
  * Looked up per-turn via :meth:`get` (O(1) dict access).
- * Surfaced per-turn via :meth:`compute_effective_surface` (BM25 over
+ * Surfaced per-turn via :meth:`compute_effective_surface` (BM25F over
  the policy-filtered subset).
 
- Sort invariant: every public list/search
- result is sorted by ``Tool.name`` ascending for KV-prefix-cache
- stability across turns.
+ Sort invariant: every public list result, and the advertised surface,
+ is sorted by ``Tool.name`` ascending for KV-prefix-cache stability
+ across turns. :meth:`search` is the exception: it returns rank order,
+ because which hit is best is the information its caller asked for.
+
+ ``lexicon`` is the Russian-to-English query expansion: ``"bundled"``
+ (the default) loads the one shipped with the package on first use, a
+ :class:`Lexicon` supplies a host's own, ``None`` turns expansion off.
+ ``retriever`` is an optional host ranker fused with the lexical ranking
+ by reciprocal rank fusion.
  """
 
-    def __init__(self, tools: Iterable[Tool] | None = None) -> None:
+    def __init__(
+        self,
+        tools: Iterable[Tool] | None = None,
+        *,
+        lexicon: Lexicon | Literal["bundled"] | None = "bundled",
+        retriever: IToolRetriever | None = None,
+    ) -> None:
         self._lock = threading.RLock()
         self._tools: dict[str, Tool] = {}
+        # Bumped by every register/unregister; an index built for an older
+        # generation is never used again.
+        self._generation = 0
+        self._retriever = retriever
+        self._lexicon_choice = lexicon
+        self._lexicon: Lexicon | None = lexicon if isinstance(lexicon, Lexicon) else None
+        self._index_lock = threading.Lock()
+        self._catalogue: tuple[int, AnalyzedCatalogue] | None = None
+        self._indexes: dict[RetrievalSettings, ToolIndex] = {}
+        # The settings used when a caller passes none — the defaults of the
+        # constants model, built once rather than per query.
+        self._default_settings = RetrievalSettings.from_constants(LoopConstants())
         if tools is not None:
             for tool in tools:
                 self.register(tool)
@@ -95,11 +148,13 @@ class ToolRegistry(IToolRegistry):
         """
         with self._lock:
             self._tools[tool.name] = tool
+            self._generation += 1
 
     def unregister(self, name: str) -> None:
         """Remove a tool by name. Idempotent — no error if absent."""
         with self._lock:
-            self._tools.pop(name, None)
+            if self._tools.pop(name, None) is not None:
+                self._generation += 1
 
     def get(self, name: str) -> Tool | None:
         """Fetch tool by name; ``None`` if not registered."""
@@ -167,8 +222,9 @@ class ToolRegistry(IToolRegistry):
         tenant_id: str = "",
         whitelist: Sequence[str] | None = None,
         policy: ToolVisibilityPolicy | None = None,
+        retrieval: RetrievalSettings | None = None,
     ) -> Sequence[Tool]:
-        """BM25-ranked search across the policy-filtered subset.
+        """The ``top_k`` tools that best match ``query``, best first.
 
         ``whitelist`` (if provided) narrows the candidate pool — used by
         the :class:`ToolSearch` tool to restrict matches to the
@@ -176,60 +232,37 @@ class ToolRegistry(IToolRegistry):
         per-run visibility contract (:func:`policy_admits` — ``blocked``
         always denied; a non-empty ``visible`` admits only
         ``visible | pinned | forced_pinned``) so discovery can never return
-        a schema the dispatch gate would refuse (tools-initiative A2).
+        a schema the dispatch gate would refuse.
 
-        The searchable corpus is ``name + description + search_hint`` —
-        the optional per-tool multilingual hint makes RU discovery queries
-        match without changing the LLM-visible description. When BM25 finds
-        nothing for a non-empty query, a normalized substring/prefix
-        fallback (:func:`normalized_fallback_match`) re-ranks the same
-        candidates so inflected/partial queries still discover tools.
+        Results are in RANK order, ties broken by name. This used to be
+        re-sorted by name, which threw away the one thing a caller cannot
+        work out for itself — which hit fits best — and a model reading a
+        name-sorted list picked the alphabetically first plausible tool.
+        Byte-stability matters for the advertised surface, not for a
+        search result the model reads once.
 
-        Empty query returns the first ``top_k`` candidates by name
-        order (deterministic). Sort invariant within ranked groups —
-        ties broken by name ASC.
+        ``retrieval`` is the run's :class:`RetrievalSettings`; without one
+        the constants model's defaults apply. An empty query returns the
+        first ``top_k`` candidates by name (deterministic).
         """
         del tenant_id  # baseline: single namespace
-        with self._lock:
-            pool = list(self._tools.values())
-
+        if top_k <= 0:
+            return []
+        generation, tools = self._snapshot()
+        pool = list(tools.values())
         if whitelist is not None:
             allow = frozenset(whitelist)
             pool = [t for t in pool if t.name in allow]
         if policy is not None:
             pool = [t for t in pool if policy_admits(policy, t.name)]
-
-        # Sort invariant: pool is name-ASC (cache-prefix
-        # stability + cross-pod determinism). The BM25 stable sort in
-        # :func:`retrieve_tools` breaks equal-score ties by candidate-list
-        # order, so the candidate list MUST be name-ASC for the docstring's
-        # "ties broken by name ASC" promise to hold regardless of the order
-        # tools were registered in. without this, two pods that
-        # registered the same tools in different orders could surface
-        # different results for the same query at the top_k cut.
         pool.sort(key=lambda t: t.name)
 
-        candidates = [
-            build_candidate(t.name, t.definition.description, _search_hint(t))
-            for t in pool
-        ]
-        name_to_tool = {t.name: t for t in pool}
-
-        retrieved = retrieve_tools(query, candidates, top_k=top_k)
-        if not retrieved and not query.strip():
-            # Empty query: return first top_k by name (deterministic).
-            return sorted(pool, key=lambda t: t.name)[:top_k]
-        if not retrieved and query.strip():
-            # Zero BM25 overlap (e.g. an inflected RU query) — normalized
-            # substring/prefix fallback over the SAME policy-filtered pool.
-            retrieved = normalized_fallback_match(query, candidates, top_k=top_k)
-        # Final ordering: name ASC (cache-stable). The retrieval order is
-        # informative for selection but the search result must stay
-        # byte-deterministic per the sort invariant — same contract as
-        # :meth:`compute_effective_surface`.
-        chosen = [name_to_tool[c.name] for c in retrieved if c.name in name_to_tool]
-        chosen.sort(key=lambda t: t.name)
-        return chosen
+        if not query.strip():
+            return pool[:top_k]
+        allowed = frozenset(t.name for t in pool)
+        ranked = self._rank(query, generation, tools, allowed, top_k, retrieval)
+        by_name = {t.name: t for t in pool}
+        return [by_name[name] for name in ranked]
 
     def compute_effective_surface(
         self,
@@ -238,6 +271,7 @@ class ToolRegistry(IToolRegistry):
         *,
         query: str = "",
         top_k: int | None = None,
+        retrieval: RetrievalSettings | None = None,
     ) -> Sequence[ToolDefinition]:
         """3-layer filter: policy → clipping → progressive discovery.
 
@@ -249,24 +283,29 @@ class ToolRegistry(IToolRegistry):
  1. Apply :class:`ToolVisibilityPolicy` (visible + blocked), then
  re-admit ``forced_pinned`` tools that ``blocked`` did NOT deny —
  the core tool-surface floor must survive a tenant ``visible``
- whitelist, not just the BM25 clip (see
+ whitelist, not just the retrieval clip (see
  :meth:`_floored_visible_tools`).
  2. If ``top_k`` is ``None`` or list ≤ top_k: return floored set
  sorted by name (no retrieval).
- 3. Otherwise: BM25 rank by ``query``; pinned (policy.pinned) +
- forced_pinned + ``always_load`` tools always included; top-K by
- score; ties broken by name.
+ 3. Otherwise: pinned (policy.pinned) + forced_pinned + ``always_load``
+ tools always included; the remaining slots go to the best-ranked
+ of the rest for ``query`` (the same ranking as :meth:`search`,
+ fallback stage included). A query that matches nothing, or an
+ empty one, leaves pinned tools only — respectively the pinned
+ tools plus the first others by name.
 
- ``always_load`` (tools-initiative A2 — discovery resurrection): a
- tool whose class sets ``always_load = True`` (e.g. ``ToolSearch``)
- is ALWAYS part of the advertised surface, independent of BM25 score
- and ``top_k`` — pin semantics, but class-driven instead of
- policy-driven. Precedence: the visibility policy still wins —
- ``blocked`` denies an always-load tool outright, and a non-empty
- ``visible`` whitelist that omits it keeps it out (only
- ``forced_pinned`` re-admits past the whitelist). It survives ONLY
- the layer-2/3 clip.
+ ``always_load``: a tool whose class sets ``always_load = True``
+ (e.g. ``ToolSearch``) is ALWAYS part of the advertised surface,
+ independent of its score and ``top_k`` — pin semantics, but
+ class-driven instead of policy-driven. Precedence: the visibility
+ policy still wins — ``blocked`` denies an always-load tool outright,
+ and a non-empty ``visible`` whitelist that omits it keeps it out
+ (only ``forced_pinned`` re-admits past the whitelist). It survives
+ ONLY the layer-2/3 clip.
 
+ The result is sorted by name whichever layer ran: the ranking
+ drives *selection*, but the LLM context must stay byte-deterministic
+ for the prefix cache.
  """
         visible_tools = self._floored_visible_tools(tenant_id, policy)
 
@@ -274,41 +313,129 @@ class ToolRegistry(IToolRegistry):
         if top_k is None or len(visible_tools) <= top_k:
             return [t.definition for t in visible_tools]
 
-        # ``_search_hint`` joins the per-turn clip corpus too (NOT just
-        # :meth:`search` / ToolSearch) — a tool's RU+EN ``search_hint`` must
-        # feed the BM25 candidate so a Russian prompt that scores ~0 against
-        # the EN name/description still surfaces it in the advertised payload,
-        # not only via progressive discovery. The hint never reaches the
-        # wire ``description`` (see :func:`build_candidate`). Helps both
-        # bundled and dynamic tools.
-        candidates = [
-            build_candidate(t.name, t.definition.description, _search_hint(t))
-            for t in visible_tools
-        ]
-        name_to_tool = {t.name: t for t in visible_tools}
         # Layer-3 pins + the core floor. ``forced_pinned`` is already in the
         # pool (``_floored_visible_tools`` re-admitted it past the ``visible``
-        # whitelist), but we ALSO pass it to retrieval so it bypasses the BM25
-        # clip: a Russian prompt scores 0.0 against English tool names and
-        # would otherwise drop the floor at the top-K cut. ``pinned``
-        # is the per-session ToolSearch/progressive-discovery set. ``always_load``
-        # names are the class-driven floor (policy-admitted only — derived from
-        # the post-policy pool, so ``blocked``/whitelist still win). Union (not
-        # replace) so all three survive the clip.
+        # whitelist), but it must ALSO bypass the clip: a prompt that matches
+        # none of the floor's words would otherwise drop it at the top-K cut.
+        # ``pinned`` is the per-session ToolSearch/progressive-discovery set.
+        # ``always_load`` names are the class-driven floor (policy-admitted
+        # only — derived from the post-policy pool, so ``blocked``/whitelist
+        # still win). Union (not replace) so all three survive the clip.
         always_load_names = frozenset(
             t.name for t in visible_tools if bool(getattr(t, "always_load", False))
         )
         pinned_names = (
             frozenset(policy.pinned) | policy.forced_pinned | always_load_names
         )
-        retrieved = retrieve_tools(query, candidates, top_k=top_k, pinned=pinned_names)
+        chosen = [t for t in visible_tools if t.name in pinned_names]
+        others = [t for t in visible_tools if t.name not in pinned_names]
+        remaining = max(0, top_k - len(chosen))
+        if remaining and others:
+            if query.strip():
+                # ``search_hint`` joins this corpus too, not only ToolSearch's:
+                # a tool's Russian hint must surface it in the advertised
+                # payload, not only through progressive discovery.
+                generation, tools = self._snapshot()
+                allowed = frozenset(t.name for t in others)
+                ranked = set(self._rank(query, generation, tools, allowed, remaining, retrieval))
+                chosen.extend(t for t in others if t.name in ranked)
+            else:
+                # No retrieval signal (autonomous batch, synthetic resume): the
+                # first others by name rather than none — a zero-tool surface
+                # leaves the model unable to act.
+                chosen.extend(others[:remaining])
 
-        # Final ordering: name ASC (cache-stable). The retrieval order
-        # is informative for selection but the LLM context must stay
-        # byte-deterministic per cache invariant.
-        chosen = [name_to_tool[c.name] for c in retrieved if c.name in name_to_tool]
         chosen.sort(key=lambda t: t.name)
         return [t.definition for t in chosen]
+
+    # ------------------------------------------------------------------
+    # Retrieval
+    # ------------------------------------------------------------------
+
+    def _snapshot(self) -> tuple[int, dict[str, Tool]]:
+        """The catalogue and its generation, read together under the lock."""
+        with self._lock:
+            return self._generation, dict(self._tools)
+
+    def _rank(
+        self,
+        query: str,
+        generation: int,
+        tools: dict[str, Tool],
+        allowed: frozenset[str],
+        limit: int,
+        retrieval: RetrievalSettings | None,
+    ) -> list[str]:
+        """Names from ``allowed``, best first, at most ``limit``.
+
+        Lexical BM25F first; if it scores nothing, the normalized fallback
+        (partial names, unusual inflections). With a host retriever, its
+        ranking and the lexical one are fused by reciprocal rank fusion —
+        over the full rankings, so a tool either ranker places just below
+        the cut can still be lifted into it by the other.
+        """
+        settings = retrieval if retrieval is not None else self._default_settings
+        index = self._index_for(generation, tools, settings)
+        depth = limit if self._retriever is None else len(allowed)
+        ranked = index.rank(query, depth, allowed)
+        if not ranked:
+            ranked = index.fallback(query, depth, allowed)
+        if self._retriever is None:
+            return ranked
+        documents = [document for document in index.documents if document.name in allowed]
+        host_ranked = [
+            name for name in self._retriever.rank(query, documents, len(documents)) if name in allowed
+        ]
+        return reciprocal_rank_fusion(
+            [ranked, host_ranked],
+            limit=limit,
+            rank_constant=settings.fusion_rank_constant,
+        )
+
+    def _index_for(
+        self,
+        generation: int,
+        tools: dict[str, Tool],
+        settings: RetrievalSettings,
+    ) -> ToolIndex:
+        """The index of this catalogue generation under ``settings``.
+
+        Analysis (tokenising and stemming every tool) happens once per
+        generation; scoring constants once per generation and settings.
+        Builds run outside the locks: two threads that miss together both
+        build, and one result wins — cheaper than making every query wait
+        behind a lock for the rare rebuild.
+        """
+        with self._index_lock:
+            cached = self._catalogue
+            if cached is not None and cached[0] == generation:
+                index = self._indexes.get(settings)
+                if index is not None:
+                    return index
+                catalogue = cached[1]
+            else:
+                catalogue = None
+            lexicon = self._lexicon
+        if lexicon is None and self._lexicon_choice == "bundled" and settings.lexicon_weight > 0:
+            lexicon = Lexicon.bundled()
+        if catalogue is None:
+            catalogue = AnalyzedCatalogue(tool_document(tool) for tool in tools.values())
+        index = ToolIndex(catalogue, settings, lexicon)
+        with self._index_lock:
+            if self._lexicon is None and lexicon is not None:
+                self._lexicon = lexicon
+            current = self._catalogue
+            if current is None or current[0] < generation:
+                self._catalogue = (generation, catalogue)
+                self._indexes = {}
+            elif current[0] > generation:
+                # A newer catalogue was indexed while this one was built;
+                # serve this query from its own snapshot but keep the newer.
+                return index
+            if len(self._indexes) >= _MAX_CACHED_INDEXES:
+                self._indexes.pop(next(iter(self._indexes)))
+            self._indexes[settings] = index
+        return index
 
     def _floored_visible_tools(
         self,
@@ -368,4 +495,4 @@ class ToolRegistry(IToolRegistry):
             return name in self._tools
 
 
-__all__ = ["ToolRegistry", "ToolRetrievalCandidate"]
+__all__ = ["ToolRegistry", "tool_document"]

@@ -11,6 +11,7 @@ from typing import Final, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from protocore.contracts.tool_retrieval import RetrievalSettings
 from protocore.contracts.tools import Tool
 from protocore.contracts.types import ToolDefinition
 
@@ -130,15 +131,17 @@ class IToolRegistry(Protocol):
         tenant_id: str = "",
         whitelist: Sequence[str] | None = None,
         policy: ToolVisibilityPolicy | None = None,
+        retrieval: RetrievalSettings | None = None,
     ) -> Sequence[Tool]:
-        """BM25-ranked search across the policy-filtered subset.
+        """Ranked search across the policy-filtered subset, best match first.
 
         ``whitelist`` (if provided) narrows the candidate pool — used by
         the :class:`ToolSearch` tool to restrict matches to the
         subagent's allowed surface. ``policy`` (if provided) applies the
         per-run visibility contract via :func:`policy_admits` so blocked
-        tools never leak through discovery. Empty query returns the first
-        ``top_k`` candidates by name order (deterministic).
+        tools never leak through discovery. ``retrieval`` carries the run's
+        ranking settings; ``None`` means the defaults. Empty query returns
+        the first ``top_k`` candidates by name order (deterministic).
         """
         ...
 
@@ -149,11 +152,13 @@ class IToolRegistry(Protocol):
         *,
         query: str = "",
         top_k: int | None = None,
+        retrieval: RetrievalSettings | None = None,
     ) -> Sequence[ToolDefinition]:
         """3-layer filter: policy → clipping → progressive discovery.
 
-        ``query`` is the recent user message (for BM25 retrieval); empty
-        means "return policy-filtered set without retrieval clipping".
+        ``query`` is the recent user message (for retrieval); ``top_k`` is
+        the clip threshold, ``None`` meaning no clip. ``retrieval`` carries
+        the run's ranking settings; ``None`` means the defaults.
         """
         ...
 

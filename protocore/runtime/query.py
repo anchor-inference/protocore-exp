@@ -95,6 +95,7 @@ from protocore.contracts.tool_chunking import (
     chunkable_content_mutation_names,
     is_chunkable_content_mutation,
 )
+from protocore.contracts.tool_retrieval import RetrievalSettings
 from protocore.contracts.tool_roles import (
     WORKSPACE_INSPECTION_ROLES,
     WORKSPACE_MUTATION_ROLES,
@@ -2301,6 +2302,7 @@ async def _drive_turn(engine: QueryEngine) -> AsyncIterator[TurnEvent]:
             policy=engine.effective_tool_policy,
             query=engine.latest_user_message.text if engine.latest_user_message else "",
             top_k=engine.config.rc.tool_retrieval_top_k,
+            retrieval=RetrievalSettings.from_constants(engine.config.rc),
         )
     )
 
@@ -4485,6 +4487,7 @@ async def _stream_one_assistant_message(
                 policy=engine.effective_tool_policy,
                 query=engine.latest_user_message.text if engine.latest_user_message else "",
                 top_k=engine.config.rc.tool_retrieval_top_k,
+                retrieval=RetrievalSettings.from_constants(engine.config.rc),
             )
         )
         next_history, _ = _llm_history(engine)
@@ -5979,6 +5982,7 @@ async def _rebuild_context_for_recovery(
             policy=engine.effective_tool_policy,
             query=engine.latest_user_message.text if engine.latest_user_message else "",
             top_k=engine.config.rc.tool_retrieval_top_k,
+            retrieval=RetrievalSettings.from_constants(engine.config.rc),
         )
     )
     recovery_history, _ = _llm_history(engine)

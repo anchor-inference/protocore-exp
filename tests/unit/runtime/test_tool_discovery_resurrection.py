@@ -8,9 +8,9 @@ Covers the three core seams the initiative added:
 2. ``ToolRegistry.search`` honours the per-run :class:`ToolVisibilityPolicy`
    (blocked tools never leak through discovery) — and the dispatcher injects
    that policy into ``ToolContext.metadata`` for policy-aware tools.
-3. RU-capable matching — per-tool ``search_hint`` (EN+RU) joins the BM25
+3. RU-capable matching — per-tool ``search_hint`` (EN+RU) joins the
    discovery corpus, and a normalized substring/prefix fallback catches
-   inflected forms BM25 scores 0.0.
+   what the main ranking scores nothing for.
 """
 from __future__ import annotations
 
@@ -19,11 +19,9 @@ from protocore.contracts.tool_registry import (
     ToolVisibilityPolicy,
     policy_admits,
 )
-from protocore.runtime.tool_registry import ToolRegistry
-from protocore.runtime.tool_retrieval import (
-    build_candidate,
-    normalized_fallback_match,
-)
+from protocore.contracts.tool_retrieval import ToolDocument
+from protocore.runtime.tool_registry import ToolRegistry, tool_document
+from protocore.runtime.tool_retrieval import normalized_fallback_match
 from protocore.tools.memory import (
     MEMORY_TOOL_NAMES,
     RECALL_TOOL_NAME,
@@ -270,41 +268,55 @@ def test_ru_query_blocked_memory_stays_hidden() -> None:
 
 
 def test_inflected_ru_query_matches_via_fallback() -> None:
-    """BM25 scores 0.0 for an inflected form; the prefix fallback catches it."""
-    cand = build_candidate(
+    """A form no stem matches is still caught by the prefix fallback.
+
+    The stemmer maps "памяти" and "память" to different stems (the soft sign
+    and the ending both go), so only the fallback's shared prefix links them.
+    """
+    remember = ToolDocument(
         "Remember",
         "Save a durable fact to long-term memory",
-        hint="память запомнить сохранить",
+        search_hint="память запомнить сохранить",
     )
-    other = build_candidate("Bash", "Run a shell command", hint="")
-    hits = normalized_fallback_match("памяти", [cand, other], top_k=5)
-    assert [c.name for c in hits] == ["Remember"]
+    other = ToolDocument("Bash", "Run a shell command")
+    assert normalized_fallback_match("памяти", [remember, other], limit=5) == ["Remember"]
 
 
 def test_fallback_partial_tool_name_match() -> None:
-    cand = build_candidate("List", "List workspace files", hint="")
-    hits = normalized_fallback_match("workspace", [cand], top_k=5)
-    assert [c.name for c in hits] == ["List"]
+    listing = ToolDocument("List", "List workspace files")
+    assert normalized_fallback_match("workspace", [listing], limit=5) == ["List"]
 
 
 def test_fallback_no_overlap_returns_empty() -> None:
-    cand = build_candidate("Bash", "Run a shell command", hint="")
-    assert normalized_fallback_match("совершенно другое", [cand], top_k=5) == []
+    bash = ToolDocument("Bash", "Run a shell command")
+    assert normalized_fallback_match("совершенно другое", [bash], limit=5) == []
 
 
 def test_fallback_deterministic_order() -> None:
-    cands = [
-        build_candidate("Bravo", "memory helper", hint=""),
-        build_candidate("Alpha", "memory helper", hint=""),
+    documents = [
+        ToolDocument("Bravo", "memory helper"),
+        ToolDocument("Alpha", "memory helper"),
     ]
-    hits = normalized_fallback_match("memory", cands, top_k=5)
-    assert [c.name for c in hits] == ["Alpha", "Bravo"]
+    assert normalized_fallback_match("memory", documents, limit=5) == ["Alpha", "Bravo"]
+
+
+def test_fallback_ignores_single_letter_words() -> None:
+    """A one-letter word inside a query token is not a match.
+
+    The fallback once counted any document word contained in a query token,
+    so the article "a" in an English description matched every query token
+    with an "a" in it, and nearly every tool came back.
+    """
+    documents = [ToolDocument("Bash", "Run a shell command"), ToolDocument("Grep", "Search text")]
+    assert normalized_fallback_match("database", documents, limit=5) == []
 
 
 def test_hint_never_reaches_description() -> None:
-    cand = build_candidate("X", "desc", hint="секретный hint")
-    assert "hint" not in cand.description
-    assert "секретный" in cand.text
+    tool = MockTool(tool_name="X", description="desc", search_hint="секретный hint")
+    document = tool_document(tool)
+    assert document.description == "desc"
+    assert document.search_hint == "секретный hint"
+    assert "секретный" not in tool.definition.description
 
 
 # ----------------------------------------------------------------------

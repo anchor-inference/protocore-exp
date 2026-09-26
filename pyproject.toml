@@ -78,8 +78,14 @@ include = [
 packages = ["protocore"]
 # Ship bundled Jinja2 templates inside the wheel so
 # ``JinjaPromptTemplateProvider`` resolves them via
-# ``importlib.resources`` at runtime even when installed as a wheel.
-include = ["protocore/prompts/templates/*.j2"]
+# ``importlib.resources`` at runtime even when installed as a wheel. The
+# tool-retrieval lexicon is package data read the same way. ``packages``
+# already carries both; naming them here keeps the one file a wheel install
+# cannot search tools without from depending on that default.
+include = [
+    "protocore/prompts/templates/*.j2",
+    "protocore/runtime/tool_retrieval_lexicon.json",
+]
 
 [tool.hatch.build.targets.wheel.force-include]
 "protocore/py.typed" = "protocore/py.typed"

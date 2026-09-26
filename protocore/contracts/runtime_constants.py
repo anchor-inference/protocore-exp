@@ -470,6 +470,96 @@ class LoopConstants(BaseModel):
         gt=0,
         description="BM25 tool retrieval top-K (per-call surface).",
     )
+    tool_retrieval_name_weight: float = Field(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "BM25F weight of a tool's name, split into its words, in tool "
+            "retrieval. The field weights were chosen together by "
+            "cross-validation over a labelled set of English and Russian "
+            "queries against a catalogue of about 700 tools; move one and "
+            "the others stop being the best fit."
+        ),
+    )
+    tool_retrieval_search_hint_weight: float = Field(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "BM25F weight of a tool's search_hint in tool retrieval. 1.0 is "
+            "the best value with the query-expansion lexicon on; with the "
+            "lexicon off (tool_retrieval_lexicon_weight = 0) 2.0 does better, "
+            "because the hint is then the only Russian text a tool has. A "
+            "heavier hint with the lexicon on lets a host's hinted tools pull "
+            "Russian queries away from unhinted third-party tools."
+        ),
+    )
+    tool_retrieval_summary_weight: float = Field(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "BM25F weight of the first sentence of a tool's description — "
+            "the sentence that says what the tool is for."
+        ),
+    )
+    tool_retrieval_description_weight: float = Field(
+        default=0.6,
+        ge=0.0,
+        description=(
+            "BM25F weight of the rest of a tool's description after the "
+            "first sentence. Lower than the summary: the tail is caveats and "
+            "usage notes, which mention other tools' subjects."
+        ),
+    )
+    tool_retrieval_parameters_weight: float = Field(
+        default=0.3,
+        ge=0.0,
+        description=(
+            "BM25F weight of a tool's parameter names and parameter "
+            "descriptions. Low because parameters such as path or query are "
+            "shared by many tools and say little about which one is meant."
+        ),
+    )
+    tool_retrieval_bm25_k1: float = Field(
+        default=1.5,
+        gt=0.0,
+        description=(
+            "BM25 term-frequency saturation in tool retrieval: how quickly "
+            "repeating a word in a tool's text stops adding to its score."
+        ),
+    )
+    tool_retrieval_bm25_b: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "BM25 length normalisation in tool retrieval, 0 (none) to 1 "
+            "(full). Kept low so a tool with a long, careful description is "
+            "not ranked below a terse one for the same words."
+        ),
+    )
+    tool_retrieval_lexicon_weight: float = Field(
+        default=0.5,
+        ge=0.0,
+        description=(
+            "Weight of the English terms a Russian query word is expanded to "
+            "through the tool registry's Russian-to-English lexicon, relative "
+            "to the query's own terms. 0 turns expansion off. Expansion is "
+            "what lets a Russian query reach a tool whose name and "
+            "description are English only; values from 0.3 to 1.0 rank "
+            "almost identically."
+        ),
+    )
+    tool_retrieval_fusion_rank_constant: int = Field(
+        default=60,
+        gt=0,
+        description=(
+            "The k of reciprocal rank fusion, used only when a host supplies "
+            "its own tool retriever to combine with the lexical ranking: a "
+            "tool at rank r in one ranking contributes 1 / (k + r). Larger "
+            "values flatten the difference between the top ranks. 60 is the "
+            "value the method was published with."
+        ),
+    )
 
  # ----- Compaction ergonomics -----
     compaction_keep_recent_turns: int = Field(
