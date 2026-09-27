@@ -19,9 +19,10 @@ import difflib
 from collections.abc import Sequence
 from typing import Any, ClassVar, Final
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from protocore.contracts.tool_registry import (
+    ADVERTISED_TOOLS_METADATA_KEY,
     TOOL_VISIBILITY_POLICY_METADATA_KEY,
     TOOLS_LOADED_METADATA_KEY,
     IToolRegistry,
@@ -32,7 +33,7 @@ from protocore.contracts.tool_retrieval import RetrievalSettings
 from protocore.contracts.tool_roles import ToolRole
 from protocore.contracts.tools import Tool, ToolContext, read_metadata
 from protocore.contracts.types import ToolDefinition, ToolParameterSchema, ToolResult
-from protocore.runtime.tool_retrieval import split_summary
+from protocore.runtime.tool_retrieval import tool_line
 
 TOOL_SEARCH_TOOL_NAME: Final[str] = "ToolSearch"
 
@@ -50,13 +51,12 @@ _SUGGESTION_CUTOFF: Final[float] = 0.5
 
 
 class ToolSearchInput(BaseModel):
-    """``ToolSearch`` LLM-facing input."""
+    """``ToolSearch`` LLM-facing input: a description, exact names, or both."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     query: str = Field(
-        ...,
-        min_length=1,
+        default="",
         max_length=1000,
         description=(
             "What you need the tool to do, in a few words (e.g. 'start a "
@@ -64,22 +64,26 @@ class ToolSearchInput(BaseModel):
             "separated by commas (e.g. 'select:Name1,Name2') to load those."
         ),
     )
+    # Models reach for a separate key as often as for the prefix inside the
+    # query; refusing it only costs them a turn to learn the other spelling.
+    select: list[str] = Field(
+        default_factory=list,
+        description="Exact tool names to load, instead of or besides a query.",
+    )
 
+    @field_validator("select", mode="before")
+    @classmethod
+    def _split_names(cls, value: Any) -> Any:
+        """A comma-separated string is the same request as a list of names."""
+        if isinstance(value, str):
+            return [name for name in (part.strip() for part in value.split(",")) if name]
+        return value
 
-def _signature(definition: ToolDefinition) -> str:
-    """``Name(param1, param2*)`` — required parameters marked with a star."""
-    required = set(definition.parameters.required)
-    params = [
-        f"{name}*" if name in required else name
-        for name in definition.parameters.properties
-    ]
-    return f"{definition.name}({', '.join(params)})"
-
-
-def _hit_line(tool: Tool) -> str:
-    definition = tool.definition
-    summary, _ = split_summary(definition.description)
-    return f"{_signature(definition)} — {summary}" if summary else _signature(definition)
+    @model_validator(mode="after")
+    def _something_asked(self) -> ToolSearchInput:
+        if not self.query.strip() and not self.select:
+            raise ValueError("pass a 'query' describing the tool, or 'select' with exact names")
+        return self
 
 
 class ToolSearchTool(Tool):
@@ -98,9 +102,11 @@ class ToolSearchTool(Tool):
     is_destructive: ClassVar[bool] = False
     description_: ClassVar[str] = (
         "Find and load tools that are available but not loaded yet. Describe "
-        "what you need, or pass 'select:' and exact names to load those tools. "
-        "The best matches are loaded at once and can be called from your next "
-        "step; the result says which."
+        "what you need, or pass exact names in 'select' (or 'select:' and the "
+        "names as the query) to load those tools. The best matches are loaded "
+        "at once and can be called from your next step; the result says which, "
+        "and which were already in your tool list. This loads tools only: "
+        "skills are not tools, and no search here loads one."
     )
     search_hint: ClassVar[str] = (
         "find load discover tool capability "
@@ -134,11 +140,16 @@ class ToolSearchTool(Tool):
         raw_policy = read_metadata(context, TOOL_VISIBILITY_POLICY_METADATA_KEY)
         policy = raw_policy if isinstance(raw_policy, ToolVisibilityPolicy) else None
         rc = context.run_state.rc if context.run_state is not None else None
+        advertised = _advertised(read_metadata(context, ADVERTISED_TOOLS_METADATA_KEY))
         query = payload.query.strip()
+        names = list(payload.select)
         if query[: len(SELECT_PREFIX)].lower() == SELECT_PREFIX:
-            names = [n.strip() for n in query[len(SELECT_PREFIX) :].split(",") if n.strip()]
-            return self._select(call_id, names, policy)
-        return self._search(call_id, query, policy, rc)
+            names.extend(n.strip() for n in query[len(SELECT_PREFIX) :].split(",") if n.strip())
+        if names:
+            # Names win over a description sent beside them: the model already
+            # knows what it wants, and a search would load other tools too.
+            return self._select(call_id, names, policy, advertised)
+        return self._search(call_id, query, policy, rc, advertised)
 
     # ------------------------------------------------------------------
 
@@ -155,6 +166,7 @@ class ToolSearchTool(Tool):
         call_id: str,
         names: Sequence[str],
         policy: ToolVisibilityPolicy | None,
+        advertised: frozenset[str] | None,
     ) -> ToolResult:
         admitted = self._admitted(policy)
         by_folded = {name.casefold(): name for name in admitted}
@@ -168,7 +180,7 @@ class ToolSearchTool(Tool):
                 missing.append(requested)
             elif actual not in loaded:
                 loaded.append(actual)
-        lines = [_loaded_header(loaded)]
+        lines = _loaded_header(loaded, advertised)
         for requested in missing:
             # Suggestions come from the admitted names only, so a name the
             # policy blocks is never revealed by being "close".
@@ -182,7 +194,7 @@ class ToolSearchTool(Tool):
                 lines.append(f"No tool named {requested!r}; describe what you need instead.")
         if loaded:
             lines.append("")
-            lines.extend(_hit_line(admitted[name]) for name in loaded)
+            lines.extend(tool_line(admitted[name].definition) for name in loaded)
         return ToolResult(
             tool_call_id=call_id,
             content="\n".join(lines),
@@ -195,6 +207,7 @@ class ToolSearchTool(Tool):
         query: str,
         policy: ToolVisibilityPolicy | None,
         rc: Any,
+        advertised: frozenset[str] | None,
     ) -> ToolResult:
         max_results = _positive(getattr(rc, "tool_search_max_results", None), _DEFAULT_MAX_RESULTS)
         autoload = _non_negative(
@@ -221,8 +234,8 @@ class ToolSearchTool(Tool):
                 "a name from the list of available tools."
             )
         else:
-            lines = [_loaded_header(loaded), "", "Matches, best first:"]
-            lines.extend(_hit_line(tool) for tool in hits)
+            lines = [*_loaded_header(loaded, advertised), "", "Matches, best first:"]
+            lines.extend(tool_line(tool.definition) for tool in hits)
             if len(hits) > len(loaded):
                 lines.append("")
                 lines.append("Load any other match with 'select:' and its name.")
@@ -237,10 +250,28 @@ class ToolSearchTool(Tool):
         )
 
 
-def _loaded_header(loaded: Sequence[str]) -> str:
-    if not loaded:
-        return "Nothing was loaded."
-    return f"Loaded, and callable from your next step: {', '.join(loaded)}."
+def _loaded_header(loaded: Sequence[str], advertised: frozenset[str] | None) -> list[str]:
+    """What the call loaded, told apart from what the model could call already.
+
+    A tool already in the list is reported as such and never as "Loaded": a
+    model asked to use a skill, shown "Loaded: WebSearch" of a tool it had all
+    along, concluded the skill was loaded and never opened it.
+    """
+    already = [name for name in loaded if advertised is not None and name in advertised]
+    fresh = [name for name in loaded if name not in already]
+    lines: list[str] = []
+    if fresh:
+        lines.append(f"Loaded, and callable from your next step: {', '.join(fresh)}.")
+    if already:
+        lines.append(f"Already in your tool list, nothing to load: {', '.join(already)}.")
+    return lines or ["Nothing was loaded."]
+
+
+def _advertised(raw: Any) -> frozenset[str] | None:
+    """The names the calling request advertised, or ``None`` when not told."""
+    if isinstance(raw, frozenset | set | tuple | list):
+        return frozenset(name for name in raw if isinstance(name, str))
+    return None
 
 
 def _discovers_tools(tool: Tool) -> bool:

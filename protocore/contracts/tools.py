@@ -66,6 +66,7 @@ CORE_TOOL_CONTEXT_METADATA_KEYS: Final[frozenset[str]] = frozenset(
         "memory_write_similarity_threshold",
         "memory_max_records_per_scope",
         "tool_visibility_policy",
+        "protocore.advertised_tools",
     }
 )
 
@@ -77,6 +78,7 @@ CORE_STAMPED_TOOL_CONTEXT_METADATA_KEYS: Final[frozenset[str]] = frozenset(
     {
         "tool_call_id",
         "tool_visibility_policy",
+        "protocore.advertised_tools",
         "protocore.subagent_dispatch_order",
         "protocore.subagent_dispatch_group",
         "protocore.subagent_tree_permit",

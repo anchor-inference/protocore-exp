@@ -387,7 +387,19 @@ it does not need spends turns on it.
   every time.
 - `select:Name1,Name2` loads exactly those tools (a name in the wrong case is
   still accepted). An unknown name is answered with its nearest admitted names.
-- The first line of the result says which tools are now loaded and callable.
+  The names may also come as their own argument, `select`, a list or a
+  comma-separated string: models reach for that spelling unprompted, and
+  refusing it only costs them a turn. Names win over a description sent beside
+  them.
+- The first lines of the result say which tools are now loaded and callable,
+  and, apart from those, which of the requested or matched tools were **already
+  in the tool list**. The loop tells the tool what the calling request
+  advertised (`ADVERTISED_TOOLS_METADATA_KEY`, stamped after the operator's
+  envelope is merged so it cannot be forged). Reporting a tool the model had
+  all along as "Loaded" misleads: a model asked to use a skill searched for it,
+  was told "Loaded: WebSearch", took the skill for loaded and never opened it.
+  The description says so too — the tool loads tools only, and a skill is not
+  one.
 - The live visibility policy is read from `ToolContext.metadata`
   (`TOOL_VISIBILITY_POLICY_METADATA_KEY`), so the search never lists, suggests
   or loads a tool the dispatch gate would refuse, and a blocked name is never

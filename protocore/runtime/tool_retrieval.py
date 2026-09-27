@@ -43,6 +43,7 @@ from importlib import resources
 from typing import Final
 
 from protocore.contracts.tool_retrieval import RetrievalSettings, ToolDocument
+from protocore.contracts.types import ToolDefinition
 from protocore.runtime.stemmers import stem
 from protocore.runtime.text_analysis import STOPWORDS, content_words, fold
 
@@ -110,6 +111,22 @@ def split_summary(description: str) -> tuple[str, str]:
     if bracketed is not None:
         return text[: bracketed.start()], text[bracketed.end() :]
     return text, ""
+
+
+def tool_line(definition: ToolDefinition) -> str:
+    """``Name(param1, param2*) — first sentence``: a tool in one line.
+
+    Required parameters carry a star. The form ``ToolSearch`` lists its matches
+    in, and the one a failed call of a tool the model never saw is answered
+    with, so the model reads a tool the same way wherever it meets one.
+    """
+    required = set(definition.parameters.required)
+    params = ", ".join(
+        f"{name}*" if name in required else name for name in definition.parameters.properties
+    )
+    signature = f"{definition.name}({params})"
+    summary, _ = split_summary(definition.description)
+    return f"{signature} — {summary}" if summary else signature
 
 
 def parameter_text(properties: Mapping[str, object]) -> str:
@@ -440,4 +457,5 @@ __all__ = [
     "normalized_fallback_match",
     "parameter_text",
     "split_summary",
+    "tool_line",
 ]

@@ -372,3 +372,26 @@ async def test_parallel_searches_load_in_the_order_the_model_asked(
         "s-1",
         "s-2",
     ]
+
+
+# ── what a result tells a model about tools it could not see ────────────────
+
+
+async def test_a_search_says_which_tools_were_already_in_the_list(
+    scenario: ScenarioFactory,
+) -> None:
+    """A model told "Loaded" of a tool it had all along takes it for something else
+    it asked for having been loaded; the loop tells the tool what it advertised."""
+    run = _with_search(scenario(tools=_tools()))
+    run.llm.queue_tool_call_response(
+        tool_call_id="s-1",
+        tool_name="ToolSearch",
+        tool_input={"select": ["Note", "Mcp_Github_list_issues"]},
+    )
+    run.llm.queue_response(text="loaded")
+    await run.run("load it")
+
+    lines = run.tool_results()[0].content.splitlines()
+    assert lines[0] == "Loaded, and callable from your next step: Mcp_Github_list_issues."
+    assert lines[1] == "Already in your tool list, nothing to load: Note."
+    assert run.advertised_tool_names(1) == ["Note", "Zeta", "ToolSearch", "Mcp_Github_list_issues"]

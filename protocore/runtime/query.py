@@ -95,6 +95,7 @@ from protocore.contracts.tool_chunking import (
     chunkable_content_mutation_names,
     is_chunkable_content_mutation,
 )
+from protocore.contracts.tool_registry import ADVERTISED_TOOLS_METADATA_KEY
 from protocore.contracts.tool_roles import (
     WORKSPACE_INSPECTION_ROLES,
     WORKSPACE_MUTATION_ROLES,
@@ -6465,6 +6466,7 @@ async def _drain_dispatch_tool_deferred(
     # cannot shadow ``tool_call_id`` / ``protocore.*`` on the parallel-dispatch
     # path either.
     _merge_run_metadata_into(metadata, engine.run_state)
+    _stamp_advertised_tools(metadata, engine)
     # Carry the child's LLM-requested batch position + its fan-out group id so
     # the host runner can declare its deliverables into the parent ledger in
     # batch order (not gather completion order), scoped per group so a later
@@ -10247,7 +10249,20 @@ def _build_replay_metadata(engine: QueryEngine) -> dict[str, Any]:
     _rehydrate_satisfied_from_history(engine)
     metadata: dict[str, Any] = {}
     _merge_run_metadata_into(metadata, engine.run_state)
+    _stamp_advertised_tools(metadata, engine)
     return metadata
+
+
+def _stamp_advertised_tools(metadata: dict[str, Any], engine: QueryEngine) -> None:
+    """Tell the tool which names the request that called it advertised.
+
+    Set after the run-metadata merge, which skips ``protocore.*`` names, so an
+    operator's envelope cannot claim a tool was on the surface. Nothing is set
+    before the first request, when no surface has been advertised yet.
+    """
+    advertised = engine._advertised_tool_names
+    if advertised is not None:
+        metadata[ADVERTISED_TOOLS_METADATA_KEY] = advertised
 
 
 def _rehydrate_satisfied_from_history(engine: QueryEngine) -> None:
@@ -11304,6 +11319,7 @@ async def _dispatch_tool(
     # authoritative ``tool_call_id`` is then set by the dispatcher from the real
     # ``tool_call.id``.
     _merge_run_metadata_into(metadata, engine.run_state)
+    _stamp_advertised_tools(metadata, engine)
     # Flag the SYNTHETIC dispatch so a backend MAY default a required terminal
     # field (e.g. ``outcome``) ONLY for the runtime-synthesised last-resort
     # guaranteed-terminal answer, never for a model-emitted one.

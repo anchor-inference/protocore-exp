@@ -33,6 +33,16 @@ TOOL_VISIBILITY_POLICY_METADATA_KEY: Final[str] = "tool_visibility_policy"
 #: cannot widen the surface by writing this key into its result.
 TOOLS_LOADED_METADATA_KEY: Final[str] = "protocore.tools_loaded"
 
+#: ``ToolContext.metadata`` key under which the loop stamps the names of the
+#: tools the current request advertised, as a frozenset. A tool the model called
+#: from outside that list was called blind — its schema never shown — and
+#: ``ToolSearch`` must not report a tool the model can already see as newly
+#: loaded: a model told "Loaded: WebSearch" of a tool it had all along reads it
+#: as having loaded something else it asked for, such as a skill. Absent when
+#: the tool runs outside a loop, which then reads as "nothing is known to be
+#: advertised".
+ADVERTISED_TOOLS_METADATA_KEY: Final[str] = "protocore.advertised_tools"
+
 
 class ToolVisibilityPolicy(BaseModel):
     """Per-tenant tool-visibility policy.
@@ -245,6 +255,7 @@ class IToolRegistry(Protocol):
 
 
 __all__ = [
+    "ADVERTISED_TOOLS_METADATA_KEY",
     "TOOLS_LOADED_METADATA_KEY",
     "TOOL_VISIBILITY_POLICY_METADATA_KEY",
     "IToolRegistry",

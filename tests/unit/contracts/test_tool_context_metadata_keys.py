@@ -23,7 +23,10 @@ from pathlib import Path
 import pytest
 
 from protocore.contracts import tools
-from protocore.contracts.tool_registry import TOOL_VISIBILITY_POLICY_METADATA_KEY
+from protocore.contracts.tool_registry import (
+    ADVERTISED_TOOLS_METADATA_KEY,
+    TOOL_VISIBILITY_POLICY_METADATA_KEY,
+)
 from protocore.contracts.tools import (
     CORE_STAMPED_TOOL_CONTEXT_METADATA_KEYS,
     CORE_TOOL_CONTEXT_METADATA_KEYS,
@@ -62,6 +65,7 @@ EXPECTED_READ = frozenset(
         "memory_write_similarity_threshold",
         "memory_max_records_per_scope",
         "tool_visibility_policy",
+        "protocore.advertised_tools",
     }
 )
 
@@ -70,6 +74,7 @@ EXPECTED_STAMPED = frozenset(
     {
         "tool_call_id",
         "tool_visibility_policy",
+        "protocore.advertised_tools",
         "protocore.subagent_dispatch_order",
         "protocore.subagent_dispatch_group",
         "protocore.subagent_tree_permit",
@@ -102,6 +107,7 @@ DECLARED_CONSTANTS: tuple[tuple[str, str, frozenset[str]], ...] = (
         TOOL_VISIBILITY_POLICY_METADATA_KEY,
         EXPECTED_STAMPED,
     ),
+    ("ADVERTISED_TOOLS_METADATA_KEY", ADVERTISED_TOOLS_METADATA_KEY, EXPECTED_STAMPED),
     (
         "SUBAGENT_DISPATCH_ORDER_METADATA_KEY",
         SUBAGENT_DISPATCH_ORDER_METADATA_KEY,

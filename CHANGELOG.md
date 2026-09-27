@@ -79,9 +79,14 @@ All notable changes to this project are recorded here. The format follows
   (`tool_catalogue_max_listed_names`). See `docs/tools.md`.
 - **`ToolSearch`** (`protocore.tools.ToolSearchTool`): free-text search with up
   to `tool_search_max_results` hits in rank order, one line each, loading the
-  first `tool_search_autoload_count`; `select:Name1,Name2` loads exact names and
-  answers an unknown one with the nearest admitted names. It respects the live
-  visibility policy and is advertised only while something is held back.
+  first `tool_search_autoload_count`; `select:Name1,Name2` (or a `select`
+  argument, a list or a comma-separated string) loads exact names and answers
+  an unknown one with the nearest admitted names. A tool already in the tool
+  list is reported as such, never as loaded, and the description says the tool
+  loads tools only — skills are not tools. It respects the live visibility
+  policy and is advertised only while something is held back.
+- `ADVERTISED_TOOLS_METADATA_KEY`: the loop stamps the names the calling
+  request advertised on `ToolContext.metadata`.
 - A call of a registered tool the request did not advertise still runs and now
   loads the tool; events `tool_discovered` and `tool_unadvertised_call`.
 - `QueryEngineConfig.discovered_tools` seeds a new run with the tools the last
