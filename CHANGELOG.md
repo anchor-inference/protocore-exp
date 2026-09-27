@@ -129,6 +129,12 @@ All notable changes to this project are recorded here. The format follows
   gains `tool_group_rules_given`, and a discovered-tool row loaded with its
   whole group carries `group`. The catalogue's header now names the
   whole-group load. See `docs/tools.md`.
+- `QueryEngineConfig.loaded_tool_groups` seeds a run with whole groups, each
+  one entry under `pinned_tool_max_count` with its rules in the catalogue and
+  a `tool_group_loaded` event with `via` `seed`; seeding a large group's tools
+  by name made each an entry and pushed the rest of the seed out.
+  `ContextManager.loaded_tool_group_names()` is the groups a run holds whole,
+  for a host to carry into the next one.
 
 - **The bundled lexicon covers the Russian a developer speaks about trackers,
   chat, calendars and deployments**: loanwords and slang such as "пулреквест",

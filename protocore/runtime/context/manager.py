@@ -295,6 +295,22 @@ class ContextManager:
         """The discovered tools loaded as a whole group, each mapped to it."""
         return dict(self._tool_groups)
 
+    def loaded_tool_group_names(self) -> tuple[str, ...]:
+        """The groups loaded whole and still loaded, in the order they were loaded.
+
+        What a host carries into the session's next run as
+        ``QueryEngineConfig.loaded_tool_groups``, so the group comes back as
+        one entry under the cap rather than as many. Whether the run called
+        any of a group's tools is :meth:`called_discovered_tool_names`: a
+        group seeded or loaded and then never used is no more worth carrying
+        than an unused search match.
+        """
+        return tuple(
+            dict.fromkeys(
+                self._tool_groups[name] for name in self._discovered_tools if name in self._tool_groups
+            )
+        )
+
     def build_context(
         self,
         *,

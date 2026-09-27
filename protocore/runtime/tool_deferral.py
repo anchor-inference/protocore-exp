@@ -89,6 +89,7 @@ __all__ = [
     "plan_tool_deferral",
     "render_tool_catalogue",
     "seed_group_events",
+    "seed_tool_groups",
     "tool_catalogue_block",
     "tool_group_states",
 ]
@@ -530,6 +531,10 @@ def ensure_tool_deferral(
     and every flip rewrote the catalogue at the head of the cached prompt, or
     let a group that had been held back onto the surface mid-run.
     """
+    # The seeded groups are loaded tools the first decision must see: their
+    # rules go into its catalogue. Here as well as in the surface builder,
+    # for a host that asks for the decision before the first request.
+    seed_tool_groups(engine)
     key = _catalogue_key(engine)
     current = engine._tool_deferral
     if current is not None and engine._tool_deferral_key == key:
@@ -611,6 +616,8 @@ def build_tool_surface(engine: QueryEngine) -> list[ToolDefinition]:
     order is the cache contract: the base does not move when a tool is loaded,
     and a loaded tool does not move when another one is.
     """
+    # Before the policy is read: it admits loaded tools by pinning them.
+    seed_tool_groups(engine)
     policy = engine.effective_tool_policy
     decision = ensure_tool_deferral(engine, policy)
     registry = engine.tools
@@ -919,6 +926,42 @@ def hold_call_for_rules(
     if newly_loaded:
         events.extend(_group_loaded_events(engine, {group: ("direct_call", [call.name])}))
     return content, events
+
+
+def seed_tool_groups(engine: QueryEngine) -> None:
+    """Load the groups the host seeded whole, once, before the first surface.
+
+    Each is one entry under the cap, newer than the tools seeded by name, and
+    only its tools dispatch would admit are loaded: a group seeded for a role
+    that may call none of them loads nothing, rather than schemas every call
+    of which is refused. Case is ignored in a group's name, as ``ToolSearch``
+    ignores it. What loads is announced with the rest of the seed.
+    """
+    requested = engine._pending_seed_tool_groups
+    if not requested:
+        return
+    engine._pending_seed_tool_groups = ()
+    admitted = _admits(engine)
+    registry = engine.tools
+    declared = registry.tool_groups()
+    members: dict[str, tuple[str, list[str]]] = {}
+    for tool in sorted(registry.list_all(), key=lambda tool: tool.name):
+        group = tool_group_of(tool, declared)
+        if group and admitted(tool.name):
+            members.setdefault(group.casefold(), (group, []))[1].append(tool.name)
+    manager = engine.context_manager
+    for key in dict.fromkeys(name.casefold() for name in requested):
+        group, names = members.get(key, ("", []))
+        for name in names:
+            manager.discover_tool(name, group=group)
+    # The start of a run is where its prompt begins, so a seed over the cap is
+    # cut down here as the tools seeded by name were at construction.
+    manager.evict_discovered_tools()
+    engine._seeded_tool_names = tuple(
+        name
+        for name in dict.fromkeys((*engine._seeded_tool_names, *manager.discovered_tool_names()))
+        if name in manager.discovered_tool_last_used()
+    )
 
 
 def seed_group_events(engine: QueryEngine) -> list[TurnEvent]:

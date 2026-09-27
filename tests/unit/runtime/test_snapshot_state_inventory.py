@@ -79,6 +79,11 @@ _PROCESS_LOCAL: dict[str, str] = {
         "what the host's seed loaded, kept only until it is announced. A "
         "resume is not a seed and announces nothing, so it empties this."
     ),
+    "_pending_seed_tool_groups": (
+        "the groups the host seeded whole, kept only until the first surface "
+        "loads them. A resume is not a seed: the snapshot's loaded tools say "
+        "which groups are loaded, so it empties this."
+    ),
     "events": "the event stream is the host's transport, not run state.",
     "hooks": "the hook manager is injected by the host.",
     "skills": "the skill store is injected by the host.",

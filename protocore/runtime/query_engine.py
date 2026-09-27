@@ -578,6 +578,19 @@ class QueryEngineConfig:
     ``pinned_tool_max_count``, the first names are the ones left out.
     """
 
+    loaded_tool_groups: tuple[str, ...] = ()
+    """Groups to load whole at the start, as ``ToolSearch(group=...)`` loads one.
+
+    A group seeded here is one entry under ``pinned_tool_max_count``, as a
+    group the model loaded is, where the same tools passed one by one in
+    :attr:`discovered_tools` would be as many entries and a large group would
+    push the rest of the seed out. Only the group's tools the run may call are
+    loaded; a name no group has, or a group none of whose tools is admitted,
+    loads nothing. Loaded after :attr:`discovered_tools`, so a group is the
+    newer entry. The groups a run loaded whole are
+    ``ContextManager.loaded_tool_group_names()``.
+    """
+
     tool_group_loads: Mapping[str, str] = field(default_factory=dict)
     """Load modes for this run, by group name, over the registry's declarations.
 
@@ -696,6 +709,10 @@ class QueryEngineConfig:
                     f"tool_group_loads[{group!r}] must be one of {TOOL_GROUP_LOADS!r}, "
                     f"got {load!r}"
                 )
+        # A list is accepted as the documented sequence and kept as a tuple:
+        # the config is frozen, and a list the host still holds could change
+        # under it.
+        object.__setattr__(self, "loaded_tool_groups", tuple(self.loaded_tool_groups))
         # A copy nobody else holds: the host's dict could otherwise change
         # under a run whose deferral decision is keyed on it.
         object.__setattr__(self, "tool_group_loads", MappingProxyType(dict(self.tool_group_loads)))
@@ -826,6 +843,9 @@ class QueryEngine:
             # Emptied once announced; reset, the fresh engine would announce
             # the seed again at every turn.
             "_seeded_tool_names",
+            # Emptied once loaded; reset, a group the model has since let go
+            # would be loaded again at every turn.
+            "_pending_seed_tool_groups",
             # The digest the run's catalog block had before it was picked up,
             # kept until the new process rebuilds one and can be compared
             # against it. Cleared by that comparison, not by a turn boundary.
@@ -1559,6 +1579,11 @@ class QueryEngine:
         self._seeded_tool_names: tuple[str, ...] = (
             self.context_manager.discovered_tool_names() if config.discovered_tools else ()
         )
+        # The groups the host seeded whole, loaded at the first surface build
+        # and then emptied. Not here: a group is found by its declaration and
+        # its tools by the policy that admits them, and a host may still be
+        # declaring groups on a registry it has already handed over.
+        self._pending_seed_tool_groups: tuple[str, ...] = config.loaded_tool_groups
         # The groups whose rules the run has been given — in the catalogue or
         # in a result. A call of a tool of such a group is never held back to
         # give them again.
@@ -3755,6 +3780,7 @@ class QueryEngine:
         self._tool_deferral_key = None
         self._tool_group_rules_given = set(restored_continuity.tool_group_rules_given)
         self._seeded_tool_names = ()
+        self._pending_seed_tool_groups = ()
 
         # Put the tree budgets back into the state object the whole tree shares
         # by reference, so the resumed run and everything it dispatches keep

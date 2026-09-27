@@ -18,7 +18,7 @@ import pytest
 from protocore.contracts.tool_registry import ToolVisibilityPolicy
 from protocore.contracts.types import MessageRole, TextBlock
 from protocore.runtime.events import EventType
-from protocore.runtime.tool_deferral import note_prompt_prefix_restarted
+from protocore.runtime.tool_deferral import ensure_tool_deferral, note_prompt_prefix_restarted
 from protocore.runtime.tool_surface import forget_tool_surfaces
 from protocore.tools import ToolSearchTool
 
@@ -372,3 +372,144 @@ async def test_a_resumed_run_does_not_hold_back_a_call_it_already_cleared(
 
     assert "Rules for the browser tools" not in _system_text(second, 0)
     assert _invocations(second, "BrowserClick") == [{"v": "y"}]
+
+
+# ── groups seeded whole ─────────────────────────────────────────────────────
+
+
+def _many() -> list[ScriptedTool]:
+    return [
+        *_tools(),
+        ScriptedTool(tool_name="ScheduleAdd", description="schedule a job"),
+        ScriptedTool(tool_name="ScheduleList", description="list the jobs"),
+        ScriptedTool(tool_name="ScheduleDrop", description="drop a job"),
+    ]
+
+
+def _with_schedule(run: Scenario) -> Scenario:
+    _lazy(run)
+    run.tools.declare_group("schedule", "Jobs that run later", prefix="Schedule", load="lazy")
+    return run
+
+
+async def test_seeded_groups_are_one_entry_each_under_the_cap(
+    scenario: ScenarioFactory,
+) -> None:
+    # Five tools under a cap of two: as bare names three would be left out.
+    run = _with_schedule(
+        scenario(
+            tools=_many(),
+            rc=default_rc(pinned_tool_max_count=2),
+            loaded_tool_groups=["BROWSER", "schedule", "nothing"],
+        )
+    )
+    run.llm.queue_tool_call_response(
+        tool_call_id="c-1", tool_name="ScheduleList", tool_input={"v": "all"}
+    )
+    run.llm.queue_response(text="listed")
+    await run.run("what is scheduled?")
+
+    base = ["Note", "Zeta", "ToolSearch"]
+    loaded = ["BrowserClick", "BrowserOpen", "ScheduleAdd", "ScheduleDrop", "ScheduleList"]
+    assert run.advertised_tool_names(0) == [*base, *loaded]
+    # The browser's rules are in the catalogue, as for any group loaded
+    # before the run began, so its tools run at once.
+    assert (
+        "- browser: Drive a web browser. Tools: BrowserClick, BrowserOpen\n"
+        "  Rules for the browser tools:\n"
+    ) in _system_text(run, 0)
+    assert _group_loads(run) == [
+        ("browser", "seed", ["BrowserClick", "BrowserOpen"]),
+        ("schedule", "seed", ["ScheduleAdd", "ScheduleDrop", "ScheduleList"]),
+    ]
+    assert _adverts(run)[0]["tool_groups"] == [
+        {"name": "browser", "load": "lazy", "state": "loaded"},
+        {"name": "schedule", "load": "lazy", "state": "loaded"},
+    ]
+    manager = run.engine.context_manager
+    assert manager.loaded_tool_group_names() == ("browser", "schedule")
+    # Seeded is not called: only the group the run used is worth carrying.
+    assert manager.called_discovered_tool_names() == ("ScheduleList",)
+    rows = {row["name"]: row for row in run.engine.snapshot()["discovered_tools"]}
+    assert rows["ScheduleAdd"]["group"] == "schedule"
+    assert rows["ScheduleAdd"]["called"] is False
+
+
+async def test_a_seeded_group_over_the_cap_goes_whole_and_the_older_seed_first(
+    scenario: ScenarioFactory,
+) -> None:
+    run = _with_schedule(
+        scenario(
+            tools=_many(),
+            rc=default_rc(pinned_tool_max_count=1),
+            discovered_tools=("Zeta",),
+            loaded_tool_groups=("schedule",),
+        )
+    )
+    run.llm.queue_response(text="done")
+    await run.run("hello")
+
+    # The named tool is the older entry, so it is the one left out; the group
+    # comes in whole.
+    assert run.engine.context_manager.discovered_tool_names() == (
+        "ScheduleAdd",
+        "ScheduleDrop",
+        "ScheduleList",
+    )
+    assert _group_loads(run) == [
+        ("schedule", "seed", ["ScheduleAdd", "ScheduleDrop", "ScheduleList"])
+    ]
+
+
+async def test_a_seeded_group_loads_only_what_the_run_may_call(
+    scenario: ScenarioFactory,
+) -> None:
+    run = _with_schedule(
+        scenario(
+            tools=_many(),
+            loaded_tool_groups=("schedule", "browser"),
+            tool_visibility_policy=ToolVisibilityPolicy(
+                blocked={"ScheduleDrop", "BrowserOpen", "BrowserClick"}
+            ),
+        )
+    )
+    run.llm.queue_response(text="done")
+    await run.run("hello")
+
+    manager = run.engine.context_manager
+    assert manager.discovered_tool_names() == ("ScheduleAdd", "ScheduleList")
+    assert manager.loaded_tool_group_names() == ("schedule",)
+    assert _group_loads(run) == [("schedule", "seed", ["ScheduleAdd", "ScheduleList"])]
+
+
+async def test_a_resumed_run_takes_its_groups_from_the_snapshot_not_the_seed(
+    scenario: ScenarioFactory,
+) -> None:
+    first = _with_schedule(scenario(tools=_many()))
+    first.llm.queue_response(text="nothing loaded")
+    await first.run("hello")
+    snapshot = first.engine.snapshot()
+
+    second = _with_schedule(scenario(tools=_many(), loaded_tool_groups=("schedule",)))
+    await second.engine.resume_from_snapshot(snapshot)
+    second.engine.rearm()
+    second.llm.queue_response(text="still nothing")
+    await second.run("and now?")
+
+    assert second.engine.context_manager.discovered_tool_names() == ()
+    assert _group_loads(second) == []
+
+
+async def test_a_decision_asked_for_before_the_first_request_sees_the_seeded_groups(
+    scenario: ScenarioFactory,
+) -> None:
+    # A host writes its prompt for the surface the first request will have,
+    # and asks for the decision to do it.
+    run = _with_schedule(scenario(tools=_many(), loaded_tool_groups=("browser",)))
+    decision = ensure_tool_deferral(run.engine)
+    assert f"  Rules for the browser tools:\n  {_RULES.splitlines()[0]}" in decision.catalogue
+    assert run.engine.context_manager.loaded_tool_group_names() == ("browser",)
+    run.llm.queue_response(text="done")
+    await run.run("hello")
+    assert run.advertised_tool_names(0)[-2:] == ["BrowserClick", "BrowserOpen"]
+    assert _group_loads(run) == [("browser", "seed", ["BrowserClick", "BrowserOpen"])]

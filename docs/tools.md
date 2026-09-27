@@ -566,6 +566,16 @@ matches whether or not the model wanted them. A seeded tool counts as called.
 Each snapshot row carries `called`; a row without it is taken as called. A row
 of a tool loaded as part of a whole group also carries `group`.
 
+A group is carried whole with `QueryEngineConfig.loaded_tool_groups`: each group
+named there is loaded as `ToolSearch(group=...)` would load it — only the tools
+the run may call, one entry under `pinned_tool_max_count`, newer than the tools
+seeded by name, its rules in the catalogue, announced as `tool_group_loaded` with
+`via` `seed`. Passing a large group's tools one by one instead makes each of them
+an entry, and the cap then pushes out the rest of the seed.
+`ContextManager.loaded_tool_group_names()` is the groups the run holds whole. A
+seeded group's tools do not count as called, so a host that carries only the
+groups a run also called a tool of lets an unused group go after one run.
+
 ### Calls of tools that were not advertised
 
 Dispatch checks the visibility policy, not the advertised list, so a call of a
