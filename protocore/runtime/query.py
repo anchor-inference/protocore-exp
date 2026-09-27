@@ -122,6 +122,7 @@ from protocore.contracts.turn_policy import (
 )
 from protocore.contracts.types import (
     COMPACTION_SUMMARY_METADATA_KEY,
+    OPERATOR_WORDS_METADATA_KEY,
     PARTIAL_ASSISTANT_ATTEMPT_METADATA_KEY,
     SESSION_HISTORY_SEED_METADATA_KEY,
     SYNTHETIC_RECOVERY_BACKGROUND_WAKE,
@@ -1961,6 +1962,7 @@ async def resume(
                 tool_call_id=waiting.tool_call_id,
                 content=_message_text(message),
                 is_error=False,
+                operator_reply=waiting.kind is InterruptKind.question,
             )
             engine.release_interrupt(waiting.interrupt_id)
         elif parked:
@@ -10670,6 +10672,7 @@ def _settle_parked_call(
     tool_call_id: str,
     content: str,
     is_error: bool,
+    operator_reply: bool = False,
 ) -> None:
     """Close a parked call with the result a person's decision produced.
 
@@ -10677,12 +10680,18 @@ def _settle_parked_call(
     wire with a synthetic failure, which says the opposite of what a denial or
     an answer means; and a durable record left standing keeps the call open
     forever, so the next resume finds a wait nobody is going to answer.
+
+    ``operator_reply`` marks the result as the operator's own words (the
+    answer to a question), so compaction quotes it whole in its ledger rather
+    than keeping only the values of recognisable shape it would take from any
+    tool output.
     """
     _insert_tool_result_after_use(
         engine.history,
         tool_call_id=tool_call_id,
         content=content,
         is_error=is_error,
+        metadata={OPERATOR_WORDS_METADATA_KEY: True} if operator_reply else None,
     )
     intent = find_intent(engine.open_intents, tool_call_id)
     if intent is not None:
@@ -10840,6 +10849,7 @@ def _insert_tool_result_after_use(
     tool_call_id: str,
     content: str,
     is_error: bool,
+    metadata: dict[str, Any] | None = None,
 ) -> bool:
     """Place a tool result directly after the assistant turn that called it.
 
@@ -10864,6 +10874,7 @@ def _insert_tool_result_after_use(
                         tool_call_id=tool_call_id,
                         content=content,
                         is_error=is_error,
+                        metadata=dict(metadata or {}),
                     )
                 ],
             ),
@@ -12086,6 +12097,7 @@ async def resume_interrupts(
                     tool_call_id=interrupt.tool_call_id,
                     content=resolution.answer or "",
                     is_error=False,
+                    operator_reply=interrupt.kind is InterruptKind.question,
                 )
                 continue
 

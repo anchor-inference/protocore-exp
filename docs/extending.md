@@ -293,6 +293,24 @@ An undeclared role is a behaviour that goes quiet: a writer the map does not
 name stops lifting stale pinned reads, and a shell tool whose command spelling is
 undeclared sends its calls for approval rather than running them unexamined.
 
+Say, too, who wrote what you put into the history. The core takes a plain
+user-role message to be the operator's; a host that delivers its own events on
+that channel, or the operator's replies on another, marks them with
+`OPERATOR_WORDS_METADATA_KEY`, so compaction quotes the operator's words whole
+in its ledger and compacts the rest like any other message (the table is in
+[the compaction contract](compaction.md#who-wrote-a-message)):
+
+```python
+from protocore.contracts.types import OPERATOR_WORDS_METADATA_KEY, Message, MessageRole, TextBlock
+
+answer = 'the operator answered request [a1b2] "Which port?": 8443'
+note = Message(
+    role=MessageRole.user,
+    content_blocks=[TextBlock(text=f"2 events:\n- build 412 finished\n- {answer}")],
+    metadata={OPERATOR_WORDS_METADATA_KEY: [answer]},  # True: all of it; False: none of it
+)
+```
+
 ---
 
 ### Add a `LoopConstants` toggle

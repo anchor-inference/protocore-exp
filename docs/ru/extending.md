@@ -301,6 +301,24 @@ roles = ToolRoleMap.declare(
 shell-инструмент с необъявленным написанием команды отправляет свои вызовы на
 одобрение, вместо того чтобы выполнять их непроверенными.
 
+Скажите также, кто написал то, что вы кладёте в историю. Ядро считает обычное
+сообщение роли user словами оператора; хост, который доставляет по этому каналу
+свои события или ответы оператора по другому каналу, помечает их ключом
+`OPERATOR_WORDS_METADATA_KEY`, и компакция цитирует слова оператора в реестре
+целиком, а остальное сжимает как любое другое сообщение (таблица — в
+[контракте компакции](compaction.md#кто-написал-сообщение)):
+
+```python
+from protocore.contracts.types import OPERATOR_WORDS_METADATA_KEY, Message, MessageRole, TextBlock
+
+answer = 'the operator answered request [a1b2] "Which port?": 8443'
+note = Message(
+    role=MessageRole.user,
+    content_blocks=[TextBlock(text=f"2 events:\n- build 412 finished\n- {answer}")],
+    metadata={OPERATOR_WORDS_METADATA_KEY: [answer]},  # True: всё; False: ничего
+)
+```
+
 ---
 
 ### Добавление флага `LoopConstants`
