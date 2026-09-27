@@ -10,6 +10,7 @@ from protocore.contracts.run_state import RunScopedState
 from protocore.contracts.runtime_constants import LoopConstants
 from protocore.contracts.tool_registry import (
     ADVERTISED_TOOLS_METADATA_KEY,
+    TOOL_ALLOWLIST_METADATA_KEY,
     TOOL_VISIBILITY_POLICY_METADATA_KEY,
     TOOLS_LOADED_METADATA_KEY,
     ToolVisibilityPolicy,
@@ -65,14 +66,22 @@ def _catalogue() -> ToolRegistry:
     return registry
 
 
+_NO_POLICY: Any = object()
+
+
 def _context(
-    policy: ToolVisibilityPolicy | None = None,
+    policy: Any = None,
     rc: Any = None,
     advertised: frozenset[str] | None = None,
+    allowlist: frozenset[str] | None = None,
 ) -> ToolContext:
     metadata: dict[str, Any] = {"tool_call_id": "call-1"}
-    if policy is not None:
-        metadata[TOOL_VISIBILITY_POLICY_METADATA_KEY] = policy
+    if policy is not _NO_POLICY:
+        metadata[TOOL_VISIBILITY_POLICY_METADATA_KEY] = (
+            ToolVisibilityPolicy() if policy is None else policy
+        )
+    if allowlist is not None:
+        metadata[TOOL_ALLOWLIST_METADATA_KEY] = allowlist
     if advertised is not None:
         metadata[ADVERTISED_TOOLS_METADATA_KEY] = advertised
     state = RunScopedState(rc=rc) if rc is not None else None
@@ -231,3 +240,27 @@ async def test_a_call_that_asks_for_nothing_is_refused(arguments: dict[str, Any]
     assert search is not None
     with pytest.raises(ValidationError, match="query"):
         await search.invoke(_context(), arguments)
+
+
+@pytest.mark.parametrize("policy", [_NO_POLICY, {"blocked": ["SecretVault"]}, "everything"])
+async def test_without_a_policy_nothing_is_listed_or_loaded(policy: Any) -> None:
+    """A missing or unreadable policy used to read as "no restriction", so the
+    search listed and loaded tools the gate was about to refuse."""
+    content, loaded, matches = await _call(_catalogue(), "select:SecretVault", policy=policy)
+    assert loaded == []
+    assert matches == []
+    assert "SecretVault" not in content
+    _, loaded, matches = await _call(_catalogue(), "read a stored secret", policy=policy)
+    assert loaded == [] and matches == []
+
+
+async def test_a_child_is_never_told_it_loaded_a_tool_outside_its_declared_set() -> None:
+    allowlist = frozenset({"ServiceStart", "ToolSearch"})
+    content, loaded, _ = await _call(
+        _catalogue(), "select:ServiceStart,BrowserOpen", allowlist=allowlist
+    )
+    assert loaded == ["ServiceStart"]
+    assert "No tool named 'BrowserOpen'" in content
+    _, loaded, matches = await _call(_catalogue(), "open a web page in the browser", allowlist=allowlist)
+    assert "BrowserOpen" not in matches
+    assert "BrowserOpen" not in loaded

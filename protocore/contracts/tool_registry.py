@@ -20,12 +20,21 @@ from protocore.contracts.tool_retrieval import RetrievalSettings
 from protocore.contracts.tools import Tool
 from protocore.contracts.types import ToolDefinition
 
-#: ``ToolContext.metadata`` key under which the dispatcher injects the live
+#: ``ToolContext.metadata`` key under which the dispatcher stamps the live
 #: per-run :class:`ToolVisibilityPolicy` so policy-aware tools (ToolSearch)
-#: can honour the same visible/blocked contract the dispatch gate enforces
-#: (tools-initiative A2 — closes the blocked-schema info leak). The value is
-#: the policy MODEL instance — a live object, never a serialised copy.
-TOOL_VISIBILITY_POLICY_METADATA_KEY: Final[str] = "tool_visibility_policy"
+#: can honour the same visible/blocked contract the dispatch gate enforces, and
+#: so a blocked tool's schema never leaks through a search. The value is the
+#: policy MODEL instance — a live object, never a serialised copy. Namespaced
+#: and assigned on every dispatch: under a bare name set only when absent, a
+#: host key of the same spelling, or a stale policy carried in the bag, won
+#: over the one the gate was about to enforce.
+TOOL_VISIBILITY_POLICY_METADATA_KEY: Final[str] = "protocore.tool_visibility_policy"
+
+#: ``ToolContext.metadata`` key under which the dispatcher stamps a child run's
+#: declared tool set, as a frozenset, beside the policy. The gate refuses a
+#: name outside it, so a search must neither load nor report one. Absent when
+#: the run declared none.
+TOOL_ALLOWLIST_METADATA_KEY: Final[str] = "protocore.tool_allowlist"
 
 #: ``ToolResult.metadata`` key under which a discovery tool (role
 #: ``discovers_tools``) lists the tool names it loaded. The loop reads it from
@@ -267,6 +276,7 @@ class IToolRegistry(Protocol):
 __all__ = [
     "ADVERTISED_TOOLS_METADATA_KEY",
     "TOOLS_LOADED_METADATA_KEY",
+    "TOOL_ALLOWLIST_METADATA_KEY",
     "TOOL_VISIBILITY_POLICY_METADATA_KEY",
     "IToolRegistry",
     "ToolGroup",

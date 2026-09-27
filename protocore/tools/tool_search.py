@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from protocore.contracts.tool_registry import (
     ADVERTISED_TOOLS_METADATA_KEY,
+    TOOL_ALLOWLIST_METADATA_KEY,
     TOOL_VISIBILITY_POLICY_METADATA_KEY,
     TOOLS_LOADED_METADATA_KEY,
     IToolRegistry,
@@ -138,7 +139,18 @@ class ToolSearchTool(Tool):
         payload = ToolSearchInput.model_validate(arguments)
         call_id = str(read_metadata(context, "tool_call_id", "") or "")
         raw_policy = read_metadata(context, TOOL_VISIBILITY_POLICY_METADATA_KEY)
-        policy = raw_policy if isinstance(raw_policy, ToolVisibilityPolicy) else None
+        if not isinstance(raw_policy, ToolVisibilityPolicy):
+            # No policy is no answer about what is admitted, and reading it as
+            # "everything" listed and loaded tools the gate then refused.
+            return ToolResult(
+                tool_call_id=call_id,
+                content="Tool search is not available here: nothing says which tools this run may use.",
+                is_error=True,
+                metadata={TOOLS_LOADED_METADATA_KEY: [], "matches": []},
+            )
+        policy = self._within_allowlist(
+            raw_policy, _allowlist(read_metadata(context, TOOL_ALLOWLIST_METADATA_KEY))
+        )
         rc = context.run_state.rc if context.run_state is not None else None
         advertised = _advertised(read_metadata(context, ADVERTISED_TOOLS_METADATA_KEY))
         query = payload.query.strip()
@@ -153,7 +165,24 @@ class ToolSearchTool(Tool):
 
     # ------------------------------------------------------------------
 
-    def _admitted(self, policy: ToolVisibilityPolicy | None) -> dict[str, Tool]:
+    def _within_allowlist(
+        self, policy: ToolVisibilityPolicy, allowlist: frozenset[str] | None
+    ) -> ToolVisibilityPolicy:
+        """``policy`` narrowed to a child's declared tool set, as the gate narrows it.
+
+        Without it a child was told "Loaded" of a tool outside its set, and
+        the call that followed was refused. Folded into ``blocked`` and not
+        ``visible``: an empty ``visible`` means everything, so an intersection
+        that came out empty would have widened the search to the catalogue.
+        """
+        if allowlist is None:
+            return policy
+        outside = {tool.name for tool in self._registry.list_all() if tool.name not in allowlist}
+        if not outside - set(policy.blocked):
+            return policy
+        return policy.model_copy(update={"blocked": set(policy.blocked) | outside})
+
+    def _admitted(self, policy: ToolVisibilityPolicy) -> dict[str, Tool]:
         """Every tool the policy admits, except the discovery tools themselves."""
         return {
             tool.name: tool
@@ -165,7 +194,7 @@ class ToolSearchTool(Tool):
         self,
         call_id: str,
         names: Sequence[str],
-        policy: ToolVisibilityPolicy | None,
+        policy: ToolVisibilityPolicy,
         advertised: frozenset[str] | None,
     ) -> ToolResult:
         admitted = self._admitted(policy)
@@ -205,7 +234,7 @@ class ToolSearchTool(Tool):
         self,
         call_id: str,
         query: str,
-        policy: ToolVisibilityPolicy | None,
+        policy: ToolVisibilityPolicy,
         rc: Any,
         advertised: frozenset[str] | None,
     ) -> ToolResult:
@@ -271,6 +300,14 @@ def _advertised(raw: Any) -> frozenset[str] | None:
     """The names the calling request advertised, or ``None`` when not told."""
     if isinstance(raw, frozenset | set | tuple | list):
         return frozenset(name for name in raw if isinstance(name, str))
+    return None
+
+
+def _allowlist(raw: Any) -> frozenset[str] | None:
+    """A child's declared tool set, or ``None`` when the run declared none."""
+    if isinstance(raw, frozenset | set | tuple | list):
+        names = frozenset(name for name in raw if isinstance(name, str))
+        return names or None
     return None
 
 

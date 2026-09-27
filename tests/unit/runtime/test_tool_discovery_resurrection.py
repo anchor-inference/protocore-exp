@@ -15,6 +15,7 @@ Covers the three core seams the initiative added:
 from __future__ import annotations
 
 from protocore.contracts.tool_registry import (
+    TOOL_ALLOWLIST_METADATA_KEY,
     TOOL_VISIBILITY_POLICY_METADATA_KEY,
     ToolVisibilityPolicy,
     policy_admits,
@@ -356,3 +357,116 @@ def test_pinned_blocked_stays_blocked() -> None:
         "tenant-1", policy, query="common keyword", top_k=5
     )
     assert "ZZPinned" not in [d.name for d in defs]
+
+
+# ----------------------------------------------------------------------
+# 4. what the dispatcher stamps, and the line a blind call is answered with
+# ----------------------------------------------------------------------
+
+
+def _dispatch_once(
+    tool: MockTool,
+    *,
+    policy: ToolVisibilityPolicy,
+    arguments: dict[str, object],
+    metadata: dict[str, object] | None = None,
+    subagent_whitelist: frozenset[str] | None = None,
+) -> tuple[dict[str, object], str]:
+    import asyncio
+
+    from protocore.contracts.tools import ToolContext
+    from protocore.contracts.types import ToolCall
+    from protocore.runtime.tool_dispatch import DispatchOutcome, ToolDispatcher
+    from protocore.runtime.tool_permission import ToolPermissionGate
+
+    seen: dict[str, object] = {}
+    real_invoke = tool.invoke
+
+    async def _spy_invoke(context, arguments):  # type: ignore[no-untyped-def]
+        seen.update(context.metadata or {})
+        return await real_invoke(context, arguments)
+
+    tool.invoke = _spy_invoke  # type: ignore[method-assign]
+    dispatcher = ToolDispatcher(
+        registry=_registry_with(tool),
+        permission_gate=ToolPermissionGate(roles=CONVENTIONAL_TOOL_ROLES),
+    )
+    ctx = ToolContext(run_id="run-1", tenant_id="tenant-1", session_id="sess-1", metadata=metadata or {})
+    content = ""
+
+    async def _run() -> None:
+        nonlocal content
+        async for item in dispatcher.dispatch(
+            tool_call=ToolCall(id="tc-1", name=tool.name, arguments=arguments),
+            ctx=ctx,
+            visibility_policy=policy,
+            timeout_seconds=5,
+            subagent_whitelist=subagent_whitelist,
+        ):
+            if isinstance(item, DispatchOutcome):
+                content = item.content
+
+    asyncio.run(_run())
+    return seen, content
+
+
+def test_the_dispatcher_stamps_its_own_policy_over_whatever_the_bag_carried() -> None:
+    """Stamped only when absent, a policy already in the bag — a stale one, or
+    a host key of the same bare name — reached ToolSearch instead of the one
+    the gate enforced."""
+    stale = ToolVisibilityPolicy()
+    live = ToolVisibilityPolicy(blocked={"SomethingElse"})
+    seen, _ = _dispatch_once(
+        MockTool(tool_name="Probe", description="probe"),
+        policy=live,
+        arguments={},
+        metadata={TOOL_VISIBILITY_POLICY_METADATA_KEY: stale, TOOL_ALLOWLIST_METADATA_KEY: frozenset({"X"})},
+        subagent_whitelist=frozenset({"Probe"}),
+    )
+    assert seen[TOOL_VISIBILITY_POLICY_METADATA_KEY] is live
+    assert seen[TOOL_ALLOWLIST_METADATA_KEY] == frozenset({"Probe"})
+    seen, _ = _dispatch_once(
+        MockTool(tool_name="Probe", description="probe"),
+        policy=live,
+        arguments={},
+        metadata={TOOL_ALLOWLIST_METADATA_KEY: frozenset({"X"})},
+    )
+    assert TOOL_ALLOWLIST_METADATA_KEY not in seen
+
+
+def _too_deep() -> dict[str, object]:
+    arguments: dict[str, object] = {}
+    for _ in range(250):
+        arguments = {"x": arguments}
+    return arguments
+
+
+def test_a_blind_call_of_a_refused_tool_is_never_given_its_line() -> None:
+    """The argument checks run before the gate, so a blocked tool called
+    blind with bad arguments was answered with its parameters and told it was
+    loaded, which a refused tool never is."""
+    from protocore.contracts.tool_registry import ADVERTISED_TOOLS_METADATA_KEY
+
+    blind = {ADVERTISED_TOOLS_METADATA_KEY: frozenset({"Other"})}
+    _, admitted = _dispatch_once(
+        MockTool(tool_name="Probe", description="probe things"),
+        policy=ToolVisibilityPolicy(),
+        arguments=_too_deep(),
+        metadata=dict(blind),
+    )
+    assert "It takes: Probe" in admitted
+    _, blocked = _dispatch_once(
+        MockTool(tool_name="Probe", description="probe things"),
+        policy=ToolVisibilityPolicy(blocked={"Probe"}),
+        arguments=_too_deep(),
+        metadata=dict(blind),
+    )
+    assert "It takes" not in blocked and "loaded" not in blocked
+    _, outside = _dispatch_once(
+        MockTool(tool_name="Probe", description="probe things"),
+        policy=ToolVisibilityPolicy(),
+        arguments=_too_deep(),
+        metadata=dict(blind),
+        subagent_whitelist=frozenset({"Other"}),
+    )
+    assert "It takes" not in outside

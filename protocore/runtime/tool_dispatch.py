@@ -83,6 +83,7 @@ from protocore.contracts.run_state import (
 )
 from protocore.contracts.tool_registry import (
     ADVERTISED_TOOLS_METADATA_KEY,
+    TOOL_ALLOWLIST_METADATA_KEY,
     TOOL_VISIBILITY_POLICY_METADATA_KEY,
     IToolRegistry,
     ToolVisibilityPolicy,
@@ -1555,7 +1556,10 @@ class ToolDispatcher:
         return produced[0]
 
     def _nearest_admitted_names(
-        self, name: str, policy: ToolVisibilityPolicy | None
+        self,
+        name: str,
+        policy: ToolVisibilityPolicy | None,
+        allowlist: frozenset[str] | None = None,
     ) -> list[str]:
         """Up to three registered names close to ``name`` that the policy admits.
 
@@ -1568,6 +1572,7 @@ class ToolDispatcher:
             tool.name.casefold(): tool.name
             for tool in self._registry.list_all()
             if policy_admits(policy, tool.name)
+            and (allowlist is None or tool.name in allowlist)
         }
         close = difflib.get_close_matches(
             name.casefold(), list(admitted), n=_UNKNOWN_TOOL_SUGGESTIONS, cutoff=0.6
@@ -1627,11 +1632,17 @@ class ToolDispatcher:
         """
         metadata = copy_metadata(ctx)
         metadata.setdefault("tool_call_id", tool_call.id)
-        # tools-initiative A2: expose the live per-run visibility policy to
-        # policy-aware tools (ToolSearch) so discovery honours the SAME
-        # visible/blocked contract the permission gate enforces below. A live
-        # model instance, not a serialised copy.
-        metadata.setdefault(TOOL_VISIBILITY_POLICY_METADATA_KEY, visibility_policy)
+        # The live policy and the child's declared tool set, for policy-aware
+        # tools (ToolSearch), so discovery honours the SAME contract the
+        # permission gate enforces below. Assigned, never set-if-absent: a
+        # value already in the bag is a host's or a stale one, and a search
+        # that trusted it could report as loaded a tool the gate then refuses.
+        metadata[TOOL_VISIBILITY_POLICY_METADATA_KEY] = visibility_policy
+        allowlist = _declared_allowlist(subagent_whitelist)
+        if allowlist is None:
+            metadata.pop(TOOL_ALLOWLIST_METADATA_KEY, None)
+        else:
+            metadata[TOOL_ALLOWLIST_METADATA_KEY] = allowlist
         ctx = ctx.model_copy(update={"metadata": metadata})
 
         # ── Step 1: registry lookup ────────────────────────────────
@@ -1651,7 +1662,9 @@ class ToolDispatcher:
                 )
             else:
                 msg = f"unknown tool: {tool_call.name!r}"
-                nearest = self._nearest_admitted_names(tool_call.name, visibility_policy)
+                nearest = self._nearest_admitted_names(
+                    tool_call.name, visibility_policy, allowlist
+                )
                 if nearest:
                     msg += f". Did you mean: {', '.join(nearest)}?"
             final_kind, final_msg = self._apply_consecutive_error_cap(
@@ -1682,7 +1695,7 @@ class ToolDispatcher:
         # A call of a tool the request did not advertise was written without
         # its schema; when such a call fails on its arguments, the answer
         # carries the tool's line so the retry is right the first time.
-        unseen_signature = _unseen_tool_signature(ctx, tool)
+        unseen_signature = _unseen_tool_signature(ctx, tool, visibility_policy, allowlist)
 
         # ── Step 2: schema validation (input dict shape) ───────────
         # Core ABC accepts dict; tool-specific Pydantic input_model
@@ -1746,7 +1759,9 @@ class ToolDispatcher:
             arguments=tool_call.arguments,
             ctx=ctx,
             visibility_policy=visibility_policy,
-            subagent_whitelist=subagent_whitelist,
+            # Frozen once above: an iterator handed in here would otherwise
+            # reach the gate already spent, which reads as no declaration.
+            subagent_whitelist=allowlist,
             child_run=child_run,
             hook_manager=self._hooks,
             skip_pre_tool_approval=preapproved_tool_call_id == tool_call.id,
@@ -2342,15 +2357,33 @@ class ToolDispatcher:
 _ARGUMENT_ERRORS: Final[tuple[type[Exception], ...]] = (TypeError, ValueError, KeyError)
 
 
-def _unseen_tool_signature(ctx: ToolContext, tool: Tool) -> str:
+def _declared_allowlist(subagent_whitelist: Iterable[str] | None) -> frozenset[str] | None:
+    """A child's declared tool set as the gate reads it: ``None`` or empty admits all."""
+    if subagent_whitelist is None:
+        return None
+    allow = frozenset(subagent_whitelist)
+    return allow or None
+
+
+def _unseen_tool_signature(
+    ctx: ToolContext,
+    tool: Tool,
+    policy: ToolVisibilityPolicy,
+    allowlist: frozenset[str] | None,
+) -> str:
     """The tool's line, to append to a failure, when the model never saw its schema.
 
     Empty when the loop did not say what it advertised (a dispatch outside a
     run) or when the tool was on the list, where the schema is already in
-    front of the model and repeating it is noise.
+    front of the model and repeating it is noise. Empty, too, for a tool the
+    policy or the child's declared set refuses: the argument checks run before
+    the gate, so a blocked tool called with bad arguments was answered with
+    its parameters and told it was "loaded now", which it never is.
     """
     advertised = read_metadata(ctx, ADVERTISED_TOOLS_METADATA_KEY)
     if not isinstance(advertised, frozenset | set | tuple | list) or tool.name in advertised:
+        return ""
+    if not policy_admits(policy, tool.name) or (allowlist is not None and tool.name not in allowlist):
         return ""
     return (
         "\nThis tool was not in your tool list, so it was called without its "

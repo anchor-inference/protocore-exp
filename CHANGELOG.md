@@ -92,14 +92,19 @@ All notable changes to this project are recorded here. The format follows
   an unknown one with the nearest admitted names. A tool already in the tool
   list is reported as such, never as loaded, and the description says the tool
   loads tools only — skills are not tools. It respects the live visibility
-  policy and is advertised only while something is held back.
+  policy and a child run's declared tool set, which the dispatcher stamps on
+  every call (`TOOL_VISIBILITY_POLICY_METADATA_KEY`, now
+  `protocore.tool_visibility_policy`, and `TOOL_ALLOWLIST_METADATA_KEY`); with
+  no policy it admits nothing. It is advertised only while something is held
+  back.
 - `ADVERTISED_TOOLS_METADATA_KEY`: the loop stamps the names the calling
   request advertised on `ToolContext.metadata`.
 - A call of a registered tool the request did not advertise still runs and now
   loads the tool; events `tool_discovered` and `tool_unadvertised_call`. When
   such a call fails on its arguments, the error ends with the tool's line
   (`It takes: Name(param1*, param2) — first sentence`), the form `ToolSearch`
-  lists tools in, so the retry need not guess again.
+  lists tools in, so the retry need not guess again — only for a tool the
+  policy and the child's declared set admit.
 - `QueryEngineConfig.discovered_tools` seeds a new run with the tools the last
   run of the session loaded.
 - `max_tool_calls_per_turn` (default 64): calls past it in one model message are

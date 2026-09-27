@@ -423,9 +423,13 @@ it does not need spends turns on it.
   The description says so too — the tool loads tools only, and a skill is not
   one.
 - The live visibility policy is read from `ToolContext.metadata`
-  (`TOOL_VISIBILITY_POLICY_METADATA_KEY`), so the search never lists, suggests
-  or loads a tool the dispatch gate would refuse, and a blocked name is never
-  offered as "close".
+  (`TOOL_VISIBILITY_POLICY_METADATA_KEY`, `protocore.tool_visibility_policy`),
+  and a child run's declared tool set beside it (`TOOL_ALLOWLIST_METADATA_KEY`),
+  so the search never lists, suggests or loads a tool the dispatch gate would
+  refuse, and a blocked name is never offered as "close". The dispatcher
+  assigns both on every call rather than setting them when absent, so a value
+  already in the bag never stands in for the one the gate enforces. With no
+  policy in the bag the search admits nothing.
 
 The tool only ranks and reports. It names what it loaded under
 `TOOLS_LOADED_METADATA_KEY` in its result's metadata, and the loop — which owns
@@ -482,7 +486,9 @@ a bad one as an error result, not an exception: a dispatch validation error, an
 exception that is a `TypeError`, `ValueError` (which includes a pydantic
 `ValidationError`) or `KeyError`, or an error result the tool counts as a
 failure. A tool that was on the list never gets the line; its schema is already
-in front of the model.
+in front of the model. Nor does a tool the policy or the child's declared set
+refuses: the argument checks run before the gate, and a refused tool is never
+"loaded now".
 
 ### A runaway batch
 
