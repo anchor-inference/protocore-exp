@@ -349,10 +349,14 @@ not, so loading a tool never reopens the decision:
 
 Never held back: the forced floor (`forced_pinned`), explicitly pinned tools,
 `always_load` tools, the discovery tool itself, and any tool in no group. A host
-that wants a tool deferrable says so by grouping it. Nothing is held back at all
-unless a discovery tool (role `discovers_tools`) is registered and admitted,
-because a catalogue that points at a tool the model cannot call is worse than no
-catalogue.
+that wants a tool deferrable says so by grouping it.
+
+Without a discovery tool (role `discovers_tools`) registered and admitted, the
+only way back for a held-back tool is a call by its exact name, so groups are
+held back only when the surface is over `max_advertised_tools` — a provider
+that refuses the request outright — dynamic groups first; the token budget is
+not enforced then. The catalogue says to call by exact name instead of pointing
+at a search the model does not have.
 
 Held-back tools stay **admitted** by the visibility policy: they are only not
 advertised. A model that calls one by its exact name is served (see
@@ -360,7 +364,11 @@ advertised. A model that calls one by its exact name is served (see
 
 The decision is made once, not per request, because the catalogue it produces
 sits at the head of the cached prompt: remade per request, it would move every
-time the answer flipped.
+time the answer flipped. When a change of catalogue or policy makes it again,
+the decision in force is its floor: a group held back stays held back while it
+has tools, and only a dynamic group the run is newly admitted to, or a limit
+the surface now exceeds, adds to it. Another session switching a server on, or
+an unrelated tool switched off, leaves the catalogue as it was.
 
 ### The catalogue
 
@@ -448,8 +456,10 @@ when base plus loaded tools would exceed `max_advertised_tools`, the least
 recently used loaded tools are left off that request (they stay loaded).
 
 The loaded tools and the held-back groups travel in the snapshot
-(`discovered_tools`, `deferred_tool_groups`), and a resumed run replays the
-decision instead of measuring again. A host that wants the next run of a session
+(`discovered_tools`, `deferred_tool_groups`), and a resumed run keeps the
+decision instead of measuring again — as a floor: a dynamic group the snapshot
+does not name (a server that connected since) is still held back, and the
+limits are still enforced on top. A host that wants the next run of a session
 to start with the same tools passes the last run's list as
 `QueryEngineConfig.discovered_tools`; it is in the snapshot and in every
 `tool_surface_advertised` event (`discovered_tool_names`, discovery order).

@@ -17,9 +17,11 @@ A loaded tool is APPENDED to the surface in the order it was discovered, so
 what came before it — the name-sorted base surface and every earlier load —
 keeps its bytes, and a prefix-caching provider re-reads only the tail.
 
-The decision is made once per run and remade only when the catalogue itself
-changes. Deciding per request would move the catalogue in the middle of the
-cached prefix every time the answer flipped, which is worse than either answer.
+The decision is made once per run. When the catalogue or the policy changes
+it is made again on top of itself: what is held back stays held back, and only
+a newly admitted dynamic group or a limit now exceeded adds to it. Deciding
+afresh would move the catalogue in the middle of the cached prefix every time
+the answer flipped, which is worse than either answer.
 Held-back tools stay admitted by the visibility policy: a model that calls one
 by its exact name is served, and the tool is loaded for the rest of the run.
 
@@ -125,6 +127,7 @@ def plan_tool_deferral(
     discovery_names: frozenset[str],
     rc: LoopConstants,
     restored: Sequence[str] | None = None,
+    restored_reasons: Sequence[str] = ("restored",),
 ) -> ToolDeferral:
     """Decide which groups ``tools`` — the would-be surface — holds back.
 
@@ -137,13 +140,27 @@ def plan_tool_deferral(
     only while the surface is over — its definitions above
     ``tool_definitions_ratio`` of the window, or its count above
     ``max_advertised_tools`` with room left for the tools the run may load —
-    largest first, so the fewest groups leave. ``restored`` replays a
-    decision a snapshot carried instead of measuring again, because the
-    catalogue it produced is at the head of the resumed run's cached prompt.
+    largest first, so the fewest groups leave.
+
+    ``restored`` is an earlier decision to keep: one a snapshot carried, or the
+    one this run already made. Its groups stay held back while they have tools,
+    even where a fresh measurement would let them back, because the catalogue
+    they produced is at the head of the cached prompt. It is a floor and not
+    the answer: a dynamic group it does not name is still held back, and the
+    limits are still enforced on top of it. Replayed as the whole answer, a
+    snapshot taken before a large server connected put that server on the
+    surface whole, over a provider's limit on the number of tools.
+
+    Without a discovery tool nothing can load a held-back tool but a call by
+    its exact name, so groups are held back only when the provider would
+    otherwise refuse the request (the count limit); the catalogue then says to
+    call by exact name.
     """
-    if rc.tool_deferral_mode == "off" or not discovery_names:
+    if rc.tool_deferral_mode == "off":
         return NO_DEFERRAL
-    if not any(tool.name in discovery_names for tool in tools):
+    discovering = any(tool.name in discovery_names for tool in tools)
+    limit = rc.max_advertised_tools
+    if not discovering and limit <= 0:
         return NO_DEFERRAL
     declared = {group.name: group for group in groups}
     members: dict[str, list[Tool]] = {}
@@ -155,10 +172,6 @@ def plan_tool_deferral(
             members.setdefault(group_name, []).append(tool)
     if not members:
         return NO_DEFERRAL
-
-    if restored is not None:
-        chosen = [name for name in restored if name in members]
-        return _deferral(chosen, members, declared, rc, ("restored",), discovery_names)
 
     tokens_of = {tool.name: _definition_tokens(tool.definition, rc) for tool in tools}
     group_tokens = {
@@ -178,12 +191,27 @@ def plan_tool_deferral(
     # The same budget the context layers are sized with; until this module it
     # was computed and never held to anything.
     budget = derive_budgets(rc).tool_definitions_budget_tokens
-    limit = rc.max_advertised_tools
-    over_tokens = plain_tokens > budget
+    # Without a discovery tool the token budget is not enforced: a group held
+    # back for it could only come back by a blind call, which costs more than
+    # the definitions it saves. The count limit is a refusal, so it is.
+    over_tokens = discovering and plain_tokens > budget
     over_count = limit > 0 and plain_count > limit
+    if not discovering and not over_count:
+        return NO_DEFERRAL
 
-    chosen = sorted((name for name in members if _is_dynamic(declared, name)), key=largest_first)
-    reasons: list[str] = ["dynamic"] if chosen else []
+    chosen: list[str] = []
+    reasons: list[str] = []
+    if restored is not None:
+        chosen = list(dict.fromkeys(name for name in restored if name in members))
+        if chosen:
+            reasons.extend(restored_reasons)
+    dynamic = sorted(
+        (name for name in members if name not in chosen and _is_dynamic(declared, name)),
+        key=largest_first,
+    )
+    if dynamic:
+        chosen.extend(dynamic)
+        reasons.append("dynamic")
     if over_tokens or over_count:
         tokens = plain_tokens + discovery_tokens - sum(group_tokens[name] for name in chosen)
         count = plain_count + discovery_count - sum(len(members[name]) for name in chosen)
@@ -191,7 +219,7 @@ def plan_tool_deferral(
         # count leaves room for as many as the run may keep loaded.
         headroom = rc.pinned_tool_max_count
         for name in sorted((n for n in members if n not in chosen), key=largest_first):
-            fits_tokens = tokens <= budget
+            fits_tokens = not discovering or tokens <= budget
             fits_count = limit <= 0 or count + headroom <= limit
             if fits_tokens and fits_count:
                 break
@@ -204,7 +232,14 @@ def plan_tool_deferral(
             reasons.append("count")
     if not chosen:
         return NO_DEFERRAL
-    return _deferral(chosen, members, declared, rc, tuple(reasons), discovery_names)
+    return _deferral(
+        chosen,
+        members,
+        declared,
+        rc,
+        tuple(dict.fromkeys(reasons)),
+        discovery_names & {tool.name for tool in tools},
+    )
 
 
 def _is_dynamic(declared: dict[str, ToolGroup], name: str) -> bool:
@@ -231,7 +266,7 @@ def _deferral(
         catalogue=render_tool_catalogue(
             deferred,
             declared,
-            discovery_tool=min(discovery_names),
+            discovery_tool=min(discovery_names) if discovery_names else "",
             max_listed_names=rc.tool_catalogue_max_listed_names,
         ),
         reasons=reasons,
@@ -251,7 +286,8 @@ def render_tool_catalogue(
     the same bytes on every request and after every resume. Each line gives
     the EXACT names — a model that guesses a name gets the case wrong — or, for
     a group declared by prefix with more tools than ``max_listed_names``, the
-    exact prefix and the count.
+    exact prefix and the count. An empty ``discovery_tool`` means the run has
+    none, and the header says to call by exact name instead.
     """
     if not deferred:
         return ""
@@ -270,11 +306,22 @@ def render_tool_catalogue(
             lines.append(f"- {name}: {summary}. Tools: {listed}")
         else:
             lines.append(f"- {name}: tools {listed}")
-    header = (
-        "These tools are available but not loaded. Before calling one, load it "
-        f'with {discovery_tool}: describe what you need, or pass "select:" and '
-        f'exact names, e.g. "select:Name1,Name2". {_CATALOGUE_ADVICE}'
-    )
+    if discovery_tool:
+        header = (
+            "These tools are available but not loaded. Before calling one, load it "
+            f'with {discovery_tool}: describe what you need, or pass "select:" and '
+            f'exact names, e.g. "select:Name1,Name2". {_CATALOGUE_ADVICE}'
+        )
+    else:
+        # No discovery tool: the one way in is a call by exact name, which is
+        # served and loads the tool, and a call with the wrong arguments is
+        # answered with the tool's parameters.
+        header = (
+            "These tools are available but not in your tool list, which would be "
+            "over the provider's limit. Call one by its exact name and it is "
+            "loaded; if the arguments are wrong, the answer gives its parameters. "
+            f"{_CATALOGUE_ADVICE}"
+        )
     body = "\n".join(lines)
     return f"<system-reminder>\n{header}\n\n{body}\n</system-reminder>"
 
@@ -322,7 +369,18 @@ def _unpinned_policy(engine: QueryEngine, policy: ToolVisibilityPolicy) -> ToolV
 def ensure_tool_deferral(
     engine: QueryEngine, policy: ToolVisibilityPolicy | None = None
 ) -> ToolDeferral:
-    """The run's deferral decision, made on first use and when the catalogue changes."""
+    """The run's deferral decision, made on first use and kept for the run.
+
+    A change of the catalogue or of the policy makes it again, with the
+    decision in force as the floor (see ``restored`` in
+    :func:`plan_tool_deferral`): a group held back stays held back while it
+    has tools, a dynamic group this run is newly admitted to joins it, and the
+    limits are enforced on top. Made from scratch instead, it flipped whenever
+    anything in the process moved — another session switching a server on
+    grows this session's refusals, a tool switched off shrinks the surface —
+    and every flip rewrote the catalogue at the head of the cached prompt, or
+    let a group that had been held back onto the surface mid-run.
+    """
     key = _catalogue_key(engine)
     current = engine._tool_deferral
     if current is not None and engine._tool_deferral_key == key:
@@ -343,8 +401,12 @@ def ensure_tool_deferral(
         | frozenset(engine.config.tool_visibility_policy.pinned)
         | frozenset(t.name for t in candidates if bool(getattr(t, "always_load", False)))
     )
-    restored = engine._restored_deferred_groups
+    restored: Sequence[str] | None = engine._restored_deferred_groups
+    restored_reasons: tuple[str, ...] = ("restored",)
     engine._restored_deferred_groups = None
+    if restored is None and current is not None:
+        restored = current.deferred_groups
+        restored_reasons = current.reasons
     decision = plan_tool_deferral(
         tools=candidates,
         groups=registry.tool_groups(),
@@ -352,6 +414,7 @@ def ensure_tool_deferral(
         discovery_names=discovery_tool_names(candidates, engine.config.tool_roles),
         rc=engine.config.rc,
         restored=restored,
+        restored_reasons=restored_reasons,
     )
     engine._tool_deferral = decision
     engine._tool_deferral_key = key

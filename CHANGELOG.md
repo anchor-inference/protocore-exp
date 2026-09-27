@@ -79,7 +79,12 @@ All notable changes to this project are recorded here. The format follows
   prompt, with exact tool names or an exact prefix and count
   (`tool_catalogue_max_listed_names`). The decision is made again when the
   catalogue, the groups or the host's visibility policy change, so tools a
-  host switches on mid-run are held back like the rest. See `docs/tools.md`.
+  host switches on mid-run are held back like the rest, with the decision in
+  force as its floor, so the catalogue does not flip mid-run. A decision a
+  snapshot carries is a floor too: a dynamic group it does not name is still
+  held back and the limits still apply. Without a discovery tool, groups are
+  held back only over `max_advertised_tools`, and the catalogue says to call
+  by exact name. See `docs/tools.md`.
 - **`ToolSearch`** (`protocore.tools.ToolSearchTool`): free-text search with up
   to `tool_search_max_results` hits in rank order, one line each, loading the
   first `tool_search_autoload_count`; `select:Name1,Name2` (or a `select`

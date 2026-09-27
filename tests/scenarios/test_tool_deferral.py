@@ -502,3 +502,48 @@ async def test_tools_a_changed_policy_admits_are_held_back_like_the_rest(
     assert run.advertised_tool_names(0) == ["Note", "Zeta", "Enable"]
     assert run.advertised_tool_names(1) == ["Note", "Zeta", "Enable", "ToolSearch"]
     assert "Mcp_Github_create_issue, Mcp_Github_list_issues" in _system_text(run, 1)
+
+
+@dataclass
+class _SwitchOff(ScriptedTool):
+    """Stands in for the operator switching an unrelated tool off mid-run."""
+
+    tool_name: str = "SwitchOff"
+    description: str = "switch a tool off"
+    engine: Any = None
+    off: frozenset[str] = frozenset()
+
+    async def invoke(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
+        self.engine.config = replace(
+            self.engine.config, tool_visibility_policy=ToolVisibilityPolicy(blocked=set(self.off))
+        )
+        return await super().invoke(context, arguments)
+
+
+async def test_a_group_held_back_stays_held_back_when_the_surface_shrinks_mid_run(
+    scenario: ScenarioFactory,
+) -> None:
+    """Remade from scratch on every policy change, the decision flipped when an
+    unrelated tool was switched off: the surface fitted again, the held-back
+    group came back, and the catalogue at the head of the cached prompt was
+    rewritten mid-run."""
+    long = "does a great many things, each of them described at length. "
+    switch = _SwitchOff(off=frozenset({"Huge"}))
+    tools = [
+        ScriptedTool(tool_name="Note", description="record a note"),
+        ScriptedTool(tool_name="Huge", description=long * 60),
+        *(ScriptedTool(tool_name=f"Browser{i}", description=long * 6) for i in range(2)),
+        switch,
+    ]
+    run = scenario(tools=tools)
+    switch.engine = run.engine
+    run.tools.register(ToolSearchTool(run.tools))
+    run.tools.declare_group("browser", "Drive a web browser", prefix="Browser")
+    run.llm.queue_tool_call_response(tool_call_id="o-1", tool_name="SwitchOff", tool_input={})
+    run.llm.queue_response(text="done")
+    await run.run("hello")
+
+    assert run.advertised_tool_names(0) == ["Note", "Huge", "SwitchOff", "ToolSearch"]
+    assert run.advertised_tool_names(1) == ["Note", "SwitchOff", "ToolSearch"]
+    assert _system_text(run, 1) == _system_text(run, 0)
+    assert "- browser: Drive a web browser" in _system_text(run, 1)

@@ -202,20 +202,83 @@ def test_the_protected_floor_stays_whatever_its_group() -> None:
     assert names == {"Mcp_Github_create"}
 
 
-def test_a_restored_decision_is_replayed_rather_than_remeasured() -> None:
+def test_a_restored_decision_is_kept_rather_than_remeasured() -> None:
     tools = [_search(), _padded("Browse", group="browser"), _padded("Mcp_X_a")]
     groups = [
         ToolGroup(name="browser", description="Drive a browser"),
         ToolGroup(name="x", dynamic=True, prefix="Mcp_X_"),
     ]
     # Everything fits and "browser" is not dynamic, so a fresh decision would
-    # hold back only "x"; the snapshot said "browser", and "gone" no longer
-    # has any tools.
+    # let it back; the snapshot said "browser", and "gone" no longer has any
+    # tools. "x" is dynamic, so it is held back whatever the snapshot said.
     deferred, names, _, reasons = _plan(tools, groups, restored=["browser", "gone"])
-    assert deferred == ("browser",)
-    assert names == {"Browse"}
-    assert reasons == ("restored",)
-    assert _plan(tools, groups, restored=[]) == ((), frozenset(), "", ())
+    assert deferred == ("browser", "x")
+    assert names == {"Browse", "Mcp_X_a"}
+    assert reasons == ("restored", "dynamic")
+    assert _plan(tools, groups, restored=[])[0] == ("x",)
+
+
+def test_a_restored_decision_still_holds_back_a_server_that_connected_since() -> None:
+    """A snapshot taken before a large server connected named nothing; replayed
+    as the whole answer, it put that server's every tool on the surface, over a
+    provider's limit on the number of tools."""
+    tools = [
+        _search(),
+        *(MockTool(tool_name=f"Own{i}") for i in range(20)),
+        *(MockTool(tool_name=f"Mcp_Big_t{i}") for i in range(400)),
+    ]
+    groups = [ToolGroup(name="big", description="Big", dynamic=True, prefix="Mcp_Big_")]
+    rc = LoopConstants(model_context_window=128_000, max_advertised_tools=350)
+    deferred, names, _, reasons = _plan(tools, groups, rc=rc, restored=[])
+    assert deferred == ("big",)
+    assert len(names) == 400
+    assert "dynamic" in reasons
+
+
+def test_a_restored_decision_is_held_to_the_limits_on_top() -> None:
+    tools = [
+        _search(),
+        *(MockTool(tool_name=f"Core{i}") for i in range(6)),
+        *(GroupedTool(tool_name=f"A{i}", tool_group="a") for i in range(4)),
+        *(GroupedTool(tool_name=f"B{i}", tool_group="b") for i in range(2)),
+    ]
+    groups = [ToolGroup(name="a"), ToolGroup(name="b")]
+    rc = LoopConstants(max_advertised_tools=10, pinned_tool_max_count=2)
+    # The snapshot held back only the small group; with "a" still on the
+    # surface the request carries 11 tools against a limit of 10.
+    deferred, _, _, reasons = _plan(tools, groups, rc=rc, restored=["b"])
+    assert deferred == ("b", "a")
+    assert reasons == ("restored", "count")
+
+
+# ── without a discovery tool ────────────────────────────────────────────────
+
+
+def test_without_a_discovery_tool_dynamic_groups_go_only_over_the_provider_limit() -> None:
+    """A registry without an admitted ToolSearch used to hold nothing back, so a
+    large server reached a provider that refuses more than its limit whole."""
+    tools = [
+        *(MockTool(tool_name=f"Own{i}") for i in range(20)),
+        *(MockTool(tool_name=f"Mcp_Big_t{i}") for i in range(40)),
+        *(GroupedTool(tool_name=f"Board{i}", tool_group="board") for i in range(3)),
+    ]
+    groups = [
+        ToolGroup(name="big", description="Big", dynamic=True, prefix="Mcp_Big_"),
+        ToolGroup(name="board"),
+    ]
+    under = LoopConstants(max_advertised_tools=100)
+    assert _plan(tools, groups, rc=under)[0] == ()
+    assert _plan(tools, groups)[0] == ()  # no limit at all
+    over = LoopConstants(max_advertised_tools=50, pinned_tool_max_count=2)
+    deferred, names, catalogue, reasons = _plan(tools, groups, rc=over)
+    assert deferred == ("big",)
+    assert len(names) == 40
+    assert reasons == ("dynamic", "count")
+    assert "Call one by its exact name" in catalogue
+    assert "ToolSearch" not in catalogue
+    # A token budget alone is not a reason without a way to load them back.
+    small = LoopConstants(model_context_window=4_096)
+    assert _plan(tools, groups, rc=small)[0] == ()
 
 
 # ── the catalogue ───────────────────────────────────────────────────────────
