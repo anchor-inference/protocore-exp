@@ -77,7 +77,9 @@ All notable changes to this project are recorded here. The format follows
   `tool_definitions_ratio` of the window or over `max_advertised_tools`.
   Held-back groups are named in a byte-stable catalogue block in the system
   prompt, with exact tool names or an exact prefix and count
-  (`tool_catalogue_max_listed_names`). See `docs/tools.md`.
+  (`tool_catalogue_max_listed_names`). The decision is made again when the
+  catalogue, the groups or the host's visibility policy change, so tools a
+  host switches on mid-run are held back like the rest. See `docs/tools.md`.
 - **`ToolSearch`** (`protocore.tools.ToolSearchTool`): free-text search with up
   to `tool_search_max_results` hits in rank order, one line each, loading the
   first `tool_search_autoload_count`; `select:Name1,Name2` (or a `select`

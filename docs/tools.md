@@ -335,8 +335,11 @@ the loop's deferral decision is keyed on the declared groups themselves.
 ### When groups are held back
 
 `tool_deferral_mode` is `"auto"` by default and `"off"` turns it off. In `auto`,
-once per run — and again only if the registry's catalogue changes — the loop
-measures the surface it would otherwise send:
+once per run — and again only if the registry's catalogue or groups, or the
+host's visibility policy, change — the loop measures the surface it would
+otherwise send. The policy counts because a host may switch tools on mid-run by
+replacing it, registering nothing; the pins the run adds for tools it loaded do
+not, so loading a tool never reopens the decision:
 
 1. every **dynamic** group is held back, largest first;
 2. then, while the surface is over — its definitions above

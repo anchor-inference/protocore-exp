@@ -9,12 +9,14 @@ is that loading a tool changes the END of the tool list and nothing else.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import dataclass, replace
 from typing import Any
 
 import pytest
 
 from protocore.contracts.tool_registry import ToolVisibilityPolicy
-from protocore.contracts.types import MessageRole, TextBlock
+from protocore.contracts.tools import ToolContext
+from protocore.contracts.types import MessageRole, TextBlock, ToolResult
 from protocore.runtime.events import EventType
 from protocore.runtime.tool_surface import forget_tool_surfaces
 from protocore.tools import ToolSearchTool
@@ -458,3 +460,45 @@ async def test_blind_calls_in_one_message_each_get_the_line(
     first, second = run.tool_results()
     assert first.content.endswith("It takes: Mcp_Github_list_issues(v) — list the issues")
     assert second.content.endswith("It takes: Mcp_Github_create_issue(v) — open an issue")
+
+
+# ── a policy that changes under a running run ───────────────────────────────
+
+
+@dataclass
+class _AdmitEverything(ScriptedTool):
+    """Stands in for a host tool that switches a server on mid-run, as a host's
+    MCP switch does: it replaces the engine's policy while the run goes on."""
+
+    tool_name: str = "Enable"
+    description: str = "switch a server on"
+    engine: Any = None
+
+    async def invoke(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
+        self.engine.config = replace(self.engine.config, tool_visibility_policy=ToolVisibilityPolicy())
+        return await super().invoke(context, arguments)
+
+
+async def test_tools_a_changed_policy_admits_are_held_back_like_the_rest(
+    scenario: ScenarioFactory,
+) -> None:
+    """The decision was keyed on the catalogue alone, so a server switched on
+    mid-run — its tools already registered for another session — arrived on
+    the surface whole, however large, instead of in the catalogue."""
+    switch = _AdmitEverything()
+    run = _with_search(
+        scenario(
+            tools=[*_tools(), switch],
+            tool_visibility_policy=ToolVisibilityPolicy(
+                blocked={"Mcp_Github_list_issues", "Mcp_Github_create_issue"}
+            ),
+        )
+    )
+    switch.engine = run.engine
+    run.llm.queue_tool_call_response(tool_call_id="e-1", tool_name="Enable", tool_input={})
+    run.llm.queue_response(text="on")
+    await run.run("switch github on")
+
+    assert run.advertised_tool_names(0) == ["Note", "Zeta", "Enable"]
+    assert run.advertised_tool_names(1) == ["Note", "Zeta", "Enable", "ToolSearch"]
+    assert "Mcp_Github_create_issue, Mcp_Github_list_issues" in _system_text(run, 1)

@@ -285,10 +285,23 @@ def render_tool_catalogue(
 
 
 def _catalogue_key(engine: QueryEngine) -> tuple[Any, ...]:
-    """What the decision depends on that can change under a running process."""
+    """What the decision depends on that can change under a running process.
+
+    The host's policy is part of it. A host that switches a server's tools on
+    mid-run replaces the policy and registers nothing, when the tools were
+    already registered for another session; keyed on the catalogue alone, the
+    decision went stale and those tools reached the surface whole, however
+    many there were. The pins the run adds for the tools it loaded are left
+    out: loading a tool must not reopen the decision.
+    """
+    policy = engine.config.tool_visibility_policy
     return (
         tuple(tool.name for tool in engine.tools.list_all()),
         tuple(engine.tools.tool_groups()),
+        frozenset(policy.visible),
+        frozenset(policy.blocked),
+        frozenset(policy.pinned),
+        policy.forced_pinned,
     )
 
 
