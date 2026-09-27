@@ -26,6 +26,7 @@ from protocore.contracts.tool_registry import (
     ADVERTISED_TOOLS_METADATA_KEY,
     TOOL_ALLOWLIST_METADATA_KEY,
     TOOL_GROUP_RULES_GIVEN_METADATA_KEY,
+    TOOL_GROUP_RULES_MARK_METADATA_KEY,
     TOOL_GROUP_RULES_METADATA_KEY,
     TOOL_GROUPS_LOADED_METADATA_KEY,
     TOOL_VISIBILITY_POLICY_METADATA_KEY,
@@ -174,8 +175,10 @@ class ToolSearchTool(Tool):
         )
         rc = context.run_state.rc if context.run_state is not None else None
         advertised = _advertised(read_metadata(context, ADVERTISED_TOOLS_METADATA_KEY))
-        # Outside a loop nothing says what was given, so everything is owed.
+        # Outside a loop nothing says what was given (``None``).
         given = _advertised(read_metadata(context, TOOL_GROUP_RULES_GIVEN_METADATA_KEY))
+        raw_mark = read_metadata(context, TOOL_GROUP_RULES_MARK_METADATA_KEY, "")
+        mark = raw_mark if isinstance(raw_mark, str) else ""
         query = payload.query.strip()
         entries = list(payload.select)
         if query[: len(SELECT_PREFIX)].lower() == SELECT_PREFIX:
@@ -191,8 +194,8 @@ class ToolSearchTool(Tool):
         if names or groups:
             # Names win over a description sent beside them: the model already
             # knows what it wants, and a search would load other tools too.
-            return self._select(call_id, names, groups, policy, advertised, given or frozenset())
-        return self._search(call_id, query, policy, rc, advertised, given or frozenset())
+            return self._select(call_id, names, groups, policy, advertised, given, mark)
+        return self._search(call_id, query, policy, rc, advertised, given, mark)
 
     # ------------------------------------------------------------------
 
@@ -236,24 +239,29 @@ class ToolSearchTool(Tool):
         admitted: dict[str, Tool],
         loaded: Sequence[str],
         advertised: frozenset[str] | None,
-        given: frozenset[str],
+        given: frozenset[str] | None,
     ) -> list[tuple[str, str]]:
-        """The rules owed with this load: of each group a newly loaded tool is in.
+        """The rules owed with this load: of each loaded tool's group not yet given them.
 
-        A tool the model already had was in front of it with its rules, so it
-        owes none; neither does a group whose rules the run was given.
+        Inside a loop ``given`` is the whole answer. The loop keeps it to the
+        groups whose rules the model can still read, and after a compaction
+        that may leave out a group whose tools are still listed: a tool on
+        the list is no proof its rules are in view, and skipping it on that
+        ground reloaded a group with no rules at all. Outside a loop nothing
+        says what was given, and a tool the model already had is taken to
+        have come with its rules.
         """
         declared = {group.name: group for group in self._registry.tool_groups()}
         owed: list[tuple[str, str]] = []
         for name in loaded:
-            if advertised is not None and name in advertised:
+            if given is None and advertised is not None and name in advertised:
                 continue
             group = tool_group_of(admitted[name], list(declared.values()))
             declaration = declared.get(group)
             if (
                 declaration is None
                 or not declaration.instructions
-                or group in given
+                or (given is not None and group in given)
                 or any(group == seen for seen, _ in owed)
             ):
                 continue
@@ -267,7 +275,8 @@ class ToolSearchTool(Tool):
         groups: Sequence[str],
         policy: ToolVisibilityPolicy,
         advertised: frozenset[str] | None,
-        given: frozenset[str],
+        given: frozenset[str] | None,
+        mark: str,
     ) -> ToolResult:
         admitted = self._admitted(policy)
         by_folded = {name.casefold(): name for name in admitted}
@@ -322,7 +331,7 @@ class ToolSearchTool(Tool):
         rules = self._rules(admitted, loaded, advertised, given)
         for group, text in rules:
             lines.append("")
-            lines.append(group_rules_text(group, text))
+            lines.append(group_rules_text(group, text, mark))
         return ToolResult(
             tool_call_id=call_id,
             content="\n".join(lines),
@@ -342,7 +351,8 @@ class ToolSearchTool(Tool):
         policy: ToolVisibilityPolicy,
         rc: Any,
         advertised: frozenset[str] | None,
-        given: frozenset[str],
+        given: frozenset[str] | None,
+        mark: str,
     ) -> ToolResult:
         max_results = _positive(getattr(rc, "tool_search_max_results", None), _DEFAULT_MAX_RESULTS)
         autoload = _non_negative(
@@ -377,7 +387,7 @@ class ToolSearchTool(Tool):
                 lines.append("Load any other match with 'select:' and its name.")
             for group, text in rules:
                 lines.append("")
-                lines.append(group_rules_text(group, text))
+                lines.append(group_rules_text(group, text, mark))
             content = "\n".join(lines)
         return ToolResult(
             tool_call_id=call_id,

@@ -98,6 +98,7 @@ from protocore.contracts.tool_chunking import (
 from protocore.contracts.tool_registry import (
     ADVERTISED_TOOLS_METADATA_KEY,
     TOOL_GROUP_RULES_GIVEN_METADATA_KEY,
+    TOOL_GROUP_RULES_MARK_METADATA_KEY,
 )
 from protocore.contracts.tool_roles import (
     WORKSPACE_INSPECTION_ROLES,
@@ -10289,6 +10290,7 @@ def _stamp_advertised_tools(metadata: dict[str, Any], engine: QueryEngine) -> No
     # Stamped whether or not any were given, so a search inside a loop never
     # reads the key's absence as "outside a loop".
     metadata[TOOL_GROUP_RULES_GIVEN_METADATA_KEY] = frozenset(engine._tool_group_rules_given)
+    metadata[TOOL_GROUP_RULES_MARK_METADATA_KEY] = engine._tool_rules_mark
 
 
 def _rehydrate_satisfied_from_history(engine: QueryEngine) -> None:
@@ -10832,8 +10834,11 @@ def _unload_tools_over_cap(engine: QueryEngine, *, reason: str) -> None:
     """Unload the least recently used discovered tools over ``pinned_tool_max_count``.
 
     Called only after a compaction, which is also where the catalogue is
-    written again with the rules of the groups still loaded: the results that
-    gave those rules may be in the summary now, and only as its gist.
+    written again with the rules of the groups still loaded, and the rules
+    counted as given are cut back to those: the results that gave rules may
+    be in the summary now, and only as its gist. Writing them costs the
+    system prompt's cache once when they are new to the catalogue (see
+    :func:`~protocore.runtime.tool_deferral.note_prompt_prefix_restarted`).
     """
     note_prompt_prefix_restarted(engine)
     evicted = engine.context_manager.evict_discovered_tools()
@@ -10916,6 +10921,11 @@ async def _answer_with_group_rules(
     """
     group = engine._rules_first_tool_call_ids.pop(tool_call.id)
     content, events = hold_call_for_rules(engine, tool_call, group)
+    # Before the result, not after it as for a call that ran: a host that times
+    # tool calls or counts them as used learns from ``executed: false`` that the
+    # result about to come answers a call that never ran.
+    for evt in events:
+        yield evt
     yield TurnEvent(
         type=EventType.TOOL_RESULT,
         run_id=engine.config.run_id,
@@ -10926,8 +10936,6 @@ async def _answer_with_group_rules(
             "content_blocks": [{"type": "text", "text": content}],
         },
     )
-    for evt in events:
-        yield evt
     engine.history.append(
         Message(
             role=MessageRole.tool,

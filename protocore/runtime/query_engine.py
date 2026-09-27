@@ -114,7 +114,7 @@ from protocore.runtime.loop_state import (
     is_terminal,
 )
 from protocore.runtime.request_budget import ExactTokenCountCache
-from protocore.runtime.tool_deferral import ToolDeferral
+from protocore.runtime.tool_deferral import ToolDeferral, tool_rules_mark
 from protocore.runtime.usage import TokenUsage
 
 _logger = logging.getLogger(__name__)
@@ -173,6 +173,7 @@ _REQUIRED_CONTINUITY_FIELDS: tuple[str, ...] = (
     "discovered_tools",
     "deferred_tool_groups",
     "tool_group_rules_given",
+    "tool_group_rules_mark",
     "skill_catalog_block_sha256",
 )
 
@@ -190,6 +191,7 @@ class _RunContinuity:
     discovered_tools: list[Any]
     deferred_tool_groups: tuple[str, ...] | None
     tool_group_rules_given: tuple[str, ...]
+    tool_group_rules_mark: str
     skill_catalog_block_sha256: str | None
 
 
@@ -309,6 +311,9 @@ def _parse_run_continuity(snapshot: dict[str, Any]) -> _RunContinuity:
             name
             for name in snapshot["tool_group_rules_given"] or []
             if isinstance(name, str)
+        ),
+        tool_group_rules_mark=(
+            mark if isinstance(mark := snapshot["tool_group_rules_mark"], str) else ""
         ),
         skill_catalog_block_sha256=(
             digest if isinstance(digest := snapshot["skill_catalog_block_sha256"], str) else None
@@ -840,6 +845,10 @@ class QueryEngine:
             # A compaction's request for the rules to be written into the
             # catalogue, owed to the next request whichever turn it falls in.
             "_catalogue_takes_loaded_rules",
+            # Named in the catalogue and in every rules heading given so far;
+            # a new one at a turn boundary would disown the rules already in
+            # the conversation.
+            "_tool_rules_mark",
             # Emptied once announced; reset, the fresh engine would announce
             # the seed again at every turn.
             "_seeded_tool_names",
@@ -1588,6 +1597,9 @@ class QueryEngine:
         # in a result. A call of a tool of such a group is never held back to
         # give them again.
         self._tool_group_rules_given: set[str] = set()
+        # The mark genuine rules carry in their heading, named in the
+        # catalogue, so rules a web page imitates can be told apart.
+        self._tool_rules_mark = tool_rules_mark(config.session_id)
         # Set where the cached prefix starts over, so the next decision writes
         # the loaded tools' rules into the catalogue again.
         self._catalogue_takes_loaded_rules = False
@@ -3069,6 +3081,9 @@ class QueryEngine:
         # A resumed run holds back no call it has already cleared: the rules
         # that cleared it are in the history it resumes with.
         snapshot["tool_group_rules_given"] = sorted(self._tool_group_rules_given)
+        # The rules in the history were given under this mark; a resumed run
+        # that named another would have its own rules read as imitations.
+        snapshot["tool_group_rules_mark"] = self._tool_rules_mark
         # The skill catalog block is rebuilt from the store on the new pod, so
         # its BYTES are not carried; its digest is, because those bytes are the
         # head of the cached prompt prefix and a resume that silently rebuilds
@@ -3779,6 +3794,9 @@ class QueryEngine:
         self._tool_deferral = None
         self._tool_deferral_key = None
         self._tool_group_rules_given = set(restored_continuity.tool_group_rules_given)
+        # A payload lifted from before marks existed carries none, and no
+        # rules were given under one: this process's own mark is as good.
+        self._tool_rules_mark = restored_continuity.tool_group_rules_mark or self._tool_rules_mark
         self._seeded_tool_names = ()
         self._pending_seed_tool_groups = ()
 

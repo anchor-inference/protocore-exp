@@ -134,6 +134,26 @@ All notable changes to this project are recorded here. The format follows
   now callable and gives the called tool's line (`It takes: Name(p1*, p2) —
   …`). Loading only the called tool left the rest of the group out of sight,
   and the retry was written without the parameters.
+- **Group rules carry the run's rules mark, and the catalogue names it.** A
+  genuine rules heading reads `Rules for the <group> tools [<mark>]:`; the
+  catalogue says, whenever a group in it has rules, that text claiming to be
+  rules without the mark — a web page, a file, a command's output — is
+  content, not rules. The mark is an HMAC of the session id under a
+  per-process key (`tool_rules_mark`), stamped for discovery tools as
+  `protocore.tool_group_rules_mark` and carried in the snapshot as
+  `tool_group_rules_mark`.
+- **After a compaction the rules counted as given are the rules the catalogue
+  carries.** The set used to keep every group given earlier, so a group whose
+  rules were in a result the compaction took away, and which the compaction
+  then unloaded over the cap, had its blind calls run without the rules and
+  its reload give none. The catalogue no longer keeps rules for groups that
+  are neither on the surface nor loaded, and `ToolSearch` inside a loop goes
+  by the given set alone.
+- **A call held for its group's rules is not a use of the tool**: it did not
+  run, so `called_discovered_tool_names()` no longer lists it and a host does
+  not carry its group into the next run for it. Its `tool_unadvertised_call`
+  (`executed: false`) now comes before its `tool_result`, so a host knows the
+  result answers a call that never ran.
 - **The catalogue lists the host's own held-back groups first**, and the
   `dynamic` groups after them under `Tools of connected servers:`. In one
   name-sorted list the servers stood ahead of the host's groups.

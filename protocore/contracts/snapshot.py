@@ -384,7 +384,8 @@ def _v6_to_v7(snapshot: dict[str, Any]) -> dict[str, Any]:
     was held back under version 6 — the mechanism did not exist — so the lift
     says exactly that, an empty list, and the resumed run keeps the whole
     surface it had rather than deciding afresh partway through. No group's rules
-    had been given either, since groups had none, so that list is empty too.
+    had been given either, since groups had none, so that list is empty too,
+    and there is no rules mark (the resumed run uses its own).
     """
     lifted = {key: value for key, value in snapshot.items() if key != "context_manager_pinned_tools"}
     names = snapshot.get("context_manager_pinned_tools")
@@ -396,6 +397,7 @@ def _v6_to_v7(snapshot: dict[str, Any]) -> dict[str, Any]:
     lifted.setdefault("discovered_tools", rows)
     lifted.setdefault("deferred_tool_groups", [])
     lifted.setdefault("tool_group_rules_given", [])
+    lifted.setdefault("tool_group_rules_mark", "")
     return lifted
 
 

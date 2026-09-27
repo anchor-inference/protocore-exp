@@ -12,6 +12,7 @@ from protocore.contracts.tool_registry import (
     ADVERTISED_TOOLS_METADATA_KEY,
     TOOL_ALLOWLIST_METADATA_KEY,
     TOOL_GROUP_RULES_GIVEN_METADATA_KEY,
+    TOOL_GROUP_RULES_MARK_METADATA_KEY,
     TOOL_GROUP_RULES_METADATA_KEY,
     TOOL_GROUPS_LOADED_METADATA_KEY,
     TOOL_VISIBILITY_POLICY_METADATA_KEY,
@@ -369,6 +370,30 @@ async def test_a_search_gives_the_rules_of_what_it_loaded_but_not_of_what_was_th
     )
     assert already.metadata[TOOL_GROUP_RULES_METADATA_KEY] == []
     assert "Rules for" not in already.content
+
+
+async def test_inside_a_loop_the_rules_given_decide_even_for_a_listed_tool() -> None:
+    """A compaction can take a group's rules out of view while its tools stay
+    listed; the loop then says so by leaving the group out of the given set,
+    and a load of the group gives the rules again."""
+    registry = _grouped_catalogue()
+    listed = frozenset({"Mcp_Github_list_issues", "Mcp_Github_create_issue"})
+    owed = await _raw_call(registry, {"group": "github"}, advertised=listed, given=frozenset())
+    assert owed.metadata[TOOL_GROUP_RULES_METADATA_KEY] == ["github"]
+    assert owed.content.endswith("Rules for the github tools:\nNever close an issue you did not open.")
+    given = await _raw_call(
+        registry, {"group": "github"}, advertised=listed, given=frozenset({"github"})
+    )
+    assert given.metadata[TOOL_GROUP_RULES_METADATA_KEY] == []
+
+
+async def test_the_rules_heading_carries_the_mark_the_loop_stamps() -> None:
+    search = _grouped_catalogue().get("ToolSearch")
+    assert search is not None
+    context = _context(given=frozenset())
+    context.metadata[TOOL_GROUP_RULES_MARK_METADATA_KEY] = "0a1b2c3d"
+    result = await search.invoke(context, {"group": "github"})
+    assert "Rules for the github tools [0a1b2c3d]:\nNever close" in result.content
 
 
 def test_a_group_alone_is_a_request() -> None:

@@ -60,6 +60,14 @@ ADVERTISED_TOOLS_METADATA_KEY: Final[str] = "protocore.advertised_tools"
 #: given yet".
 TOOL_GROUP_RULES_GIVEN_METADATA_KEY: Final[str] = "protocore.tool_group_rules_given"
 
+#: ``ToolContext.metadata`` key under which the loop stamps the run's rules
+#: mark, a string. Genuine group rules carry it in their heading, and the
+#: catalogue in the system prompt names it, so rules imitated by a web page or
+#: a file (which cannot know it) read as the content they are. A discovery
+#: tool writes it into the heading of the rules it gives. Absent outside a
+#: loop, where rules go out unmarked.
+TOOL_GROUP_RULES_MARK_METADATA_KEY: Final[str] = "protocore.tool_group_rules_mark"
+
 #: ``ToolResult.metadata`` key under which a discovery tool names the groups it
 #: loaded whole (``ToolSearch(group=...)``). The loop keeps the tools of such a
 #: group as one entry under the loaded-tool cap, so it is never left holding
@@ -222,13 +230,17 @@ def make_tool_group(
     )
 
 
-def group_rules_text(group: str, instructions: str) -> str:
+def group_rules_text(group: str, instructions: str, mark: str = "") -> str:
     """The block a group's rules are given in, wherever they are given.
 
     One spelling for the catalogue, a search result and a held call, so a
-    model that has read it once recognises it everywhere.
+    model that has read it once recognises it everywhere. ``mark`` is the
+    run's rules mark, in square brackets at the end of the heading: the
+    catalogue tells the model that genuine rules carry it, and a page that
+    imitates the heading cannot.
     """
-    return f"Rules for the {group} tools:\n{instructions.strip()}"
+    heading = f"Rules for the {group} tools [{mark}]:" if mark else f"Rules for the {group} tools:"
+    return f"{heading}\n{instructions.strip()}"
 
 
 def tool_group_of(tool: Tool, groups: Sequence[ToolGroup]) -> str:
@@ -373,6 +385,7 @@ __all__ = [
     "TOOL_GROUPS_LOADED_METADATA_KEY",
     "TOOL_GROUP_LOADS",
     "TOOL_GROUP_RULES_GIVEN_METADATA_KEY",
+    "TOOL_GROUP_RULES_MARK_METADATA_KEY",
     "TOOL_GROUP_RULES_METADATA_KEY",
     "TOOL_VISIBILITY_POLICY_METADATA_KEY",
     "IToolRegistry",

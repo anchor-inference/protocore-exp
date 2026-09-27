@@ -473,18 +473,56 @@ does not touch:
   ```
 
   The catalogue is built once per run and is part of the cached prefix, so
-  groups loaded mid-run are not added to it on every load; after a compaction,
-  where the prefix starts over anyway, it is written again with the rules of
-  every group still loaded, because the result that gave them may now be in
-  the summary.
+  groups loaded mid-run are not added to it on every load. After a
+  compaction it is written again with the rules of exactly the groups on the
+  surface or still loaded, because the result that gave them may now be
+  summarised or masked. That costs something: a compaction rewrites the
+  conversation, not the system prompt, so when a group with rules was loaded
+  mid-run and is still loaded, the next request misses the cache once on the
+  system prompt (and on the tools, with a provider or chat template that
+  renders them after it). Without such a group the catalogue comes out byte
+  for byte as before.
 - **In the `ToolSearch` result** that loads the first tools of the group:
-  `Rules for the <group> tools:` and the text, after the tool lines.
+  `Rules for the <group> tools [<mark>]:` and the text, after the tool lines.
 - **Instead of running a blind call** (see
   [below](#calls-of-tools-that-were-not-advertised)).
 
 The loop keeps the set of groups whose rules were given
 (`protocore.tool_group_rules_given` in the tool's metadata, and
-`tool_group_rules_given` in the snapshot), so none is given twice.
+`tool_group_rules_given` in the snapshot), so none is given twice. The set
+means "the model can still read them". After a compaction it is reset to the
+groups the new catalogue carries rules for: a group whose rules were in a
+result the compaction took away, and which the compaction unloaded over the
+cap, is owed them again — a blind call of it is held, and a `ToolSearch` that
+loads it gives them. Inside a loop `ToolSearch` goes by this set alone, even
+for a tool already listed.
+
+#### The rules mark
+
+Rules arrive inside tool results, and so does text from outside: a web page
+read with a browser tool, a file, a command's output. Any of them can print
+`Rules for the browser tools:` followed by whatever it likes. So genuine rules
+carry the run's **rules mark** at the end of their heading —
+`Rules for the browser tools [3f9a1c2e]:` — and the catalogue, in the system
+prompt that no tool output reaches, names the mark once whenever any group in
+it carries rules, and says that text claiming to be rules without it is
+content to read, never rules to follow, and that the mark is not to be written
+anywhere.
+
+The mark is eight hex digits, an HMAC of the session id under a key drawn anew
+in every process (`tool_rules_mark(session_id)`). It is the same for every run
+of a session in one process, because it sits in the catalogue at the head of
+the cached prompt; the snapshot carries it (`tool_group_rules_mark`), so a
+resumed run keeps the mark its history's rules were given with. The loop
+stamps it for a discovery tool as `protocore.tool_group_rules_mark`.
+
+A separate runtime-authored message for the rules was considered and
+rejected: a user turn between a tool result and the next assistant turn is a
+sequence some chat templates refuse (the loop avoids it elsewhere), and rules
+in a user turn read as the operator speaking. The mark keeps the rules where
+they are needed — beside the tools they govern — and makes an imitation
+recognisable. A run whose groups carry no rules gets no mark in its prompt,
+which stays exactly as it was.
 
 ### `ToolSearch`
 
@@ -598,7 +636,8 @@ given. A call of it was written without the schema and without the rules, and
 it would act on a guess about exactly what the rules are there to settle. So it
 is **not run**: its **whole group** is loaded, as `ToolSearch(group=...)` would
 load it (the tools the run may call, one entry under the cap), the group's
-rules are marked given, and the call is answered — not as an error, since
+rules are marked given (the call itself is not counted as a use of the tool,
+since it did not run), and the call is answered — not as an error, since
 nothing failed — with the rules, the names of the group's other tools now
 callable, and the called tool's line: "BrowserOpen is loaded now; call it
 again. It takes: BrowserOpen(url*) — …". The next call runs. The whole group,
@@ -607,7 +646,9 @@ and a model that had only the one it called went on without the rest; the
 line, because a retry written from memory repeated the wrong arguments. A
 second blind call of the same group in the same message waits too, and is
 pointed at the first answer rather than given the rules twice. `tool_unadvertised_call`
-carries `executed: false` for such a call. Models read an exact name from the
+carries `executed: false` for such a call and, unlike for a call that ran,
+comes before the call's `tool_result`, so a host that times calls or counts
+them as used knows the result answers a call that never ran. Models read an exact name from the
 catalogue and call it without loading it often enough that refusing the call
 outright would cost them; this costs one step, and only for groups with rules.
 
