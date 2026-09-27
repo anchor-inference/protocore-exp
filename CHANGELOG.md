@@ -6,6 +6,8 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [2.0.0a23] - 2026-09-27
+
 ### Changed
 
 - **Tool retrieval is BM25F over five fields, with stemming and Russian query

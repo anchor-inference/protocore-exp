@@ -48,7 +48,7 @@
 ## Установка
 
 ```bash
-pip install protocore==2.0.0a22
+pip install protocore==2.0.0a23
 ```
 
 Версию нужно назвать явно. Опубликован пре-релиз, а pip их пропускает, пока не
@@ -68,7 +68,7 @@ Python ≥ 3.12. Зависимости рантайма — `pydantic`, `jinja2
 ### Дополнительные наборы
 
 ```bash
-pip install "protocore[testing]==2.0.0a22"   # прогнать conformance-наборы на своих адаптерах
+pip install "protocore[testing]==2.0.0a23"   # прогнать conformance-наборы на своих адаптерах
 ```
 
 `testing` добавляет только тест-раннер: `protocore.conformance` — это pytest-набор,
