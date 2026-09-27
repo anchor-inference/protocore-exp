@@ -154,6 +154,42 @@ async def test_a_search_loads_its_best_matches(scenario: ScenarioFactory) -> Non
     )
 
 
+async def test_only_the_loaded_tools_the_model_called_are_marked_called(
+    scenario: ScenarioFactory,
+) -> None:
+    run = _with_search(scenario(tools=_tools(), rc=default_rc(tool_search_autoload_count=2)))
+    run.llm.queue_tool_call_response(
+        tool_call_id="s-1", tool_name="ToolSearch", tool_input={"query": "github issue"}
+    )
+    run.llm.queue_tool_call_response(
+        tool_call_id="c-1", tool_name="Mcp_Github_list_issues", tool_input={"v": "open"}
+    )
+    run.llm.queue_response(text="three open")
+    await run.run("what is open?")
+
+    manager = run.engine.context_manager
+    assert set(manager.discovered_tool_names()) == {
+        "Mcp_Github_list_issues",
+        "Mcp_Github_create_issue",
+    }
+    assert manager.called_discovered_tool_names() == ("Mcp_Github_list_issues",)
+
+
+async def test_a_held_back_tool_called_blind_counts_as_called(
+    scenario: ScenarioFactory,
+) -> None:
+    run = _with_search(scenario(tools=_tools()))
+    run.llm.queue_tool_call_response(
+        tool_call_id="c-1", tool_name="Mcp_Github_create_issue", tool_input={"v": "bug"}
+    )
+    run.llm.queue_response(text="filed")
+    await run.run("file it")
+
+    assert run.engine.context_manager.called_discovered_tool_names() == (
+        "Mcp_Github_create_issue",
+    )
+
+
 # ── a held-back tool called by name is served and loaded ────────────────────
 
 

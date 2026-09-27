@@ -570,6 +570,9 @@ def observe_dispatched_tool(
     if not admitted(tool_name):
         return events
     newly_loaded = manager.discover_tool(tool_name)
+    # Loaded by being called, so it has been called: the use noted above came
+    # before it was a discovered tool and did not count.
+    manager.note_tool_used(tool_name)
     events.append(
         TurnEvent(
             type=EventType.TOOL_UNADVERTISED_CALL,

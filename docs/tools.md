@@ -464,9 +464,11 @@ The loaded tools and the held-back groups travel in the snapshot
 decision instead of measuring again — as a floor: a dynamic group the snapshot
 does not name (a server that connected since) is still held back, and the
 limits are still enforced on top. A host that wants the next run of a session
-to start with the same tools passes the last run's list as
-`QueryEngineConfig.discovered_tools`; it is in the snapshot and in every
-`tool_surface_advertised` event (`discovered_tool_names`, discovery order).
+to start with the same tools passes a list as `QueryEngineConfig.discovered_tools`.
+`ContextManager.called_discovered_tool_names()` is the part of the loaded tools
+the run actually called, and is the list to carry: a search loads its best few
+matches whether or not the model wanted them. A seeded tool counts as called.
+Each snapshot row carries `called`; a row without it is taken as called.
 
 ### Calls of tools that were not advertised
 

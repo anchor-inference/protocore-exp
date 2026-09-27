@@ -106,7 +106,8 @@ All notable changes to this project are recorded here. The format follows
   lists tools in, so the retry need not guess again — only for a tool the
   policy and the child's declared set admit.
 - `QueryEngineConfig.discovered_tools` seeds a new run with the tools the last
-  run of the session loaded.
+  run of the session loaded; `ContextManager.called_discovered_tool_names()`
+  is the part of them the run called, which is the list worth carrying.
 - `max_tool_calls_per_turn` (default 64): calls past it in one model message are
   each answered with an error and not run.
 

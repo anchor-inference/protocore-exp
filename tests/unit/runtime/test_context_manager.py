@@ -347,6 +347,32 @@ def test_a_seed_of_bare_names_is_taken_as_used_in_the_order_given() -> None:
     assert mgr.evict_discovered_tools() == ("A",)
 
 
+def test_only_called_tools_count_as_called_and_the_mark_round_trips() -> None:
+    """A search loads its best few whether or not the model wanted them; a
+    host carrying every loaded tool into the next run carried the near-misses
+    along on every later request."""
+    mgr = _new_manager(cap=5)
+    for name in ("A", "B", "C"):
+        mgr.discover_tool(name)
+    mgr.note_tool_used("B")
+    assert mgr.called_discovered_tool_names() == ("B",)
+    restored = _new_manager(cap=5)
+    restored.restore_discovered_tools(mgr.discovered_tool_state(), replace=True)
+    assert restored.called_discovered_tool_names() == ("B",)
+    # A seed is what an earlier run called, and a row from before the mark
+    # existed is taken as called.
+    seeded = _new_manager(cap=5)
+    seeded.restore_discovered_tools(["S", {"name": "Old", "last_used": 3}])
+    assert seeded.called_discovered_tool_names() == ("S", "Old")
+    mgr.discover_tool("D")
+    mgr.note_tool_used("D")
+    assert mgr.evict_discovered_tools() == ()
+    small = _new_manager(cap=1)
+    small.restore_discovered_tools(mgr.discovered_tool_state())
+    small.evict_discovered_tools()
+    assert small.called_discovered_tool_names() == ("D",)
+
+
 def test_an_empty_name_is_not_discovered() -> None:
     mgr = _new_manager(cap=3)
     assert mgr.discover_tool("") is False

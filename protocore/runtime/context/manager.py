@@ -121,6 +121,11 @@ class ContextManager:
         # surface appends them in; the tick is what eviction reads.
         self._discovered_tools: dict[str, int] = {}
         self._discovery_clock = 0
+        # The discovered tools the run has called. A search loads its best few
+        # matches whether or not the model wanted them; a host that carries the
+        # loaded tools into the session's next run carries only these, or every
+        # unused near-miss rides along on every later request.
+        self._called_tools: set[str] = set()
         # One estimator per manager, and a manager is built once per run: two
         # runs sharing a process never consult each other's remembered
         # estimates, whatever object identity would have allowed.
@@ -178,6 +183,15 @@ class ContextManager:
         if name in self._discovered_tools:
             self._discovery_clock += 1
             self._discovered_tools[name] = self._discovery_clock
+            self._called_tools.add(name)
+
+    def called_discovered_tool_names(self) -> tuple[str, ...]:
+        """The discovered tools that have been called, in discovery order.
+
+        A tool a host seeded the run with counts as called: it is seeded
+        because an earlier run of the session called it.
+        """
+        return tuple(name for name in self._discovered_tools if name in self._called_tools)
 
     def discovered_tool_names(self) -> tuple[str, ...]:
         """The discovered tools, in the order they were discovered."""
@@ -190,7 +204,7 @@ class ContextManager:
     def discovered_tool_state(self) -> list[dict[str, object]]:
         """The discovered tools as plain rows: name and last use, discovery order."""
         return [
-            {"name": name, "last_used": tick}
+            {"name": name, "last_used": tick, "called": name in self._called_tools}
             for name, tick in self._discovered_tools.items()
         ]
 
@@ -205,10 +219,12 @@ class ContextManager:
         """
         if replace:
             self._discovered_tools.clear()
+            self._called_tools.clear()
             self._discovery_clock = 0
         for row in rows:
             if isinstance(row, str):
-                self.discover_tool(row)
+                if self.discover_tool(row):
+                    self._called_tools.add(row)
                 continue
             if not isinstance(row, dict):
                 continue
@@ -220,6 +236,12 @@ class ContextManager:
                 tick = 0
             self._discovered_tools[name] = tick
             self._discovery_clock = max(self._discovery_clock, tick)
+            # A row written before calls were told apart was carried because
+            # it was loaded, which is the most any row of that time can say.
+            if row.get("called", True) is not False:
+                self._called_tools.add(name)
+            else:
+                self._called_tools.discard(name)
 
     def evict_discovered_tools(self) -> tuple[str, ...]:
         """Unload the least recently used tools over the cap; return their names.
@@ -235,6 +257,7 @@ class ContextManager:
         evicted = tuple(name for name, _ in by_age[:excess])
         for name in evicted:
             del self._discovered_tools[name]
+            self._called_tools.discard(name)
         return evicted
 
     def build_context(
