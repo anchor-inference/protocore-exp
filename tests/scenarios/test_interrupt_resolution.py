@@ -25,6 +25,7 @@ from protocore.contracts.runtime_constants import LoopConstants
 from protocore.contracts.snapshot import PENDING_INTERRUPTS_SNAPSHOT_KEY
 from protocore.contracts.tools import Tool, ToolContext
 from protocore.contracts.types import (
+    OPERATOR_WORDS_METADATA_KEY,
     Message,
     MessageRole,
     TextBlock,
@@ -401,6 +402,15 @@ async def test_an_answered_question_becomes_the_result_of_the_call_that_asked() 
 
     assert _results(successor)["toolu_q"] == "report.md"
     assert successor.pending_interrupts == ()
+    # The reply is the operator's own words, and says so: compaction quotes a
+    # result carrying this mark whole in its ledger.
+    answered = next(
+        block
+        for message in successor.history_snapshot()
+        for block in message.content_blocks
+        if isinstance(block, ToolResultBlock) and block.tool_call_id == "toolu_q"
+    )
+    assert answered.metadata.get(OPERATOR_WORDS_METADATA_KEY) is True
 
 
 # ---------------------------------------------------------------------------

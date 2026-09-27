@@ -292,6 +292,33 @@ is complete-enough but UNSEALED, the runtime synthesises a clean assistant
 run completes (deterministic seal; NO LLM call, NO extra turn). NOT the model's
 own words → excluded from durable-answer scans."""
 
+OPERATOR_WORDS_METADATA_KEY = "protocore.operator_words"
+"""Who wrote a message, as a host knows and the core cannot tell.
+
+The core takes a user-role message without a tool result and without one of
+the compaction, reference, seed or recovery flags to be a turn the operator
+typed (see :func:`protocore.runtime.context.compaction._is_plain_operator_turn`).
+A host that delivers its own runtime events on that same channel — a
+notification, a wake-up, a relayed decision — needs to say otherwise, and a
+host that delivers the operator's words on another channel needs to say so.
+This key says it; compaction quotes whatever it marks verbatim in the ledger
+and never summarises a marked turn by itself. Its values:
+
+``True`` on ``Message.metadata``
+    Every text block of the message is the operator's.
+``False`` on ``Message.metadata``
+    A runtime note: nothing in it is the operator's, and it is compacted like
+    any other message although it sits in a user turn.
+``list[str]`` on ``Message.metadata``
+    A runtime note that relays the operator's words: each string is a passage
+    of the operator's, quoted verbatim; the rest of the message is the
+    runtime's. An operator's answer carried inside an event batch is this.
+``True`` on ``ToolResultBlock.metadata``
+    The result's content is the operator's reply — the answer to a question
+    the model asked. The core sets it itself when an ask is resolved with an
+    answer; a host that settles a call with the operator's words sets it too.
+"""
+
 COMPACTION_SUMMARY_METADATA_KEY = "protocore.compaction_summary"
 """``Message.metadata`` flag marking a turn as a Tier-2 compaction summary.
 

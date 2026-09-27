@@ -56,6 +56,7 @@ from protocore.contracts.tool_roles import EMPTY_TOOL_ROLE_MAP, ToolRoleMap
 from protocore.contracts.types import (
     COMPACTION_REFERENCE_METADATA_KEY,
     COMPACTION_SUMMARY_METADATA_KEY,
+    OPERATOR_WORDS_METADATA_KEY,
     SESSION_HISTORY_SEED_METADATA_KEY,
     SYNTHETIC_RECOVERY_METADATA_KEY,
     CompactionSourceRef,
@@ -941,11 +942,11 @@ async def run_tier1_truncation(
                 new_blocks.append(block)
                 continue
             name = tool_names.get(block.tool_call_id, "")
-            if ledger is not None:
-                ledger.absorb_result(block, tool_name=name)
             masked, freed, created = await _mask_result(
                 block, tool_name=name, blob_store=blob_store, tenant_id=tenant_id, rc=rc
             )
+            if ledger is not None:
+                ledger.absorb_result(block, tool_name=name, source=f"blob {masked.canonical_ref}" if masked.canonical_ref else "")
             if created is not None:
                 refs_created.append(created)
             new_blocks.append(masked)
@@ -1353,6 +1354,9 @@ class _SummaryOutcome:
     recovered: str = ""
     """On success, how the text was recovered when the reply was not plain
     headed text (see :class:`~protocore.runtime.context.carrier.Carrier`)."""
+    pointer: str = ""
+    """On success, where the replaced messages were kept (``blob <ref>``), or
+    empty when no copy could be made. The ledger points a cut quote here."""
 
 
 def _is_plain_operator_turn(message: Message) -> bool:
@@ -1374,6 +1378,12 @@ def _is_plain_operator_turn(message: Message) -> bool:
     if message.metadata.get(COMPACTION_REFERENCE_METADATA_KEY) is True:
         return False
     if message.metadata.get(SESSION_HISTORY_SEED_METADATA_KEY) is True:
+        return False
+    # A host that marks who wrote the turn is believed over the shape: ``True``
+    # is the operator's, ``False`` and a list of relayed passages are the
+    # runtime's (the passages are quoted by the ledger before the note goes).
+    marked = message.metadata.get(OPERATOR_WORDS_METADATA_KEY)
+    if marked is not None and marked is not True:
         return False
     return not any(isinstance(block, ToolResultBlock) for block in message.content_blocks)
 
@@ -1687,6 +1697,7 @@ async def _run_summariser(
         ),
         tokens_freed=before_tokens - after_tokens,
         recovered=carrier.recovered or ("" if carrier.headed else "unheaded"),
+        pointer=pointer,
     )
 
 
@@ -2209,6 +2220,7 @@ async def run_tier2_summarisation(
                     is_operator=_is_plain_operator_turn,
                     skip=_is_compaction_artefact,
                     tool_names=tool_names,
+                    source=outcome.pointer,
                 )
             # Every non-anchor member of the unit (the matching tool results) is
             # removed so the dropped ToolUseBlock leaves no orphaned tool_result.
@@ -2467,6 +2479,7 @@ async def _fold_span(
         ),
         tokens_freed=outcome.tokens_freed,
         recovered=outcome.recovered,
+        pointer=outcome.pointer,
     )
 
 
@@ -2597,6 +2610,7 @@ async def run_tier3_fold(
                     roles=roles,
                     is_operator=_is_plain_operator_turn,
                     skip=_is_compaction_artefact,
+                    source=outcome.pointer,
                 )
             replacements[start] = outcome.replacement
             drop.update(range(start + 1, end))
@@ -2782,6 +2796,9 @@ async def run_floor(
     marker_tokens = 0
     for seeded, indices in groups.items():
         members = [history[i] for i in indices]
+        # Kept before they are recorded, so the ledger can say where a quote it
+        # has to cut for room can be read whole.
+        pointer = await _store_originals(members, blob_store, tenant_id, label="floor")
         if ledger is not None:
             ledger.absorb(
                 members,
@@ -2789,8 +2806,8 @@ async def run_floor(
                 is_operator=_is_plain_operator_turn,
                 skip=_is_compaction_artefact,
                 tool_names=tool_names,
+                source=pointer,
             )
-        pointer = await _store_originals(members, blob_store, tenant_id, label="floor")
         text = _wrap_compaction_summary(
             f"floor-{_fold_anchor_key(members)[5:]}",
             _floor_digest(members, pointer=pointer, rc=rc),

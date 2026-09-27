@@ -92,7 +92,9 @@ Exact values are carried by code, in the **ledger**, not by the summariser.
 Whenever a tier takes something out of the window it first records, from the
 outgoing messages:
 
-- the operator's instructions, verbatim (clipped at a line boundary);
+- the operator's words, verbatim and whole — the turns the operator typed,
+  and the replies a host marks as the operator's (see
+  [Who wrote a message](#who-wrote-a-message));
 - the files the agent read, wrote or edited, by the tool's declared role;
 - identifiers and exact values of recognisable shape — URLs, UUIDs, paths,
   hashes, timestamps, versions, `host:port` pairs, handles, id-shaped tokens —
@@ -112,6 +114,51 @@ or its result once; that is the line kept.
 
 What the ledger does not do: recognise a value with no shape. A count with its
 unit, or a name, stays the summary's job.
+
+**The operator's words are never cut in silence.** A quote is recorded whole —
+there is no per-quote length limit — and within the ledger's budget the
+operator's words are placed first: the identifiers, files, open items and
+failures give up their room, oldest and lowest-ranked first, before a quote is
+touched. Newest quotes are kept first, because the latest word on a matter is
+the one in force. Only when the quotes alone outgrow the whole budget is one
+cut, at a line or word boundary, and it ends with an explicit marker:
+
+```text
+[… 4395 more characters of the operator's words — full text in blob <ref>]
+```
+
+The reference is the copy the pass kept of what it removed — the same blob
+store the placeholders of masked outputs and the summaries point into (clause
+9) — or `the session transcript` when no copy could be made. Older quotes that
+then find no room, and quotes past the state's bound of 40, are named on one
+line, `[N earlier message(s) of the operator's words omitted for room — full
+text in …]`, never dropped without a word.
+
+*Why.* The ledger once clipped every quote at 1,200 characters with nothing to
+show it had, and a long instruction reached the model after compaction as its
+first third, read as the whole of it.
+
+#### Who wrote a message
+
+The core takes a user-role message to be the operator's when it carries no tool
+result and none of the compaction, reference, seed or recovery flags. A host
+that delivers its own events on the same channel, or the operator's replies on
+another, says who wrote what with `OPERATOR_WORDS_METADATA_KEY`
+(`"protocore.operator_words"`, in `protocore.contracts.types`):
+
+| Where | Value | Meaning |
+|---|---|---|
+| `Message.metadata` | `True` | every text block of the message is the operator's |
+| `Message.metadata` | `False` | a runtime note: nothing in it is the operator's, and it is compacted like any other message |
+| `Message.metadata` | `list[str]` | a runtime note relaying the operator: each string is a passage of the operator's, quoted verbatim; the rest is the runtime's |
+| `ToolResultBlock.metadata` | `True` | the result is the operator's reply to the question the call asked; quoted with `(reply to <tool>)` |
+
+The core marks the result it writes when a question interrupt is resolved
+with an answer; a host sets the key on anything else it delivers. A
+`list[str]` note is not an operator turn for clause 10: it may be summarised,
+because its operator passages are in the ledger before it goes. The key is
+trusted as it is set, so a host must not pass a tool's or a remote server's
+own metadata through under it.
 
 ### 5. The carrier
 
@@ -176,8 +223,10 @@ messages (one after a provider refusal), and the batch of tool results the
 model has not read yet. Outside reactive recovery, turns seeded from an
 earlier run are untouched; reactive recovery may compact them, never in one
 span with this run's turns, and every replacement keeps the seed tag. An
-operator's turn is never summarised; a fold or the floor may take it only
-after the ledger has quoted it.
+operator's turn — a typed one, or one a host marked `True` — is never
+summarised; a fold or the floor may take it only after the ledger has quoted
+it, whole. The operator's replies that arrive as tool results or inside runtime
+notes are quoted by the ledger before any tier takes them.
 
 ### 11. Tool pairing stays whole
 
@@ -214,9 +263,10 @@ ledger = clamp(W × compaction_ledger_ratio,
 
 Section shares of a carrier's budget: Facts and values 35 %, Progress 25 %,
 Decisions and constraints 15 %, Open 15 %, Failures 10 %; whatever a section
-does not use is shared out in that order. Ledger shares: operator
-instructions 30 %, identifiers 30 %, files 15 %, open items 15 %, failures
-10 %, redistributed the same way.
+does not use is shared out in that order. The ledger places the operator's
+words first, whole (clause 4); what they leave is shared in the proportions
+identifiers 30, files 15, open items 15, failures 10, and whatever a section
+does not use goes to the next that needs it.
 
 Example, a 256k window with a 64k output cap and a trigger ratio of 0.59:
 `T = min(151,040, 256,000 − 65,536 − 1,024 − 38,400) = 151,040`,

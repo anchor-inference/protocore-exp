@@ -6,6 +6,27 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`OPERATOR_WORDS_METADATA_KEY` (`"protocore.operator_words"`) says who
+  wrote a message.** `True` on `Message.metadata` makes the message the
+  operator's, `False` makes a user-role message a runtime note, and a list of
+  strings names the operator's passages inside a runtime note; `True` on
+  `ToolResultBlock.metadata` makes the result the operator's reply. The
+  compaction ledger quotes whatever it marks, whole. The core sets it itself on
+  the result it writes when a question interrupt is answered. See
+  `docs/compaction.md`.
+
+### Fixed
+
+- **The compaction ledger no longer clips the operator's words.** Each quote
+  was cut at 1,200 characters without a marker. A quote is now kept whole, the
+  other sections of the ledger give up their room before it, and a quote that
+  alone outgrows the budget is cut with
+  `[… N more characters of the operator's words — full text in blob <ref>]`,
+  pointing at the copy the pass kept. Quotes left out for room are named on
+  one line with the same pointer.
+
 ## [2.0.0a23] - 2026-09-27
 
 ### Changed

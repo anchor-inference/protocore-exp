@@ -416,7 +416,7 @@ async def test_operator_words_survive_a_fold_verbatim_by_code() -> None:
 
     assert result.spans_folded == 1
     assert all(m.text != rule for m in history)
-    assert ledger.operator == [rule]
+    assert [quote.text for quote in ledger.operator] == [rule]
 
 
 # ---------------------------------------------------------------------------

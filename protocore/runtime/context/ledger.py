@@ -8,7 +8,9 @@ Whenever compaction takes something out of the window — masks a tool output,
 summarises a span, folds summaries, drops a span at the floor — the same pass
 reads the outgoing messages and records, by code:
 
-* the operator's instructions, verbatim (clipped at a line boundary);
+* the operator's words, verbatim and whole — the turns the operator typed, and
+  the replies a host marks as the operator's although they arrive as a tool
+  result or inside a runtime note (:data:`OPERATOR_WORDS_METADATA_KEY`);
 * the files the agent read, wrote or edited, by the tool's declared role;
 * identifiers and exact values of recognisable shape — URLs, paths, UUIDs,
   hashes, timestamps, versions, host:port pairs, handles, id-shaped tokens;
@@ -28,7 +30,10 @@ the summary's job. A shape that also matches noise (every timestamp in a log)
 is taken only from the places where noise is rare — the operator's turns, the
 agent's own text and its tool arguments — and from tool outputs only the
 shapes that are rarely noise (URLs, UUIDs, absolute paths, host:port pairs,
-version tags). Past its budget the oldest and lowest-ranked entries go first.
+version tags). Past its budget the oldest and lowest-ranked entries go first,
+and the operator's words last of all: every other section gives up its room
+before a quote is touched, and a quote that still cannot fit is cut with a
+marker that says how much is missing and where the whole text is kept.
 """
 from __future__ import annotations
 
@@ -46,6 +51,7 @@ from protocore.contracts.tool_roles import (
     ToolRoleMap,
 )
 from protocore.contracts.types import (
+    OPERATOR_WORDS_METADATA_KEY,
     Message,
     MessageRole,
     TextBlock,
@@ -70,7 +76,13 @@ _MAX_IDENTIFIERS: Final[int] = 600
 _MAX_ERRORS: Final[int] = 40
 _MAX_OPEN: Final[int] = 30
 
-_OPERATOR_QUOTE_MAX_CHARS: Final[int] = 1_200
+#: The least room, in tokens, worth spending on the head of a quote that has to
+#: be cut. Below it the marker would be most of what is shown, and the quote is
+#: listed as omitted, with where it is kept, instead.
+_OPERATOR_CUT_MIN_TOKENS: Final[int] = 48
+#: Where a quote's full text is, when the pass that recorded it kept no copy of
+#: its own: the host's transcript is the other copy (see the contract, clause 9).
+_TRANSCRIPT_SOURCE: Final[str] = "the session transcript"
 _ERROR_LINE_MAX_CHARS: Final[int] = 240
 _OPEN_ITEM_MAX_CHARS: Final[int] = 400
 _IDENTIFIER_MAX_CHARS: Final[int] = 200
@@ -257,11 +269,80 @@ def _first_line(text: str) -> str:
     return ""
 
 
+@dataclass(frozen=True, slots=True)
+class OperatorQuote:
+    """One passage of the operator's, whole, and where it can be read again.
+
+    ``source`` names the copy kept when the passage left the window — the blob
+    of the span it stood in, or of the tool output it was — and is empty when
+    the pass kept none; the host's transcript is then the copy. ``label`` says
+    what the passage answered when that is not self-evident (``reply to
+    AskUser``) and is empty for a turn the operator typed.
+    """
+
+    text: str
+    source: str = ""
+    label: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        return {"text": self.text, "source": self.source, "label": self.label}
+
+    @classmethod
+    def from_value(cls, value: Any) -> OperatorQuote | None:
+        if isinstance(value, dict):
+            text = str(value.get("text") or "")
+            return cls(text, str(value.get("source") or ""), str(value.get("label") or "")) if text else None
+        # A ledger written before quotes carried their source stored the bare
+        # text, and such ledgers sit in persisted histories that are resumed.
+        return cls(str(value)) if value else None
+
+
+def operator_words(message: Message, *, is_operator: Callable[[Message], bool]) -> list[str]:
+    """The passages of ``message`` that are the operator's, each whole.
+
+    :data:`OPERATOR_WORDS_METADATA_KEY` on the message decides when a host set
+    it; otherwise a user turn ``is_operator`` accepts is the operator's in
+    full. A tool result marked as the operator's reply is read by
+    :meth:`Ledger.absorb_result`, not here.
+    """
+    marked = message.metadata.get(OPERATOR_WORDS_METADATA_KEY)
+    if marked is False:
+        return []
+    if isinstance(marked, list):
+        return [passage.strip() for passage in marked if isinstance(passage, str) and passage.strip()]
+    if marked is True or (message.role is MessageRole.user and is_operator(message)):
+        text = message.text.strip()
+        return [text] if text else []
+    return []
+
+
+def _cut_to_tokens(text: str, room_tokens: int, rc: LoopConstants) -> str:
+    """The longest head of ``text`` within ``room_tokens``, ended at a line, else a word, boundary."""
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if estimate_tokens(text[:middle], rc) <= room_tokens:
+            low = middle
+        else:
+            high = middle - 1
+    head = text[:low]
+    for boundary in ("\n", " "):
+        at = head.rfind(boundary)
+        if at >= low // 2:
+            return head[:at].rstrip()
+    return head.rstrip()
+
+
 @dataclass(slots=True)
 class Ledger:
     """The structured state behind the ledger message."""
 
-    operator: list[str] = field(default_factory=list)
+    operator: list[OperatorQuote] = field(default_factory=list)
+    operator_dropped: int = 0
+    """Quotes that fell out of the state at :data:`_MAX_OPERATOR`, oldest first.
+
+    Counted so the rendered ledger can say they existed and where they are,
+    rather than let the oldest instructions vanish without a word."""
     files: dict[str, str] = field(default_factory=dict)
     """Path → last action; insertion order is recency (re-seen moves to the end)."""
     identifiers: dict[str, list[Any]] = field(default_factory=dict)
@@ -277,7 +358,8 @@ class Ledger:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "operator": list(self.operator),
+            "operator": [quote.to_dict() for quote in self.operator],
+            "operator_dropped": self.operator_dropped,
             "files": dict(self.files),
             "identifiers": {key: list(value) for key, value in self.identifiers.items()},
             "errors": list(self.errors),
@@ -295,7 +377,8 @@ class Ledger:
                 context = str(value[2]) if len(value) > 2 else ""
                 identifiers[str(key)] = [str(value[0]), int(value[1]), context]
         return cls(
-            operator=[str(x) for x in data.get("operator") or []],
+            operator=[q for q in (OperatorQuote.from_value(x) for x in data.get("operator") or []) if q is not None],
+            operator_dropped=int(data.get("operator_dropped") or 0),
             files={str(k): str(v) for k, v in (data.get("files") or {}).items()},
             identifiers=identifiers,
             errors=[str(x) for x in data.get("errors") or []],
@@ -305,6 +388,7 @@ class Ledger:
 
     def merge(self, other: Ledger) -> None:
         """Fold another ledger's state in, ``other`` being the newer."""
+        self.operator_dropped += other.operator_dropped
         for quote in other.operator:
             self._add_operator(quote)
         for path, action in other.files.items():
@@ -319,10 +403,13 @@ class Ledger:
 
     # -- absorbing -----------------------------------------------------------
 
-    def _add_operator(self, quote: str) -> None:
-        if quote and quote not in self.operator:
-            self.operator.append(quote)
-            del self.operator[: max(0, len(self.operator) - _MAX_OPERATOR)]
+    def _add_operator(self, quote: OperatorQuote) -> None:
+        if not quote.text or any(held.text == quote.text for held in self.operator):
+            return
+        self.operator.append(quote)
+        excess = max(0, len(self.operator) - _MAX_OPERATOR)
+        del self.operator[:excess]
+        self.operator_dropped += excess
 
     def _touch(self, path: str, action: str) -> None:
         self.files.pop(path, None)
@@ -366,24 +453,29 @@ class Ledger:
         is_operator: Callable[[Message], bool],
         skip: Callable[[Message], bool],
         tool_names: dict[str, str] | None = None,
+        source: str = "",
     ) -> None:
         """Record what ``messages`` carry before they leave the window.
 
-        ``is_operator`` says which user turns the operator wrote; ``skip`` says
-        which messages are compaction artefacts (earlier summaries, the ledger
-        itself) and must not be read again — a summary's wording is a model's,
-        and taking values from it would launder them into the ledger.
+        ``is_operator`` says which user turns the operator wrote, and a host's
+        :data:`OPERATOR_WORDS_METADATA_KEY` overrides it (:func:`operator_words`);
+        ``skip`` says which messages are compaction artefacts (earlier
+        summaries, the ledger itself) and must not be read again — a summary's
+        wording is a model's, and taking values from it would launder them into
+        the ledger. ``source`` names where the pass kept the originals, which a
+        quote cut for room points to.
         """
         names = dict(tool_names or {})
         for message in messages:
             if skip(message):
                 continue
             self.compacted_messages += 1
-            if message.role is MessageRole.user and is_operator(message):
-                text = message.text
-                self._add_operator(_clip(text, _OPERATOR_QUOTE_MAX_CHARS))
-                self._identifiers_from(text, rank=RANK_OPERATOR)
-                continue
+            for passage in operator_words(message, is_operator=is_operator):
+                self._add_operator(OperatorQuote(passage, source))
+                self._identifiers_from(passage, rank=RANK_OPERATOR)
+            # The blocks are read whatever the message is: an operator's turn
+            # has no tool call or result to read, and a runtime note that
+            # relays the operator's words may carry both.
             for block in message.content_blocks:
                 if isinstance(block, TextBlock) and message.role is MessageRole.assistant:
                     self._identifiers_from(block.text, rank=RANK_STATED)
@@ -394,7 +486,7 @@ class Ledger:
                     # A masked output was recorded when it was masked; what is
                     # on the block now is the placeholder, whose digests and
                     # sizes are not values anybody used.
-                    self.absorb_result(block, tool_name=names.get(block.tool_call_id, ""))
+                    self.absorb_result(block, tool_name=names.get(block.tool_call_id, ""), source=source)
 
     def _absorb_call(self, block: ToolUseBlock, roles: ToolRoleMap) -> None:
         arguments = _arguments(block)
@@ -417,14 +509,22 @@ class Ledger:
             if value != path and value not in self.files:
                 self._identifier(kind, value, RANK_CALL)
 
-    def absorb_result(self, block: ToolResultBlock, *, tool_name: str) -> None:
+    def absorb_result(self, block: ToolResultBlock, *, tool_name: str, source: str = "") -> None:
         """Record one tool output: its failure, and the values on its distinct lines.
 
         Every shape is read from the lines the output does not repeat
         (:func:`distinct_lines`); from the rest only the shapes that are rarely
-        noise — URLs, UUIDs, absolute paths, host:port pairs, version tags.
+        noise — URLs, UUIDs, absolute paths, host:port pairs, version tags. An
+        output marked as the operator's reply (:data:`OPERATOR_WORDS_METADATA_KEY`)
+        is quoted whole as well: it is the answer to a question the model
+        asked, and a later turn needs the operator's wording of it, not a
+        handful of values from it.
         """
         content = block.canonical_content or block.content
+        if block.metadata.get(OPERATOR_WORDS_METADATA_KEY) is True and content.strip():
+            kept = f"blob {block.canonical_ref}" if block.canonical_ref else source
+            self._add_operator(OperatorQuote(content.strip(), kept, f"reply to {tool_name or 'a question'}"))
+            self._identifiers_from(content, rank=RANK_OPERATOR)
         if block.is_error:
             first = _first_line(content)
             if first:
@@ -443,7 +543,14 @@ class Ledger:
         return max(rc.compaction_ledger_min_tokens, min(rc.compaction_ledger_max_tokens, scaled))
 
     def render(self, rc: LoopConstants, *, budget_tokens: int | None = None) -> str:
-        """The ledger message body, within its budget, cut at entry boundaries."""
+        """The ledger message body, within its budget, cut at entry boundaries.
+
+        The operator's words are placed first and whole; the other sections
+        share what they leave. Only when the quotes alone outgrow the budget is
+        one cut, and then with a marker naming how much is missing and where
+        the whole text is, and the older ones are listed as omitted with the
+        same pointer. A quote is never shortened without saying so.
+        """
         if self.is_empty():
             return ""
         budget = self.budget(rc) if budget_tokens is None else budget_tokens
@@ -451,8 +558,8 @@ class Ledger:
             enumerate(self.identifiers.items()),
             key=lambda item: (int(item[1][1][1]), -item[0]),
         )
+        operator_title = "The operator's words (verbatim and whole unless marked, oldest first)"
         sections: list[tuple[str, list[str], float]] = [
-            ("Operator instructions (verbatim, oldest first)", [f"- {q}" for q in self.operator], 0.30),
             ("Identifiers and exact values, with the line each stood on (most important first)", _identifier_lines(identifiers), 0.30),
             ("Files touched (most recent first)", [f"- {action} {path}" for path, action in reversed(self.files.items())], 0.15),
             ("Open tasks and questions", [f"- {item}" for item in self.open_items], 0.15),
@@ -464,8 +571,12 @@ class Ledger:
         )
         spent = estimate_tokens(header + _CLOSE_TAG, rc) + 2
         present = [(title, lines, share) for title, lines, share in sections if lines]
+        headings = [operator_title] if self.operator or self.operator_dropped else []
+        headings += [title for title, _, _ in present]
+        available = max(0, budget - spent - sum(estimate_tokens(f"## {t}", rc) + 1 for t in headings))
+        operator_lines = self._operator_lines(rc, available)
+        available = max(0, available - sum(estimate_tokens(line, rc) + 1 for line in operator_lines))
         costs = {title: [estimate_tokens(line, rc) + 1 for line in lines] for title, lines, _ in present}
-        available = max(0, budget - spent - sum(estimate_tokens(f"## {t}", rc) + 1 for t, _, _ in present))
         total_share = sum(share for _, _, share in present) or 1.0
         grants = {title: int(available * share / total_share) for title, _, share in present}
         need = {title: sum(costs[title]) for title, _, _ in present}
@@ -476,11 +587,14 @@ class Ledger:
                 grants[title] += extra
                 spare -= extra
         out = [header]
+        if operator_lines:
+            out.append(f"## {operator_title}")
+            out.extend(operator_lines)
         for title, lines, _share in present:
             cost = costs[title]
-            # Operator quotes and failures lose their OLDEST first; the other
-            # sections are already ordered most-important first.
-            keep_newest = title.startswith(("Operator", "Failed"))
+            # Failures lose their OLDEST first; the other sections are already
+            # ordered most-important first.
+            keep_newest = title.startswith("Failed")
             order = range(len(lines) - 1, -1, -1) if keep_newest else range(len(lines))
             chosen: list[int] = []
             used = 0
@@ -497,6 +611,66 @@ class Ledger:
             out.extend(lines[index] for index in chosen)
         out.append(_CLOSE_TAG)
         return "\n".join(out)
+
+    def _operator_lines(self, rc: LoopConstants, room: int) -> list[str]:
+        """The operator's quotes within ``room`` tokens: newest kept whole first.
+
+        Newest first because the latest word on a matter is the one in force.
+        The first quote that does not fit whole is cut with an explicit marker
+        when enough room is left to be worth reading; every older one, and
+        every one the state no longer holds, is named in one omission line
+        with where the whole text lives.
+        """
+        lines: list[str] = []
+        used = 0
+        full = False
+        omitted: list[OperatorQuote] = []
+        for position in range(len(self.operator) - 1, -1, -1):
+            quote = self.operator[position]
+            if full:
+                # Once one quote has not fitted whole, no older one is shown:
+                # a gap in the middle of the operator's words would read as if
+                # nothing had been said in between.
+                omitted.append(quote)
+                continue
+            whole = _quote_line(quote, quote.text)
+            cost = estimate_tokens(whole, rc) + 1
+            if used + cost <= room:
+                lines.append(whole)
+                used += cost
+                continue
+            full = True
+            # The marker is priced at its longest, so the head cut to the room
+            # that is left cannot push the line past it.
+            marker_cost = estimate_tokens(_quote_line(quote, "") + "\n" + _cut_marker(quote, len(quote.text)), rc) + 1
+            head = _cut_to_tokens(quote.text, room - used - marker_cost, rc) if room - used - marker_cost >= _OPERATOR_CUT_MIN_TOKENS else ""
+            if head:
+                lines.append(_quote_line(quote, f"{head}\n{_cut_marker(quote, len(quote.text) - len(head))}"))
+            else:
+                omitted.append(quote)
+        lines.reverse()
+        count = len(omitted) + self.operator_dropped
+        if count:
+            sources = sorted({quote.source or _TRANSCRIPT_SOURCE for quote in omitted} | (
+                {_TRANSCRIPT_SOURCE} if self.operator_dropped else set()
+            ))
+            lines.insert(
+                0,
+                f"- [{count} earlier message(s) of the operator's words omitted for room — "
+                f"full text in {', '.join(sources)}]",
+            )
+        return lines
+
+
+def _quote_line(quote: OperatorQuote, text: str) -> str:
+    return f"- ({quote.label}) {text}" if quote.label else f"- {text}"
+
+
+def _cut_marker(quote: OperatorQuote, missing: int) -> str:
+    return (
+        f"[… {missing} more characters of the operator's words — "
+        f"full text in {quote.source or _TRANSCRIPT_SOURCE}]"
+    )
 
 
 def _identifier_lines(ordered: Sequence[tuple[int, tuple[str, list[Any]]]]) -> list[str]:
@@ -543,9 +717,11 @@ __all__ = [
     "RANK_OPERATOR",
     "RANK_STATED",
     "Ledger",
+    "OperatorQuote",
     "distinct_lines",
     "extract_identifiers",
     "is_ledger",
     "ledger_from_history",
     "ledger_message",
+    "operator_words",
 ]
