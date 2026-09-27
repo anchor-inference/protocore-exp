@@ -64,6 +64,7 @@ from protocore.contracts.types import ToolCall, ToolDefinition
 from protocore.runtime.context.budgets import derive_budgets
 from protocore.runtime.events import EventType, TurnEvent
 from protocore.runtime.token_counting import estimate_tokens
+from protocore.runtime.tool_retrieval import tool_line
 
 if TYPE_CHECKING:
     from protocore.runtime.query_engine import QueryEngine
@@ -83,6 +84,7 @@ __all__ = [
     "calls_held_for_rules",
     "discovery_tool_names",
     "ensure_tool_deferral",
+    "held_call_text",
     "hold_call_for_rules",
     "note_prompt_prefix_restarted",
     "observe_dispatched_tool",
@@ -102,6 +104,14 @@ _CATALOGUE_ADVICE: Final[str] = (
     "A dedicated tool for the job is better than a workaround with a general "
     "one such as a shell command, so load the tool rather than improvising."
 )
+
+
+#: The line over the dynamic groups, when the host's own groups are listed too.
+#: A sentence over the host's groups naming the usual detours ("before doing
+#: any of these by other means, load its group") was tried as well: models
+#: loaded groups more often under it and did the task no better, so there is
+#: none.
+_CONNECTED_GROUPS_LEAD: Final[str] = "Tools of connected servers:"
 
 
 @dataclass(frozen=True)
@@ -407,7 +417,13 @@ def render_tool_catalogue(
 ) -> str:
     """The system-prompt block naming each held-back group, one line apiece.
 
-    Groups in name order and names in name order, so the same decision renders
+    The host's own groups come first, and the dynamic groups — the servers
+    connected to the run — after them, in a section of their own. In one list
+    sorted by name, a dozen server lines sorted ahead of the host's browser
+    and scheduler, and a model reading down from the top took the servers for
+    the whole catalogue: it reached for a server's browser, or for a shell,
+    and never loaded the group made for the job. Within each section, groups
+    in name order and names in name order, so the same decision renders
     the same bytes on every request and after every resume. Each line gives
     the EXACT names — a model that guesses a name gets the case wrong — or, for
     a group declared by prefix with more tools than ``max_listed_names``, the
@@ -423,8 +439,12 @@ def render_tool_catalogue(
     rules = rules or {}
     if not deferred and not rules:
         return ""
+    own = sorted(name for name in deferred if not _is_dynamic(declared, name))
+    connected = sorted(name for name in deferred if _is_dynamic(declared, name))
     lines: list[str] = []
-    for name in sorted(deferred):
+    for name in [*own, *connected]:
+        if own and connected and name == connected[0]:
+            lines.extend(("", _CONNECTED_GROUPS_LEAD))
         names = deferred[name]
         group = declared.get(name)
         description = group.description.strip() if group is not None else ""
@@ -872,41 +892,102 @@ def calls_held_for_rules(engine: QueryEngine, calls: Sequence[ToolCall]) -> dict
     return held
 
 
-def hold_call_for_rules(
-    engine: QueryEngine, call: ToolCall, group: str
-) -> tuple[str, list[TurnEvent]]:
-    """Load ``call``'s tool and answer it with its group's rules; return the answer.
+def held_call_text(
+    name: str,
+    group: str,
+    *,
+    rules: str,
+    signature: str,
+    loaded: Sequence[str],
+    first: bool,
+) -> str:
+    """The answer to a blind call held for its group's rules.
 
-    The answer is not an error. Nothing failed: the model is one step from the
-    call it wanted, and an error would count against the tool and teach the
-    model that the tool is broken.
+    ``rules`` are the group's instructions when this answer is the one that
+    gives them (``first``), ``signature`` the called tool's
+    :func:`~protocore.runtime.tool_retrieval.tool_line`, and ``loaded`` the
+    group's tools the call loaded. The line is there because the call was
+    written without the schema, and a retry from memory repeated the same
+    wrong arguments; the other names are there because a model told only
+    that its one tool was loaded went on to treat the rest of the group as
+    missing, and did their jobs by other means.
     """
-    manager = engine.context_manager
-    declaration = next((g for g in engine.tools.tool_groups() if g.name == group), None)
-    first = group not in engine._tool_group_rules_given
-    newly_loaded = manager.discover_tool(call.name)
-    manager.note_tool_used(call.name)
-    if first and declaration is not None and declaration.instructions:
-        engine._tool_group_rules_given.add(group)
-        content = (
-            f"Not run yet: {call.name} was not in your tool list, and the {group} "
-            "tools come with rules to read before the first call.\n\n"
-            f"{group_rules_text(group, declaration.instructions)}\n\n"
-            "The tool is loaded now; call it again."
-        )
+    others = [other for other in loaded if other != name]
+    if first and rules:
+        lines = [
+            f"Not run yet: {name} was not in your tool list, and the {group} "
+            "tools come with rules to read before the first call.",
+            "",
+            group_rules_text(group, rules),
+            "",
+        ]
     elif not first:
         # A second call of the same group in the same message: its rules are
         # in the answer to the first, a few lines up, and once is enough.
-        content = (
-            f"Not run yet: {call.name} was not in your tool list. The rules for "
-            f"the {group} tools are in another result of this step. The tool is "
-            "loaded now; call it again."
-        )
+        lines = [
+            f"Not run yet: {name} was not in your tool list. The rules for the "
+            f"{group} tools are in another result of this step.",
+            "",
+        ]
     else:
         # The group lost its rules between the start of the message and this
         # call (redeclared, or forgotten): there is nothing left to give, and
         # the call was still made blind.
-        content = f"Not run yet: {call.name} was not in your tool list. It is loaded now; call it again."
+        lines = [f"Not run yet: {name} was not in your tool list.", ""]
+    if others:
+        lines.append(
+            f"The whole {group} group is loaded now, so these are callable too: "
+            f"{', '.join(others)}."
+        )
+    lines.append(f"{name} is loaded now; call it again. It takes: {signature}")
+    return "\n".join(lines)
+
+
+def hold_call_for_rules(
+    engine: QueryEngine, call: ToolCall, group: str
+) -> tuple[str, list[TurnEvent]]:
+    """Load ``call``'s whole group and answer it with the group's rules; return the answer.
+
+    The answer is not an error. Nothing failed: the model is one step from the
+    call it wanted, and an error would count against the tool and teach the
+    model that the tool is broken.
+
+    The whole group is loaded, as ``ToolSearch(group=...)`` would, and not the
+    one tool: the rules are the group's, and a job that starts with one of its
+    tools usually needs another of them next — which a model that had only
+    the called tool loaded could not see, and did without.
+    """
+    manager = engine.context_manager
+    registry = engine.tools
+    declared = registry.tool_groups()
+    declaration = next((g for g in declared if g.name == group), None)
+    first = group not in engine._tool_group_rules_given
+    admitted = _admits(engine)
+    advertised = engine._advertised_tool_names or frozenset()
+    already = manager.discovered_tool_last_used()
+    members = sorted(
+        tool.name
+        for tool in registry.list_all()
+        if tool_group_of(tool, declared) == group
+        and admitted(tool.name)
+        and (tool.name not in advertised or tool.name in already)
+    )
+    if call.name not in members:
+        members = sorted((*members, call.name))
+    newly = [name for name in members if manager.discover_tool(name, group=group)]
+    manager.note_tool_used(call.name)
+    rules = declaration.instructions if declaration is not None else ""
+    if first and rules:
+        engine._tool_group_rules_given.add(group)
+    tool = registry.get(call.name)
+    content = held_call_text(
+        call.name,
+        group,
+        rules=rules,
+        signature=tool_line(tool.definition) if tool is not None else call.name,
+        loaded=members,
+        first=first,
+    )
     events = [
         TurnEvent(
             type=EventType.TOOL_UNADVERTISED_CALL,
@@ -918,13 +999,13 @@ def hold_call_for_rules(
                 "success": False,
                 "deferred": engine._tool_deferral is not None
                 and call.name in engine._tool_deferral.deferred_names,
-                "loaded": newly_loaded,
+                "loaded": call.name in newly,
                 "discovered_tool_names": list(manager.discovered_tool_names()),
             },
         )
     ]
-    if newly_loaded:
-        events.extend(_group_loaded_events(engine, {group: ("direct_call", [call.name])}))
+    if newly:
+        events.extend(_group_loaded_events(engine, {group: ("direct_call", newly)}))
     return content, events
 
 

@@ -19,6 +19,7 @@ from protocore.contracts.tool_registry import ToolVisibilityPolicy
 from protocore.contracts.types import MessageRole, TextBlock
 from protocore.runtime.events import EventType
 from protocore.runtime.tool_deferral import ensure_tool_deferral, note_prompt_prefix_restarted
+from protocore.runtime.tool_retrieval import tool_line
 from protocore.runtime.tool_surface import forget_tool_surfaces
 from protocore.tools import ToolSearchTool
 
@@ -240,16 +241,55 @@ async def test_a_blind_call_gets_the_rules_first_and_runs_on_the_retry(
         "Not run yet: BrowserOpen was not in your tool list, and the browser tools "
         "come with rules to read before the first call.\n\n"
         f"Rules for the browser tools:\n{_RULES}\n\n"
-        "The tool is loaded now; call it again."
+        "The whole browser group is loaded now, so these are callable too: BrowserClick.\n"
+        "BrowserOpen is loaded now; call it again. It takes: "
+        f"{tool_line(run.tools.get('BrowserOpen').definition)}"
     )
     assert ran.content == "ok"
     assert _invocations(run, "BrowserOpen") == [{"v": "https://example.org"}]
-    assert run.advertised_tool_names(1)[-1] == "BrowserOpen"
+    # The group came in whole, as one entry, like a load by ToolSearch.
+    assert run.advertised_tool_names(1)[-2:] == ["BrowserClick", "BrowserOpen"]
+    assert run.engine.context_manager.loaded_tool_group_names() == ("browser",)
     unadvertised = run.events_of(EventType.TOOL_UNADVERTISED_CALL)
     assert [evt.payload["executed"] for evt in unadvertised] == [False]
-    assert _group_loads(run) == [("browser", "direct_call", ["BrowserOpen"])]
-    # Nothing failed, so nothing is charged to the tool.
+    assert _group_loads(run) == [("browser", "direct_call", ["BrowserClick", "BrowserOpen"])]
+    # Nothing failed, so nothing is charged to the tool; and only the tool
+    # the model called counts as called, not the rest of its group.
     assert run.engine.context_manager.called_discovered_tool_names() == ("BrowserOpen",)
+
+
+async def test_the_rest_of_a_group_a_blind_call_loaded_runs_at_once(
+    scenario: ScenarioFactory,
+) -> None:
+    run = _lazy(
+        scenario(
+            tools=[
+                *_tools(),
+                ScriptedTool(tool_name="BrowserDownload", description="save a file"),
+            ],
+            tool_visibility_policy=ToolVisibilityPolicy(blocked={"BrowserDownload"}),
+        )
+    )
+    run.llm.queue_tool_call_response(
+        tool_call_id="c-1", tool_name="BrowserOpen", tool_input={"v": "a"}
+    )
+    run.llm.queue_tool_call_response(
+        tool_call_id="c-2", tool_name="BrowserClick", tool_input={"v": "b"}
+    )
+    run.llm.queue_response(text="clicked")
+    await run.run("click on the page")
+
+    held, clicked = run.tool_results()
+    assert "these are callable too: BrowserClick." in held.content
+    # A tool the policy refuses is neither loaded nor named.
+    assert "BrowserDownload" not in held.content
+    assert "BrowserDownload" not in run.advertised_tool_names(1)
+    # The sibling was loaded by the held call, so it is advertised and runs
+    # without a second hold.
+    assert "BrowserClick" in run.advertised_tool_names(1)
+    assert clicked.content == "ok"
+    assert _invocations(run, "BrowserClick") == [{"v": "b"}]
+    assert len(run.events_of(EventType.TOOL_UNADVERTISED_CALL)) == 1
 
 
 async def test_two_blind_calls_of_one_group_in_one_message_both_wait(
@@ -269,9 +309,13 @@ async def test_two_blind_calls_of_one_group_in_one_message_both_wait(
     assert "Rules for the browser tools" in first.content
     assert second.content == (
         "Not run yet: BrowserClick was not in your tool list. The rules for the "
-        "browser tools are in another result of this step. The tool is loaded "
-        "now; call it again."
+        "browser tools are in another result of this step.\n\n"
+        "The whole browser group is loaded now, so these are callable too: BrowserOpen.\n"
+        "BrowserClick is loaded now; call it again. It takes: "
+        f"{tool_line(run.tools.get('BrowserClick').definition)}"
     )
+    # Loaded once, by the first of the two.
+    assert _group_loads(run) == [("browser", "direct_call", ["BrowserClick", "BrowserOpen"])]
     assert _invocations(run, "BrowserOpen") == []
     assert _invocations(run, "BrowserClick") == []
 
@@ -353,25 +397,26 @@ async def test_a_resumed_run_does_not_hold_back_a_call_it_already_cleared(
     snapshot = first.engine.snapshot()
     assert snapshot["tool_group_rules_given"] == ["browser"]
 
-    # BrowserOpen is blocked in the new process, so no loaded tool of the
-    # group brings the rules back through the catalogue: only the snapshot
-    # says they were given.
+    # The tools the held call loaded are blocked in the new process, so no
+    # loaded tool of the group brings the rules back through the catalogue:
+    # only the snapshot says they were given. The new process also has a
+    # browser tool the first never loaded.
     second = _lazy(
         scenario(
-            tools=_tools(),
-            tool_visibility_policy=ToolVisibilityPolicy(blocked={"BrowserOpen"}),
+            tools=[*_tools(), ScriptedTool(tool_name="BrowserType", description="type")],
+            tool_visibility_policy=ToolVisibilityPolicy(blocked={"BrowserOpen", "BrowserClick"}),
         )
     )
     await second.engine.resume_from_snapshot(snapshot)
     second.engine.rearm()
     second.llm.queue_tool_call_response(
-        tool_call_id="c-2", tool_name="BrowserClick", tool_input={"v": "y"}
+        tool_call_id="c-2", tool_name="BrowserType", tool_input={"v": "y"}
     )
-    second.llm.queue_response(text="clicked")
-    await second.run("click")
+    second.llm.queue_response(text="typed")
+    await second.run("type")
 
     assert "Rules for the browser tools" not in _system_text(second, 0)
-    assert _invocations(second, "BrowserClick") == [{"v": "y"}]
+    assert _invocations(second, "BrowserType") == [{"v": "y"}]
 
 
 # ── groups seeded whole ─────────────────────────────────────────────────────

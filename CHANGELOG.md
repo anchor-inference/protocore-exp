@@ -129,6 +129,14 @@ All notable changes to this project are recorded here. The format follows
   gains `tool_group_rules_given`, and a discovered-tool row loaded with its
   whole group carries `group`. The catalogue's header now names the
   whole-group load. See `docs/tools.md`.
+- **A blind call held for its group's rules loads the whole group**, as
+  `ToolSearch(group=...)` would, and its answer names the group's other tools
+  now callable and gives the called tool's line (`It takes: Name(p1*, p2) —
+  …`). Loading only the called tool left the rest of the group out of sight,
+  and the retry was written without the parameters.
+- **The catalogue lists the host's own held-back groups first**, and the
+  `dynamic` groups after them under `Tools of connected servers:`. In one
+  name-sorted list the servers stood ahead of the host's groups.
 - `QueryEngineConfig.loaded_tool_groups` seeds a run with whole groups, each
   one entry under `pinned_tool_max_count` with its rules in the catalogue and
   a `tool_group_loaded` event with `via` `seed`; seeding a large group's tools

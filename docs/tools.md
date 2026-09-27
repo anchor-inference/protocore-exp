@@ -430,16 +430,26 @@ tools, the exact prefix and a count:
 
 ```text
 - browser: Drive a web browser. Tools: BrowserClick, BrowserOpen
-- github: GitHub issues and pull requests. Tools: Mcp_Github_* (26 tools)
 - scheduling: Timed and recurring jobs. Tools: IntentCreate, ScheduleCreate
+
+Tools of connected servers:
+- github: GitHub issues and pull requests. Tools: Mcp_Github_* (26 tools)
 ```
+
+The host's own groups come first, and the `dynamic` groups — connected
+servers — after them in a section of their own. Listed together in name order,
+a dozen server lines stood ahead of the host's groups, and a model reading from
+the top took them for the whole catalogue: it drove a server's browser, or a
+shell, and never loaded the group made for the job. A sentence over the host's
+groups naming those detours was tried too; models loaded groups more often
+under it and did the task no better, so there is none.
 
 Exact names matter: a model that has to guess a name gets its case wrong. The
 second sentence matters more than it looks — a model that cannot see a tool
 reaches for the nearest one it can (a service started with a shell command, two
 edits instead of one multi-edit), and that, rather than a failed search, is the
-usual way a held-back tool goes unused. The block is built from the decision, in
-name order, so it is byte-identical on every request and after a resume. When
+usual way a held-back tool goes unused. The block is built from the decision, each
+section in name order, so it is byte-identical on every request and after a resume. When
 nothing is held back and no group carries rules, no block is emitted, and the
 prompt is exactly what it would be without groups.
 
@@ -586,11 +596,17 @@ the loop emits `tool_unadvertised_call`.
 The one exception is a tool whose group carries rules the run has not been
 given. A call of it was written without the schema and without the rules, and
 it would act on a guess about exactly what the rules are there to settle. So it
-is **not run**: the tool is loaded, the group's rules are marked given, and the
-call is answered — not as an error, since nothing failed — with the rules and
-"The tool is loaded now; call it again." The next call runs. A second blind
-call of the same group in the same message waits too, and is pointed at the
-first answer rather than given the rules twice. `tool_unadvertised_call`
+is **not run**: its **whole group** is loaded, as `ToolSearch(group=...)` would
+load it (the tools the run may call, one entry under the cap), the group's
+rules are marked given, and the call is answered — not as an error, since
+nothing failed — with the rules, the names of the group's other tools now
+callable, and the called tool's line: "BrowserOpen is loaded now; call it
+again. It takes: BrowserOpen(url*) — …". The next call runs. The whole group,
+because a job that starts with one of its tools usually needs another next,
+and a model that had only the one it called went on without the rest; the
+line, because a retry written from memory repeated the wrong arguments. A
+second blind call of the same group in the same message waits too, and is
+pointed at the first answer rather than given the rules twice. `tool_unadvertised_call`
 carries `executed: false` for such a call. Models read an exact name from the
 catalogue and call it without loading it often enough that refusing the call
 outright would cost them; this costs one step, and only for groups with rules.

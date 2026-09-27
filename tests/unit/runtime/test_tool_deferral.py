@@ -289,7 +289,10 @@ def test_without_a_discovery_tool_dynamic_groups_go_only_over_the_provider_limit
 def test_the_catalogue_names_exact_tools_and_prefixes_for_large_dynamic_groups() -> None:
     declared = {
         "github": ToolGroup(
-            name="github", description="GitHub issues and pull requests.", prefix="Mcp_Github_"
+            name="github",
+            description="GitHub issues and pull requests.",
+            dynamic=True,
+            prefix="Mcp_Github_",
         ),
         "schedule": ToolGroup(name="schedule", description="Timed and recurring jobs"),
     }
@@ -313,11 +316,60 @@ def test_the_catalogue_names_exact_tools_and_prefixes_for_large_dynamic_groups()
         "so load the tool rather than improvising.\n"
         "\n"
         "- bare: tools Lonely\n"
-        "- github: GitHub issues and pull requests. Tools: Mcp_Github_* (3 tools)\n"
         "- schedule: Timed and recurring jobs. Tools: ScheduleCreate, IntentCreate\n"
+        "\n"
+        "Tools of connected servers:\n"
+        "- github: GitHub issues and pull requests. Tools: Mcp_Github_* (3 tools)\n"
         "</system-reminder>"
     )
     assert render_tool_catalogue({}, declared, discovery_tool="ToolSearch", max_listed_names=2) == ""
+
+
+def test_the_hosts_own_groups_come_before_the_connected_servers() -> None:
+    # Sorted by name alone, a server spelt in capitals would come before
+    # every one of the host's groups.
+    declared = {
+        "MCP server aaa": ToolGroup(name="MCP server aaa", description="A", dynamic=True),
+        "MCP server zzz": ToolGroup(name="MCP server zzz", description="Z", dynamic=True),
+        "browser": ToolGroup(name="browser", description="Drive a browser"),
+        "loop": ToolGroup(name="loop", description="This session's loop"),
+    }
+    deferred = {
+        "MCP server zzz": ["Mcp_Zzz_b"],
+        "loop": ["LoopStop"],
+        "MCP server aaa": ["Mcp_Aaa_a"],
+        "browser": ["BrowserOpen"],
+    }
+    catalogue = render_tool_catalogue(
+        deferred, declared, discovery_tool="ToolSearch", max_listed_names=12
+    )
+    body = catalogue.split("\n\n", 1)[1]
+    assert body.splitlines()[:6] == [
+        "- browser: Drive a browser. Tools: BrowserOpen",
+        "- loop: This session's loop. Tools: LoopStop",
+        "",
+        "Tools of connected servers:",
+        "- MCP server aaa: A. Tools: Mcp_Aaa_a",
+        "- MCP server zzz: Z. Tools: Mcp_Zzz_b",
+    ]
+    # The same decision in another order is the same bytes.
+    assert catalogue == render_tool_catalogue(
+        dict(reversed(list(deferred.items()))),
+        declared,
+        discovery_tool="ToolSearch",
+        max_listed_names=12,
+    )
+
+    # Servers alone need no sections; and the order holds without a
+    # discovery tool too.
+    servers_only = render_tool_catalogue(
+        {"MCP server aaa": ["Mcp_Aaa_a"]}, declared, discovery_tool="ToolSearch", max_listed_names=12
+    )
+    assert "Tools of connected servers" not in servers_only
+    assert "- MCP server aaa: A. Tools: Mcp_Aaa_a" in servers_only
+    no_discovery = render_tool_catalogue(deferred, declared, discovery_tool="", max_listed_names=12)
+    assert "\n- browser: Drive a browser. Tools: BrowserOpen\n- loop:" in no_discovery
+    assert "\n\nTools of connected servers:\n- MCP server aaa" in no_discovery
 
 
 def test_the_same_decision_renders_the_same_bytes() -> None:
