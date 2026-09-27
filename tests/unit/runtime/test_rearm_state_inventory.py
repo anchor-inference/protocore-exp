@@ -52,6 +52,9 @@ _RESET_ON_REARM: frozenset[str] = frozenset(
         # next turn's first request states its own.
         "_advertised_tool_names",
         "_over_cap_tool_call_ids",
+        # The blind calls of the last message answered with their group's
+        # rules; the next message decides its own.
+        "_rules_first_tool_call_ids",
         # Proactive compaction's own memory: a suspension waiting for a
         # rejection, and the last probe that found nothing to do. The next
         # question starts with a fresh budget, so both start over with it.

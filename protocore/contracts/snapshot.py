@@ -383,7 +383,8 @@ def _v6_to_v7(snapshot: dict[str, Any]) -> dict[str, Any]:
     discovery order and recency, the first name the least recently used. Nothing
     was held back under version 6 — the mechanism did not exist — so the lift
     says exactly that, an empty list, and the resumed run keeps the whole
-    surface it had rather than deciding afresh partway through.
+    surface it had rather than deciding afresh partway through. No group's rules
+    had been given either, since groups had none, so that list is empty too.
     """
     lifted = {key: value for key, value in snapshot.items() if key != "context_manager_pinned_tools"}
     names = snapshot.get("context_manager_pinned_tools")
@@ -394,6 +395,7 @@ def _v6_to_v7(snapshot: dict[str, Any]) -> dict[str, Any]:
     ]
     lifted.setdefault("discovered_tools", rows)
     lifted.setdefault("deferred_tool_groups", [])
+    lifted.setdefault("tool_group_rules_given", [])
     return lifted
 
 

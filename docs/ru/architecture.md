@@ -941,11 +941,15 @@ Layer-3, с потолком `max_skills_per_run` (по умолчанию 4). �
   инструменты, причину каждого (`sources`: `discovered`, `configured_pin`,
   `forced_pin`, `retrieved_or_visible`), найденные прогоном инструменты в
   порядке обнаружения (`discovered_tool_names`) и отложенные группы
-  (`deferred_tool_groups`, `deferred_tool_count`, `tool_deferral_reasons`).
+  (`deferred_tool_groups`, `deferred_tool_count`, `tool_deferral_reasons`), а
+  также режим и состояние каждой группы (`tool_groups`).
   `tool_discovered` идёт за результатом инструмента обнаружения и называет
   загруженные им имена; `tool_unadvertised_call` — за вызовом
-  зарегистрированного инструмента, которого не было в запросе: он выполнен и
-  теперь загружен (см. [`tools.md`](tools.md#отложенные-группы-инструментов)).
+  зарегистрированного инструмента, которого не было в запросе: он выполнен —
+  или, для группы с ещё не данными правилами, получил в ответ правила
+  (`executed: false`) — и теперь загружен; `tool_group_loaded` говорит, какие
+  инструменты группы добавила загрузка и каким путём (см.
+  [`tools.md`](tools.md#отложенные-группы-инструментов)).
   Каждое значение — строка `event:`, показываемая SSE-клиентам.
   События транспорта инструментов (`tool_transport_starting`,
   `tool_transport_ready`, `tool_transport_failed`, `tool_transport_teardown`)

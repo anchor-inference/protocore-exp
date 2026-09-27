@@ -11,6 +11,9 @@ from protocore.contracts.runtime_constants import LoopConstants
 from protocore.contracts.tool_registry import (
     ADVERTISED_TOOLS_METADATA_KEY,
     TOOL_ALLOWLIST_METADATA_KEY,
+    TOOL_GROUP_RULES_GIVEN_METADATA_KEY,
+    TOOL_GROUP_RULES_METADATA_KEY,
+    TOOL_GROUPS_LOADED_METADATA_KEY,
     TOOL_VISIBILITY_POLICY_METADATA_KEY,
     TOOLS_LOADED_METADATA_KEY,
     ToolVisibilityPolicy,
@@ -19,6 +22,7 @@ from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import ToolDefinition, ToolParameterSchema
 from protocore.runtime.tool_registry import ToolRegistry
 from protocore.tools import ToolSearchTool
+from protocore.tools.tool_search import ToolSearchInput
 from tests.unit.runtime._tool_fixtures import MockTool
 
 
@@ -74,6 +78,7 @@ def _context(
     rc: Any = None,
     advertised: frozenset[str] | None = None,
     allowlist: frozenset[str] | None = None,
+    given: frozenset[str] | None = None,
 ) -> ToolContext:
     metadata: dict[str, Any] = {"tool_call_id": "call-1"}
     if policy is not _NO_POLICY:
@@ -84,6 +89,8 @@ def _context(
         metadata[TOOL_ALLOWLIST_METADATA_KEY] = allowlist
     if advertised is not None:
         metadata[ADVERTISED_TOOLS_METADATA_KEY] = advertised
+    if given is not None:
+        metadata[TOOL_GROUP_RULES_GIVEN_METADATA_KEY] = given
     state = RunScopedState(rc=rc) if rc is not None else None
     return ToolContext(
         tenant_id="t", run_id="r", session_id="s", metadata=metadata, run_state=state
@@ -177,9 +184,9 @@ async def test_without_run_constants_the_defaults_apply() -> None:
 def test_the_tool_describes_itself_as_a_discovery_tool() -> None:
     tool = ToolSearchTool(ToolRegistry())
     assert tool.name == "ToolSearch"
-    # Either argument will do, so the schema requires neither.
+    # Any one argument will do, so the schema requires none.
     assert tool.definition.parameters.required == []
-    assert set(tool.definition.parameters.properties) == {"query", "select"}
+    assert set(tool.definition.parameters.properties) == {"query", "select", "group"}
     # A model that took the tool for a skill loader stopped short of the skill.
     assert "skills are not tools" in tool.definition.description
     assert tool.always_load is True
@@ -264,3 +271,107 @@ async def test_a_child_is_never_told_it_loaded_a_tool_outside_its_declared_set()
     _, loaded, matches = await _call(_catalogue(), "open a web page in the browser", allowlist=allowlist)
     assert "BrowserOpen" not in matches
     assert "BrowserOpen" not in loaded
+
+
+# ── whole groups and their rules ────────────────────────────────────────────
+
+
+def _grouped_catalogue() -> ToolRegistry:
+    registry = _catalogue()
+    registry.declare_group(
+        "github",
+        "GitHub issues and pull requests",
+        dynamic=True,
+        prefix="Mcp_Github_",
+        load="lazy",
+        instructions="Never close an issue you did not open.",
+    )
+    registry.declare_group("browser", "Drive a web browser", prefix="Browser")
+    return registry
+
+
+async def _raw_call(registry: ToolRegistry, arguments: dict[str, Any], **kwargs: Any) -> Any:
+    search = registry.get("ToolSearch")
+    assert search is not None
+    return await search.invoke(_context(**kwargs), arguments)
+
+
+async def test_a_group_argument_loads_every_admitted_tool_of_the_group() -> None:
+    result = await _raw_call(_grouped_catalogue(), {"group": "GitHub"})
+    assert result.metadata[TOOLS_LOADED_METADATA_KEY] == [
+        "Mcp_Github_create_issue",
+        "Mcp_Github_list_issues",
+    ]
+    assert result.metadata[TOOL_GROUPS_LOADED_METADATA_KEY] == ["github"]
+    assert result.metadata["load_via"] == "select"
+    lines = result.content.splitlines()
+    assert lines[0] == (
+        "Loaded, and callable from your next step: "
+        "Mcp_Github_create_issue, Mcp_Github_list_issues."
+    )
+    assert "Mcp_Github_list_issues(target, when) — List the issues of a GitHub repository." in lines
+    # The rules come once, after the tool lines.
+    assert result.content.endswith(
+        "Rules for the github tools:\nNever close an issue you did not open."
+    )
+    assert result.metadata[TOOL_GROUP_RULES_METADATA_KEY] == ["github"]
+
+
+async def test_select_takes_group_tokens_beside_names() -> None:
+    result = await _raw_call(
+        _grouped_catalogue(), {"query": "select:group:browser,SecretVault"}
+    )
+    assert result.metadata[TOOLS_LOADED_METADATA_KEY] == ["BrowserOpen", "SecretVault"]
+    assert result.metadata[TOOL_GROUPS_LOADED_METADATA_KEY] == ["browser"]
+    # browser has no rules, so none are given.
+    assert result.metadata[TOOL_GROUP_RULES_METADATA_KEY] == []
+    assert "Rules for" not in result.content
+
+
+async def test_an_unknown_group_is_answered_with_the_groups_there_are() -> None:
+    registry = _grouped_catalogue()
+    result = await _raw_call(
+        registry,
+        {"group": "calendar"},
+        policy=ToolVisibilityPolicy(blocked={"BrowserOpen"}),
+    )
+    assert result.metadata[TOOLS_LOADED_METADATA_KEY] == []
+    # The browser group's only tool is blocked, so the group is not named.
+    assert "No tool group named 'calendar'. Groups: github." in result.content
+
+
+async def test_rules_already_given_are_not_given_again() -> None:
+    result = await _raw_call(
+        _grouped_catalogue(),
+        {"select": ["Mcp_Github_list_issues"]},
+        given=frozenset({"github"}),
+    )
+    assert result.metadata[TOOLS_LOADED_METADATA_KEY] == ["Mcp_Github_list_issues"]
+    assert "Rules for" not in result.content
+    assert result.metadata[TOOL_GROUP_RULES_METADATA_KEY] == []
+
+
+async def test_a_search_gives_the_rules_of_what_it_loaded_but_not_of_what_was_there() -> None:
+    registry = _grouped_catalogue()
+    loaded = await _raw_call(
+        registry,
+        {"query": "github issue"},
+        rc=LoopConstants(tool_search_autoload_count=1),
+        advertised=frozenset({"ToolSearch"}),
+    )
+    assert loaded.metadata["load_via"] == "search"
+    assert loaded.metadata[TOOL_GROUP_RULES_METADATA_KEY] == ["github"]
+    already = await _raw_call(
+        registry,
+        {"query": "github issue"},
+        rc=LoopConstants(tool_search_autoload_count=2),
+        advertised=frozenset({"Mcp_Github_list_issues", "Mcp_Github_create_issue"}),
+    )
+    assert already.metadata[TOOL_GROUP_RULES_METADATA_KEY] == []
+    assert "Rules for" not in already.content
+
+
+def test_a_group_alone_is_a_request() -> None:
+    assert ToolSearchInput.model_validate({"group": "github"}).group == "github"
+    with pytest.raises(ValidationError):
+        ToolSearchInput.model_validate({"group": "  "})

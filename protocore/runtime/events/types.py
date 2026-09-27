@@ -46,6 +46,9 @@ class EventType(StrEnum):
     # The model called a registered tool the request did not advertise. The
     # policy admitted it, so it ran; it is loaded for the rest of the run.
     TOOL_UNADVERTISED_CALL = "tool_unadvertised_call"
+    # Tools of a group were loaded: payload ``{group, via, tools}``, ``via``
+    # one of search, select, group, direct_call or seed.
+    TOOL_GROUP_LOADED = "tool_group_loaded"
     ERROR = "error"
 
     # ----- Protocore extensions -----

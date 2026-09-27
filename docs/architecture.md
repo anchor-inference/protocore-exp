@@ -943,10 +943,13 @@ owner, a scope, and a disposer, or by implementing `IHookManager` in the host.
   each is there (`sources`: `discovered`, `configured_pin`, `forced_pin`,
   `retrieved_or_visible`), the tools the run has discovered in discovery order
   (`discovered_tool_names`) and the groups it holds back
-  (`deferred_tool_groups`, `deferred_tool_count`, `tool_deferral_reasons`).
+  (`deferred_tool_groups`, `deferred_tool_count`, `tool_deferral_reasons`),
+  and each group's load mode and state (`tool_groups`).
   `tool_discovered` follows a discovery tool's result with the names it loaded;
   `tool_unadvertised_call` follows a call of a registered tool the request did
-  not advertise, which ran and is now loaded (see
+  not advertise, which ran — or, for a group with rules not yet given, was
+  answered with the rules (`executed: false`) — and is now loaded;
+  `tool_group_loaded` says which tools of a group a load added, and how (see
   [`tools.md`](tools.md#holding-tool-groups-back)). Each value is the `event:`
   line surfaced to SSE clients.
 - `runtime/events/envelope.py` — `TurnEvent` (the frozen wire envelope).

@@ -152,6 +152,7 @@ def test_a_versionless_payload_reaches_the_current_version_with_nothing_invented
         "spans",
         "discovered_tools",
         "deferred_tool_groups",
+        "tool_group_rules_given",
     ):
         assert upgraded[key] == []
     assert "context_manager_pinned_tools" not in upgraded

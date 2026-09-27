@@ -83,6 +83,7 @@ from protocore.contracts.tool_registry import (
     IToolRegistry,
     ToolGroup,
     ToolVisibilityPolicy,
+    make_tool_group,
     policy_admits,
 )
 from protocore.contracts.tool_retrieval import RetrievalSettings
@@ -2116,12 +2117,17 @@ class InMemoryToolRegistry(IToolRegistry):
         description: str,
         *,
         dynamic: bool = False,
-        prefix: str = "",
+        prefix: str | None = None,
+        load: str = "auto",
+        instructions: str = "",
     ) -> None:
-        if not name:
-            raise ValueError("a tool group needs a name")
-        self._groups[name] = ToolGroup(
-            name=name, description=description, dynamic=dynamic, prefix=prefix
+        self._groups[name] = make_tool_group(
+            name,
+            description,
+            dynamic=dynamic,
+            prefix=prefix,
+            load=load,
+            instructions=instructions,
         )
 
     def undeclare_group(self, name: str) -> None:

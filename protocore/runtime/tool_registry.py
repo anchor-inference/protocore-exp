@@ -41,6 +41,7 @@ from protocore.contracts.tool_registry import (
     IToolRegistry,
     ToolGroup,
     ToolVisibilityPolicy,
+    make_tool_group,
     policy_admits,
 )
 from protocore.contracts.tool_retrieval import (
@@ -173,19 +174,27 @@ class ToolRegistry(IToolRegistry):
         description: str,
         *,
         dynamic: bool = False,
-        prefix: str = "",
+        prefix: str | None = None,
+        load: str = "auto",
+        instructions: str = "",
     ) -> None:
         """Declare a tool group, replacing any earlier declaration of ``name``.
 
         A group changes no search result and no advertised definition, so
-        declaring one does not bump the catalogue generation.
+        declaring one does not bump the catalogue generation; the loop keys
+        its deferral decision on the declared groups themselves, so a new
+        load mode or new instructions are seen on its next request.
         """
-        if not name:
-            raise ValueError("a tool group needs a name")
+        group = make_tool_group(
+            name,
+            description,
+            dynamic=dynamic,
+            prefix=prefix,
+            load=load,
+            instructions=instructions,
+        )
         with self._lock:
-            self._groups[name] = ToolGroup(
-                name=name, description=description, dynamic=dynamic, prefix=prefix
-            )
+            self._groups[name] = group
 
     def undeclare_group(self, name: str) -> None:
         """Forget a group; idempotent.

@@ -1,9 +1,10 @@
 """``ToolSearch`` — find tools that are available but not loaded, and load them.
 
 When a run holds tool groups back (:mod:`protocore.runtime.tool_deferral`),
-this is how the model gets them: it describes what it needs, or names the
-tools exactly with ``select:``, and the best matches are loaded onto the
-surface from the next request on. The tool itself only ranks and reports; it
+this is how the model gets them: it describes what it needs, names the tools
+exactly with ``select:``, or names a whole group with ``group``, and the tools
+are loaded onto the surface from the next request on. The first tools of a
+group with rules to follow bring the rules with them, once per run. The tool itself only ranks and reports; it
 names what it loaded under
 :data:`~protocore.contracts.tool_registry.TOOLS_LOADED_METADATA_KEY`, and the
 loop — which owns the surface — does the loading, for names the live policy
@@ -24,11 +25,16 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from protocore.contracts.tool_registry import (
     ADVERTISED_TOOLS_METADATA_KEY,
     TOOL_ALLOWLIST_METADATA_KEY,
+    TOOL_GROUP_RULES_GIVEN_METADATA_KEY,
+    TOOL_GROUP_RULES_METADATA_KEY,
+    TOOL_GROUPS_LOADED_METADATA_KEY,
     TOOL_VISIBILITY_POLICY_METADATA_KEY,
     TOOLS_LOADED_METADATA_KEY,
     IToolRegistry,
     ToolVisibilityPolicy,
+    group_rules_text,
     policy_admits,
+    tool_group_of,
 )
 from protocore.contracts.tool_retrieval import RetrievalSettings
 from protocore.contracts.tool_roles import ToolRole
@@ -40,6 +46,9 @@ TOOL_SEARCH_TOOL_NAME: Final[str] = "ToolSearch"
 
 #: The query form that names tools exactly instead of describing them.
 SELECT_PREFIX: Final[str] = "select:"
+
+#: A ``select`` entry that names a whole group rather than one tool.
+GROUP_PREFIX: Final[str] = "group:"
 
 # Used when the run carries no constants, as a tool invoked outside a run does.
 _DEFAULT_MAX_RESULTS: Final[int] = 8
@@ -71,6 +80,14 @@ class ToolSearchInput(BaseModel):
         default_factory=list,
         description="Exact tool names to load, instead of or besides a query.",
     )
+    group: str = Field(
+        default="",
+        max_length=200,
+        description=(
+            "The exact name of a tool group from the list of available tools, "
+            "to load every tool in it."
+        ),
+    )
 
     @field_validator("select", mode="before")
     @classmethod
@@ -82,8 +99,11 @@ class ToolSearchInput(BaseModel):
 
     @model_validator(mode="after")
     def _something_asked(self) -> ToolSearchInput:
-        if not self.query.strip() and not self.select:
-            raise ValueError("pass a 'query' describing the tool, or 'select' with exact names")
+        if not self.query.strip() and not self.select and not self.group.strip():
+            raise ValueError(
+                "pass a 'query' describing the tool, 'select' with exact names, "
+                "or 'group' with a group's name"
+            )
         return self
 
 
@@ -103,11 +123,12 @@ class ToolSearchTool(Tool):
     is_destructive: ClassVar[bool] = False
     description_: ClassVar[str] = (
         "Find and load tools that are available but not loaded yet. Describe "
-        "what you need, or pass exact names in 'select' (or 'select:' and the "
-        "names as the query) to load those tools. The best matches are loaded "
-        "at once and can be called from your next step; the result says which, "
-        "and which were already in your tool list. This loads tools only: "
-        "skills are not tools, and no search here loads one."
+        "what you need, pass exact names in 'select' (or 'select:' and the "
+        "names as the query) to load those tools, or pass a group's name in "
+        "'group' to load all of its tools. The tools are loaded at once and "
+        "can be called from your next step; the result says which, and which "
+        "were already in your tool list. This loads tools only: skills are "
+        "not tools, and no search here loads one."
     )
     search_hint: ClassVar[str] = (
         "find load discover tool capability "
@@ -153,15 +174,25 @@ class ToolSearchTool(Tool):
         )
         rc = context.run_state.rc if context.run_state is not None else None
         advertised = _advertised(read_metadata(context, ADVERTISED_TOOLS_METADATA_KEY))
+        # Outside a loop nothing says what was given, so everything is owed.
+        given = _advertised(read_metadata(context, TOOL_GROUP_RULES_GIVEN_METADATA_KEY))
         query = payload.query.strip()
-        names = list(payload.select)
+        entries = list(payload.select)
         if query[: len(SELECT_PREFIX)].lower() == SELECT_PREFIX:
-            names.extend(n.strip() for n in query[len(SELECT_PREFIX) :].split(",") if n.strip())
-        if names:
+            entries.extend(n.strip() for n in query[len(SELECT_PREFIX) :].split(",") if n.strip())
+        names: list[str] = []
+        groups: list[str] = [payload.group.strip()] if payload.group.strip() else []
+        for entry in entries:
+            if entry[: len(GROUP_PREFIX)].lower() == GROUP_PREFIX:
+                if entry[len(GROUP_PREFIX) :].strip():
+                    groups.append(entry[len(GROUP_PREFIX) :].strip())
+            else:
+                names.append(entry)
+        if names or groups:
             # Names win over a description sent beside them: the model already
             # knows what it wants, and a search would load other tools too.
-            return self._select(call_id, names, policy, advertised)
-        return self._search(call_id, query, policy, rc, advertised)
+            return self._select(call_id, names, groups, policy, advertised, given or frozenset())
+        return self._search(call_id, query, policy, rc, advertised, given or frozenset())
 
     # ------------------------------------------------------------------
 
@@ -190,17 +221,73 @@ class ToolSearchTool(Tool):
             if policy_admits(policy, tool.name) and not _discovers_tools(tool)
         }
 
+    def _group_members(self, admitted: dict[str, Tool]) -> dict[str, list[str]]:
+        """Each group with an admitted tool, and those tools by name."""
+        declared = self._registry.tool_groups()
+        members: dict[str, list[str]] = {}
+        for name in sorted(admitted):
+            group = tool_group_of(admitted[name], declared)
+            if group:
+                members.setdefault(group, []).append(name)
+        return members
+
+    def _rules(
+        self,
+        admitted: dict[str, Tool],
+        loaded: Sequence[str],
+        advertised: frozenset[str] | None,
+        given: frozenset[str],
+    ) -> list[tuple[str, str]]:
+        """The rules owed with this load: of each group a newly loaded tool is in.
+
+        A tool the model already had was in front of it with its rules, so it
+        owes none; neither does a group whose rules the run was given.
+        """
+        declared = {group.name: group for group in self._registry.tool_groups()}
+        owed: list[tuple[str, str]] = []
+        for name in loaded:
+            if advertised is not None and name in advertised:
+                continue
+            group = tool_group_of(admitted[name], list(declared.values()))
+            declaration = declared.get(group)
+            if (
+                declaration is None
+                or not declaration.instructions
+                or group in given
+                or any(group == seen for seen, _ in owed)
+            ):
+                continue
+            owed.append((group, declaration.instructions))
+        return owed
+
     def _select(
         self,
         call_id: str,
         names: Sequence[str],
+        groups: Sequence[str],
         policy: ToolVisibilityPolicy,
         advertised: frozenset[str] | None,
+        given: frozenset[str],
     ) -> ToolResult:
         admitted = self._admitted(policy)
         by_folded = {name.casefold(): name for name in admitted}
         loaded: list[str] = []
         missing: list[str] = []
+        whole: list[str] = []
+        missing_groups: list[str] = []
+        if groups:
+            members = self._group_members(admitted)
+            groups_by_folded = {name.casefold(): name for name in members}
+            for requested in groups:
+                group = requested if requested in members else groups_by_folded.get(
+                    requested.casefold()
+                )
+                if group is None:
+                    missing_groups.append(requested)
+                    continue
+                if group not in whole:
+                    whole.append(group)
+                loaded.extend(name for name in members[group] if name not in loaded)
         for requested in names:
             # A name in the wrong case is still unambiguous; loading the one it
             # means is kinder than refusing it.
@@ -210,6 +297,14 @@ class ToolSearchTool(Tool):
             elif actual not in loaded:
                 loaded.append(actual)
         lines = _loaded_header(loaded, advertised)
+        for requested in missing_groups:
+            # Only groups with a tool the run may use are named, so a group
+            # the policy blocks whole is never revealed by the list.
+            available = ", ".join(sorted(self._group_members(admitted)))
+            if available:
+                lines.append(f"No tool group named {requested!r}. Groups: {available}.")
+            else:
+                lines.append(f"No tool group named {requested!r}.")
         for requested in missing:
             # Suggestions come from the admitted names only, so a name the
             # policy blocks is never revealed by being "close".
@@ -224,10 +319,20 @@ class ToolSearchTool(Tool):
         if loaded:
             lines.append("")
             lines.extend(tool_line(admitted[name].definition) for name in loaded)
+        rules = self._rules(admitted, loaded, advertised, given)
+        for group, text in rules:
+            lines.append("")
+            lines.append(group_rules_text(group, text))
         return ToolResult(
             tool_call_id=call_id,
             content="\n".join(lines),
-            metadata={TOOLS_LOADED_METADATA_KEY: loaded, "matches": loaded},
+            metadata={
+                TOOLS_LOADED_METADATA_KEY: loaded,
+                TOOL_GROUPS_LOADED_METADATA_KEY: whole,
+                TOOL_GROUP_RULES_METADATA_KEY: [group for group, _ in rules],
+                "matches": loaded,
+                "load_via": "select",
+            },
         )
 
     def _search(
@@ -237,6 +342,7 @@ class ToolSearchTool(Tool):
         policy: ToolVisibilityPolicy,
         rc: Any,
         advertised: frozenset[str] | None,
+        given: frozenset[str],
     ) -> ToolResult:
         max_results = _positive(getattr(rc, "tool_search_max_results", None), _DEFAULT_MAX_RESULTS)
         autoload = _non_negative(
@@ -257,6 +363,7 @@ class ToolSearchTool(Tool):
             if not _discovers_tools(tool)
         ][:max_results]
         loaded = [tool.name for tool in hits[:autoload]]
+        rules = self._rules({tool.name: tool for tool in hits}, loaded, advertised, given)
         if not hits:
             content = (
                 f"No tool matches {query!r}. Try other words, or 'select:' with "
@@ -268,13 +375,18 @@ class ToolSearchTool(Tool):
             if len(hits) > len(loaded):
                 lines.append("")
                 lines.append("Load any other match with 'select:' and its name.")
+            for group, text in rules:
+                lines.append("")
+                lines.append(group_rules_text(group, text))
             content = "\n".join(lines)
         return ToolResult(
             tool_call_id=call_id,
             content=content,
             metadata={
                 TOOLS_LOADED_METADATA_KEY: loaded,
+                TOOL_GROUP_RULES_METADATA_KEY: [group for group, _ in rules],
                 "matches": [tool.name for tool in hits],
+                "load_via": "search",
             },
         )
 
@@ -339,6 +451,7 @@ def _retrieval_settings(rc: Any) -> RetrievalSettings | None:
 
 
 __all__ = [
+    "GROUP_PREFIX",
     "SELECT_PREFIX",
     "TOOL_SEARCH_TOOL_NAME",
     "ToolSearchInput",

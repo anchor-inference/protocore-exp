@@ -62,6 +62,7 @@ def _plan(
     protected: frozenset[str] = frozenset(),
     rc: LoopConstants | None = None,
     restored: list[str] | None = None,
+    loads: dict[str, str] | None = None,
 ) -> tuple[tuple[str, ...], frozenset[str], str, tuple[str, ...]]:
     decision = plan_tool_deferral(
         tools=tools,
@@ -70,6 +71,7 @@ def _plan(
         discovery_names=discovery_tool_names(tools, ToolRoleMap()),
         rc=rc or LoopConstants(),
         restored=restored,
+        loads=loads,
     )
     return (
         decision.deferred_groups,
@@ -303,11 +305,12 @@ def test_the_catalogue_names_exact_tools_and_prefixes_for_large_dynamic_groups()
     )
     assert catalogue == (
         "<system-reminder>\n"
-        "These tools are available but not loaded. Before calling one, load it with "
-        'ToolSearch: describe what you need, or pass "select:" and exact names, e.g. '
-        '"select:Name1,Name2". A dedicated tool for the job is better than a '
-        "workaround with a general one such as a shell command, so load the tool "
-        "rather than improvising.\n"
+        "These tools are available but not loaded, and can be loaded at any time. "
+        'Before calling one, load it with ToolSearch: pass group="<name>" to load a '
+        'whole group, or "select:" and exact names to load particular tools (e.g. '
+        '"select:Name1,Name2"), or describe what you need. A dedicated tool for the '
+        "job is better than a workaround with a general one such as a shell command, "
+        "so load the tool rather than improvising.\n"
         "\n"
         "- bare: tools Lonely\n"
         "- github: GitHub issues and pull requests. Tools: Mcp_Github_* (3 tools)\n"
@@ -357,6 +360,202 @@ def test_an_undeclared_group_no_longer_claims_its_prefix(
     assert [group.name for group in registry.tool_groups()] == ["jira"]
     tool = MockTool(tool_name="Mcp_Github_list_issues")
     assert tool_group_of(tool, registry.tool_groups()) == ""
+
+
+# ── load modes ──────────────────────────────────────────────────────────────
+
+
+def _browser_and_notes() -> list[MockTool | ToolSearchTool]:
+    return [
+        _search(),
+        MockTool(tool_name="Read"),
+        GroupedTool(tool_name="BrowserOpen", tool_group="browser"),
+        GroupedTool(tool_name="BrowserClick", tool_group="browser"),
+        GroupedTool(tool_name="NoteAdd", tool_group="notes"),
+    ]
+
+
+def test_a_lazy_group_is_held_back_below_every_limit_when_a_search_is_there() -> None:
+    groups = [ToolGroup(name="browser", description="Drive a browser", load="lazy")]
+    deferred, names, catalogue, reasons = _plan(_browser_and_notes(), groups)
+    assert deferred == ("browser",)
+    assert names == {"BrowserOpen", "BrowserClick"}
+    assert reasons == ("lazy",)
+    assert "- browser: Drive a browser. Tools: BrowserClick, BrowserOpen" in catalogue
+    assert 'ToolSearch: pass group="<name>" to load a whole group' in catalogue
+
+
+def test_a_lazy_group_is_advertised_when_nothing_could_load_it() -> None:
+    """Without a discovery tool a blind call would be the only way in, which
+    costs more than the definitions: lazy is auto then."""
+    tools = [tool for tool in _browser_and_notes() if not isinstance(tool, ToolSearchTool)]
+    groups = [ToolGroup(name="browser", load="lazy")]
+    assert _plan(tools, groups)[0] == ()
+
+
+def test_a_per_run_load_overrides_the_declaration() -> None:
+    groups = [ToolGroup(name="browser", load="lazy"), ToolGroup(name="notes")]
+    assert _plan(_browser_and_notes(), groups, loads={"browser": "auto"})[0] == ()
+    assert _plan(_browser_and_notes(), groups, loads={"notes": "lazy"})[0] == (
+        "browser",
+        "notes",
+    )
+    # An undeclared group is auto, and an override reaches it too.
+    assert _plan(_browser_and_notes(), [], loads={"notes": "lazy"})[0] == ("notes",)
+
+
+def test_an_eager_group_stays_over_the_token_budget_and_over_the_dynamic_rule() -> None:
+    tools = [
+        _search(),
+        *(_padded(f"Own{i}", words=200, group="own") for i in range(4)),
+        *(_padded(f"Mcp_X_{i}", words=5) for i in range(2)),
+    ]
+    groups = [
+        ToolGroup(name="own", load="eager"),
+        ToolGroup(name="x", dynamic=True, prefix="Mcp_X_", load="eager"),
+    ]
+    rc = LoopConstants(model_context_window=4_096)
+    assert _plan(tools, groups, rc=rc)[0] == ()
+
+
+def test_an_eager_group_gives_way_to_the_provider_limit_and_only_to_it() -> None:
+    """A request over the provider's count is refused, which no load mode is
+    worth; the room kept for loaded tools is not worth pushing an eager group
+    off for, since the request drops loaded tools before it would exceed."""
+    tools = [
+        _search(),
+        *(MockTool(tool_name=f"Core{i}") for i in range(6)),
+        *(GroupedTool(tool_name=f"E{i}", tool_group="e") for i in range(4)),
+    ]
+    groups = [ToolGroup(name="e", load="eager")]
+    at_limit = LoopConstants(max_advertised_tools=10, pinned_tool_max_count=5)
+    assert _plan(tools, groups, rc=at_limit)[0] == ()
+    over = LoopConstants(max_advertised_tools=9, pinned_tool_max_count=5)
+    deferred, _, _, reasons = _plan(tools, groups, rc=over)
+    assert deferred == ("e",)
+    assert reasons == ("count",)
+
+
+def test_a_group_made_eager_leaves_the_restored_floor() -> None:
+    groups = [ToolGroup(name="browser", load="eager")]
+    assert _plan(_browser_and_notes(), groups, restored=["browser"])[0] == ()
+
+
+def test_the_decision_reports_every_group_and_its_mode() -> None:
+    groups = [ToolGroup(name="browser", load="lazy")]
+    decision = plan_tool_deferral(
+        tools=_browser_and_notes(),
+        groups=groups,
+        protected=frozenset(),
+        discovery_names=frozenset({"ToolSearch"}),
+        rc=LoopConstants(),
+        loads={"notes": "eager"},
+    )
+    assert decision.group_loads == (("browser", "lazy"), ("notes", "eager"))
+
+
+# ── group rules in the catalogue ────────────────────────────────────────────
+
+
+def _ruled_groups() -> list[ToolGroup]:
+    return [
+        ToolGroup(
+            name="browser",
+            description="Drive a browser",
+            load="lazy",
+            instructions="Ask before submitting a form.\nClose the page when done.",
+        ),
+        ToolGroup(name="notes", instructions="Keep notes short."),
+    ]
+
+
+def test_rules_are_written_only_for_tools_in_front_of_the_model() -> None:
+    decision = plan_tool_deferral(
+        tools=_browser_and_notes(),
+        groups=_ruled_groups(),
+        protected=frozenset(),
+        discovery_names=frozenset({"ToolSearch"}),
+        rc=LoopConstants(),
+    )
+    # notes is on the surface, so its rules are; browser is held back and
+    # brings its rules when it is loaded.
+    assert decision.ruled_groups == ("notes",)
+    assert "Rules for the notes tools:\nKeep notes short." in decision.catalogue
+    assert "Ask before submitting" not in decision.catalogue
+
+
+def test_a_loaded_groups_rules_sit_under_its_line() -> None:
+    decision = plan_tool_deferral(
+        tools=_browser_and_notes(),
+        groups=_ruled_groups(),
+        protected=frozenset(),
+        discovery_names=frozenset({"ToolSearch"}),
+        rc=LoopConstants(),
+        loaded=["BrowserOpen"],
+    )
+    assert decision.ruled_groups == ("browser", "notes")
+    assert decision.catalogue.endswith(
+        "- browser: Drive a browser. Tools: BrowserClick, BrowserOpen\n"
+        "  Rules for the browser tools:\n"
+        "  Ask before submitting a form.\n"
+        "  Close the page when done.\n"
+        "\n"
+        "Rules for the notes tools:\n"
+        "Keep notes short.\n"
+        "</system-reminder>"
+    )
+
+
+def test_rules_alone_make_a_block_without_the_header() -> None:
+    groups = [ToolGroup(name="notes", instructions="Keep notes short.")]
+    tools = [MockTool(tool_name="Read"), GroupedTool(tool_name="NoteAdd", tool_group="notes")]
+    decision = plan_tool_deferral(
+        tools=tools,
+        groups=groups,
+        protected=frozenset(),
+        discovery_names=frozenset(),
+        rc=LoopConstants(),
+    )
+    assert decision.deferred_groups == ()
+    assert decision.catalogue == (
+        "<system-reminder>\nRules for the notes tools:\nKeep notes short.\n</system-reminder>"
+    )
+
+
+def test_a_group_without_rules_changes_nothing() -> None:
+    groups = [ToolGroup(name="notes")]
+    tools = [MockTool(tool_name="Read"), GroupedTool(tool_name="NoteAdd", tool_group="notes")]
+    decision = plan_tool_deferral(
+        tools=tools,
+        groups=groups,
+        protected=frozenset(),
+        discovery_names=frozenset(),
+        rc=LoopConstants(),
+    )
+    assert decision.catalogue == ""
+    assert decision.deferred_groups == ()
+
+
+@pytest.mark.parametrize("registry_type", [ToolRegistry, InMemoryToolRegistry])
+def test_a_declaration_carries_its_load_and_rules_and_refuses_an_unknown_mode(
+    registry_type: type[ToolRegistry] | type[InMemoryToolRegistry],
+) -> None:
+    registry = registry_type()
+    registry.declare_group("browser", "Drive a browser", load="lazy", instructions="  Be careful. ")
+    (group,) = registry.tool_groups()
+    assert (group.load, group.instructions, group.prefix) == ("lazy", "Be careful.", "")
+    registry.declare_group("browser", "Drive a browser", prefix=None)
+    assert registry.tool_groups()[0].load == "auto"
+    with pytest.raises(ValueError, match="load must be one of"):
+        registry.declare_group("browser", "Drive a browser", load="sometimes")
+
+
+def test_a_run_refuses_an_unknown_load_override() -> None:
+    with pytest.raises(ValueError, match="tool_group_loads"):
+        QueryEngineConfig(
+            run_id="r", tenant_id="t", session_id="s", model_name="m",
+            tool_group_loads={"browser": "later"},
+        )
 
 
 # ── the production registry, through the loop ───────────────────────────────

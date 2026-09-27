@@ -95,7 +95,10 @@ from protocore.contracts.tool_chunking import (
     chunkable_content_mutation_names,
     is_chunkable_content_mutation,
 )
-from protocore.contracts.tool_registry import ADVERTISED_TOOLS_METADATA_KEY
+from protocore.contracts.tool_registry import (
+    ADVERTISED_TOOLS_METADATA_KEY,
+    TOOL_GROUP_RULES_GIVEN_METADATA_KEY,
+)
 from protocore.contracts.tool_roles import (
     WORKSPACE_INSPECTION_ROLES,
     WORKSPACE_MUTATION_ROLES,
@@ -227,8 +230,13 @@ from protocore.runtime.subagent_budget import SubagentTreeBudget, SubagentTreePe
 from protocore.runtime.tool_arguments import argument_names, string_argument
 from protocore.runtime.tool_deferral import (
     build_tool_surface,
+    calls_held_for_rules,
+    hold_call_for_rules,
+    note_prompt_prefix_restarted,
     observe_dispatched_tool,
+    seed_group_events,
     tool_catalogue_block,
+    tool_group_states,
 )
 from protocore.runtime.tool_dispatch import (
     DISPATCH_POST_TOOL_OUTPUT_MODIFIED_METADATA_KEY,
@@ -1789,6 +1797,9 @@ def _tool_surface_advertised_payload(
         "deferred_tool_groups": list(deferral.deferred_groups) if deferral else [],
         "deferred_tool_count": len(deferral.deferred_names) if deferral else 0,
         "tool_deferral_reasons": list(deferral.reasons) if deferral else [],
+        # Every group on the would-be surface, its load mode for this run, and
+        # whether it is advertised, held back, or held back with tools loaded.
+        "tool_groups": tool_group_states(deferral, tool_names, engine),
         "retrieval_top_k": engine.config.rc.tool_retrieval_top_k,
         "argument_names": {
             slot.value: list(names)
@@ -3817,6 +3828,13 @@ async def _stream_one_assistant_message(
         # order the model asked — because a call without a result is a
         # transcript the provider refuses.
         engine._over_cap_tool_call_ids = _calls_over_cap(engine, pending_tool_calls)
+        # Blind calls of tools whose group has rules the run has not been given
+        # are answered with the rules, and not run. Decided for the whole
+        # message at once, so two calls of one such group are both held.
+        engine._rules_first_tool_call_ids = calls_held_for_rules(
+            engine,
+            [tc for tc in pending_tool_calls if tc.id not in engine._over_cap_tool_call_ids],
+        )
         # Set True when a bounded pre-terminal self-verify turn was injected
         # at a would-be-terminal site. It breaks the dispatch loop WITHOUT
         # finalising; flow then falls through to the
@@ -3880,13 +3898,16 @@ async def _stream_one_assistant_message(
             ]
         else:
             delegation_eligible = [False] * len(pending_tool_calls)
-        if engine._over_cap_tool_call_ids:
+        # Calls answered without being run take the serial path, where the
+        # answer lands in the order the model asked.
+        not_run = engine._over_cap_tool_call_ids | set(engine._rules_first_tool_call_ids)
+        if not_run:
             parallel_eligible = [
-                eligible and tc.id not in engine._over_cap_tool_call_ids
+                eligible and tc.id not in not_run
                 for eligible, tc in zip(parallel_eligible, pending_tool_calls, strict=True)
             ]
             delegation_eligible = [
-                eligible and tc.id not in engine._over_cap_tool_call_ids
+                eligible and tc.id not in not_run
                 for eligible, tc in zip(delegation_eligible, pending_tool_calls, strict=True)
             ]
 
@@ -4851,6 +4872,8 @@ async def _drive_one_stream(
     # offered: a call of anything else is a call of a tool the model was not
     # shown (see ``observe_dispatched_tool``).
     engine._advertised_tool_names = frozenset(t.name for t in context.tools)
+    for seed_event in seed_group_events(engine):
+        yield seed_event
     advert = _tool_surface_advertised_payload(engine, context)
     yield TurnEvent(
         type=EventType.TOOL_SURFACE_ADVERTISED,
@@ -10263,6 +10286,9 @@ def _stamp_advertised_tools(metadata: dict[str, Any], engine: QueryEngine) -> No
     advertised = engine._advertised_tool_names
     if advertised is not None:
         metadata[ADVERTISED_TOOLS_METADATA_KEY] = advertised
+    # Stamped whether or not any were given, so a search inside a loop never
+    # reads the key's absence as "outside a loop".
+    metadata[TOOL_GROUP_RULES_GIVEN_METADATA_KEY] = frozenset(engine._tool_group_rules_given)
 
 
 def _rehydrate_satisfied_from_history(engine: QueryEngine) -> None:
@@ -10803,7 +10829,13 @@ def _insert_tool_result_after_use(
 
 
 def _unload_tools_over_cap(engine: QueryEngine, *, reason: str) -> None:
-    """Unload the least recently used discovered tools over ``pinned_tool_max_count``."""
+    """Unload the least recently used discovered tools over ``pinned_tool_max_count``.
+
+    Called only after a compaction, which is also where the catalogue is
+    written again with the rules of the groups still loaded: the results that
+    gave those rules may be in the summary now, and only as its gist.
+    """
+    note_prompt_prefix_restarted(engine)
     evicted = engine.context_manager.evict_discovered_tools()
     if evicted:
         _logger.info(
@@ -10873,6 +10905,41 @@ async def _refuse_call_over_cap(
         await engine._persist_snapshot()
 
 
+async def _answer_with_group_rules(
+    engine: QueryEngine, tool_call: ToolCall
+) -> AsyncIterator[TurnEvent]:
+    """Answer a blind call of a rule-bearing group's tool with the rules, unrun.
+
+    Like a call over the cap, it is not charged to the circuit breaker or the
+    error streaks: the tool never ran. Unlike one, it is not an error — the
+    tool is loaded and the next call of it runs.
+    """
+    group = engine._rules_first_tool_call_ids.pop(tool_call.id)
+    content, events = hold_call_for_rules(engine, tool_call, group)
+    yield TurnEvent(
+        type=EventType.TOOL_RESULT,
+        run_id=engine.config.run_id,
+        payload={
+            "tool_call_id": tool_call.id,
+            "success": True,
+            "is_error": False,
+            "content_blocks": [{"type": "text", "text": content}],
+        },
+    )
+    for evt in events:
+        yield evt
+    engine.history.append(
+        Message(
+            role=MessageRole.tool,
+            content_blocks=[
+                ToolResultBlock(tool_call_id=tool_call.id, content=content, is_error=False)
+            ],
+        )
+    )
+    engine.forget_tool_name(tool_call.id)
+    await engine._persist_snapshot()
+
+
 async def _dispatch_tool(
     engine: QueryEngine,
     tool_call: ToolCall,
@@ -10900,6 +10967,10 @@ async def _dispatch_tool(
  """
     if tool_call.id in engine._over_cap_tool_call_ids:
         async for evt in _refuse_call_over_cap(engine, tool_call):
+            yield evt
+        return
+    if tool_call.id in engine._rules_first_tool_call_ids:
+        async for evt in _answer_with_group_rules(engine, tool_call):
             yield evt
         return
     _pin_keep_flag(engine, tool_call)

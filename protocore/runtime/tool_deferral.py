@@ -25,28 +25,42 @@ the answer flipped, which is worse than either answer.
 Held-back tools stay admitted by the visibility policy: a model that calls one
 by its exact name is served, and the tool is loaded for the rest of the run.
 
+A group may also be held back by choice. Its load mode — the declaration's,
+or the run's own override — is ``auto`` for the rule above, ``lazy`` for a
+family the run rarely needs, held back whenever there is a discovery tool to
+load it, and ``eager`` for one that stays on the surface whatever the size,
+giving way only to a provider's hard limit on the number of tools. And a group
+may carry rules for its tools, given once per run where the tools first come
+in front of the model: in the catalogue for tools there from the start, in the
+result that loads them, or instead of running a call made to one blind.
+
 Nothing here runs when nothing is over. No group declared, no discovery tool
-registered, or a surface inside both limits: the surface and the system prompt
-are exactly what they would be without this module.
+registered, or a surface inside both limits, with no group lazy and none
+carrying rules: the surface and the system prompt are exactly what they would
+be without this module.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Final
 
 from protocore.contracts.runtime_constants import LoopConstants
 from protocore.contracts.tool_registry import (
+    TOOL_GROUP_LOADS,
+    TOOL_GROUP_RULES_METADATA_KEY,
+    TOOL_GROUPS_LOADED_METADATA_KEY,
     TOOLS_LOADED_METADATA_KEY,
     ToolGroup,
     ToolVisibilityPolicy,
+    group_rules_text,
     policy_admits,
     tool_group_of,
 )
 from protocore.contracts.tool_retrieval import RetrievalSettings
 from protocore.contracts.tool_roles import ToolRole, ToolRoleMap
 from protocore.contracts.tools import Tool
-from protocore.contracts.types import ToolDefinition
+from protocore.contracts.types import ToolCall, ToolDefinition
 from protocore.runtime.context.budgets import derive_budgets
 from protocore.runtime.events import EventType, TurnEvent
 from protocore.runtime.token_counting import estimate_tokens
@@ -55,16 +69,28 @@ if TYPE_CHECKING:
     from protocore.runtime.query_engine import QueryEngine
     from protocore.runtime.tool_dispatch import DispatchOutcome
 
+#: How the tools of a group came to be loaded, as ``tool_group_loaded`` says.
+#: ``search`` and ``select`` are a discovery tool's two forms, ``group`` its
+#: whole-group form, ``direct_call`` a call of a tool that was not advertised,
+#: and ``seed`` the tools a host started the run with.
+GROUP_LOAD_VIAS: Final[tuple[str, ...]] = ("search", "select", "group", "direct_call", "seed")
+
 __all__ = [
+    "GROUP_LOAD_VIAS",
     "NO_DEFERRAL",
     "ToolDeferral",
     "build_tool_surface",
+    "calls_held_for_rules",
     "discovery_tool_names",
     "ensure_tool_deferral",
+    "hold_call_for_rules",
+    "note_prompt_prefix_restarted",
     "observe_dispatched_tool",
     "plan_tool_deferral",
     "render_tool_catalogue",
+    "seed_group_events",
     "tool_catalogue_block",
+    "tool_group_states",
 ]
 
 #: The sentence under the catalogue. A model that cannot see a tool reaches for
@@ -91,7 +117,13 @@ class ToolDeferral:
     """The system-prompt block naming the held-back groups; empty for none."""
 
     reasons: tuple[str, ...] = ()
-    """Why anything was held back: ``dynamic``, ``tokens``, ``count``, ``restored``."""
+    """Why anything was held back: ``lazy``, ``dynamic``, ``tokens``, ``count``, ``restored``."""
+
+    group_loads: tuple[tuple[str, str], ...] = ()
+    """Every group with a tool on the would-be surface and its load mode, by name."""
+
+    ruled_groups: tuple[str, ...] = ()
+    """The groups whose rules the catalogue carries, by name."""
 
 
 NO_DEFERRAL: Final[ToolDeferral] = ToolDeferral()
@@ -119,6 +151,21 @@ def _definition_tokens(definition: ToolDefinition, rc: LoopConstants) -> int:
     return estimate_tokens(definition.model_dump_json(), rc)
 
 
+def _load_of(
+    name: str, declared: Mapping[str, ToolGroup], loads: Mapping[str, str]
+) -> str:
+    """The load mode ``name`` runs with: the run's override, else the declaration.
+
+    A group only a tool's ``tool_group`` attribute names was never declared,
+    and is ``auto`` — what it was before load modes existed.
+    """
+    override = loads.get(name)
+    if override in TOOL_GROUP_LOADS:
+        return override
+    group = declared.get(name)
+    return group.load if group is not None else "auto"
+
+
 def plan_tool_deferral(
     *,
     tools: Sequence[Tool],
@@ -128,6 +175,9 @@ def plan_tool_deferral(
     rc: LoopConstants,
     restored: Sequence[str] | None = None,
     restored_reasons: Sequence[str] = ("restored",),
+    loads: Mapping[str, str] | None = None,
+    loaded: Iterable[str] = (),
+    ruled: Iterable[str] = (),
 ) -> ToolDeferral:
     """Decide which groups ``tools`` — the would-be surface — holds back.
 
@@ -136,11 +186,17 @@ def plan_tool_deferral(
     is never held back either; a host that wants a tool deferrable says so by
     grouping it.
 
-    Every dynamic group is held back as soon as deferral is on. The others go
-    only while the surface is over — its definitions above
-    ``tool_definitions_ratio`` of the window, or its count above
-    ``max_advertised_tools`` with room left for the tools the run may load —
-    largest first, so the fewest groups leave.
+    Each group's load mode — ``loads`` for this run, else its declaration —
+    comes first. A ``lazy`` group is held back whenever a discovery tool is
+    on the surface, whatever the size; an ``eager`` one is never held back
+    for size. The rest is the ``auto`` rule: every dynamic group is held back
+    as soon as deferral is on, and the others only while the surface is over
+    — its definitions above ``tool_definitions_ratio`` of the window, or its
+    count above ``max_advertised_tools`` with room left for the tools the run
+    may load — largest first, so the fewest groups leave. The provider's count
+    limit is the one thing an ``eager`` group yields to, and only while the
+    count is over the limit itself: a request over it is refused, which no
+    load mode is worth.
 
     ``restored`` is an earlier decision to keep: one a snapshot carried, or the
     one this run already made. Its groups stay held back while they have tools,
@@ -149,20 +205,96 @@ def plan_tool_deferral(
     the answer: a dynamic group it does not name is still held back, and the
     limits are still enforced on top of it. Replayed as the whole answer, a
     snapshot taken before a large server connected put that server on the
-    surface whole, over a provider's limit on the number of tools.
+    surface whole, over a provider's limit on the number of tools. A group
+    now ``eager`` leaves the floor: the operator asked for it by name.
 
     Without a discovery tool nothing can load a held-back tool but a call by
-    its exact name, so groups are held back only when the provider would
-    otherwise refuse the request (the count limit); the catalogue then says to
-    call by exact name.
+    its exact name, so groups — ``lazy`` ones too — are held back only when
+    the provider would otherwise refuse the request (the count limit); the
+    catalogue then says to call by exact name.
+
+    The rules of a group (:attr:`ToolGroup.instructions`) are written into the
+    catalogue when its tools are in front of the model from the start: a
+    group left on the surface, a group of one of the ``loaded`` tools, and
+    every ``ruled`` group, which is the floor the catalogue already carries.
     """
+    declared = {group.name: group for group in groups}
+    overrides: Mapping[str, str] = loads or {}
+    chosen, reasons = _choose_deferred(
+        tools=tools,
+        groups=groups,
+        declared=declared,
+        overrides=overrides,
+        protected=protected,
+        discovery_names=discovery_names,
+        rc=rc,
+        restored=restored,
+        restored_reasons=restored_reasons,
+    )
+    group_of = {tool.name: tool_group_of(tool, groups) for tool in tools}
+    deferred: dict[str, list[str]] = {name: [] for name in chosen}
+    for tool in tools:
+        group_name = group_of[tool.name]
+        if (
+            group_name in deferred
+            and tool.name not in protected
+            and tool.name not in discovery_names
+        ):
+            deferred[group_name].append(tool.name)
+    deferred_names = frozenset(name for names in deferred.values() for name in names)
+    present = sorted({name for name in group_of.values() if name})
+    on_surface = {
+        group_of[tool.name]
+        for tool in tools
+        if tool.name not in deferred_names and group_of[tool.name]
+    }
+    with_loaded = {group_of.get(name, "") for name in loaded} - {""}
+    rules = {
+        name: declared[name].instructions
+        for name in sorted(set(ruled) | on_surface | with_loaded)
+        if name in declared and declared[name].instructions
+    }
+    if not chosen and not rules:
+        return replace(
+            NO_DEFERRAL,
+            group_loads=tuple((name, _load_of(name, declared, overrides)) for name in present),
+        )
+    listed_discovery = discovery_names & {tool.name for tool in tools}
+    return ToolDeferral(
+        deferred_groups=tuple(chosen),
+        deferred_names=deferred_names,
+        catalogue=render_tool_catalogue(
+            {name: sorted(names) for name, names in deferred.items()},
+            declared,
+            discovery_tool=min(listed_discovery) if listed_discovery else "",
+            max_listed_names=rc.tool_catalogue_max_listed_names,
+            rules=rules,
+        ),
+        reasons=tuple(dict.fromkeys(reasons)) if chosen else (),
+        group_loads=tuple((name, _load_of(name, declared, overrides)) for name in present),
+        ruled_groups=tuple(rules),
+    )
+
+
+def _choose_deferred(
+    *,
+    tools: Sequence[Tool],
+    groups: Sequence[ToolGroup],
+    declared: Mapping[str, ToolGroup],
+    overrides: Mapping[str, str],
+    protected: frozenset[str],
+    discovery_names: frozenset[str],
+    rc: LoopConstants,
+    restored: Sequence[str] | None,
+    restored_reasons: Sequence[str],
+) -> tuple[list[str], list[str]]:
+    """The groups to hold back, in the order they go, and why."""
     if rc.tool_deferral_mode == "off":
-        return NO_DEFERRAL
+        return [], []
     discovering = any(tool.name in discovery_names for tool in tools)
     limit = rc.max_advertised_tools
     if not discovering and limit <= 0:
-        return NO_DEFERRAL
-    declared = {group.name: group for group in groups}
+        return [], []
     members: dict[str, list[Tool]] = {}
     for tool in tools:
         if tool.name in protected or tool.name in discovery_names:
@@ -171,7 +303,8 @@ def plan_tool_deferral(
         if group_name:
             members.setdefault(group_name, []).append(tool)
     if not members:
-        return NO_DEFERRAL
+        return [], []
+    load = {name: _load_of(name, declared, overrides) for name in members}
 
     tokens_of = {tool.name: _definition_tokens(tool.definition, rc) for tool in tools}
     group_tokens = {
@@ -197,16 +330,31 @@ def plan_tool_deferral(
     over_tokens = discovering and plain_tokens > budget
     over_count = limit > 0 and plain_count > limit
     if not discovering and not over_count:
-        return NO_DEFERRAL
+        return [], []
+
+    def eligible(name: str) -> bool:
+        return name not in chosen and load[name] != "eager"
 
     chosen: list[str] = []
     reasons: list[str] = []
     if restored is not None:
-        chosen = list(dict.fromkeys(name for name in restored if name in members))
+        chosen = list(
+            dict.fromkeys(
+                name for name in restored if name in members and load[name] != "eager"
+            )
+        )
         if chosen:
             reasons.extend(restored_reasons)
+    if discovering:
+        lazy = sorted(
+            (name for name in members if eligible(name) and load[name] == "lazy"),
+            key=largest_first,
+        )
+        if lazy:
+            chosen.extend(lazy)
+            reasons.append("lazy")
     dynamic = sorted(
-        (name for name in members if name not in chosen and _is_dynamic(declared, name)),
+        (name for name in members if eligible(name) and _is_dynamic(declared, name)),
         key=largest_first,
     )
     if dynamic:
@@ -218,7 +366,7 @@ def plan_tool_deferral(
         # A held-back tool the run loads comes back onto the surface, so the
         # count leaves room for as many as the run may keep loaded.
         headroom = rc.pinned_tool_max_count
-        for name in sorted((n for n in members if n not in chosen), key=largest_first):
+        for name in sorted((n for n in members if eligible(n)), key=largest_first):
             fits_tokens = not discovering or tokens <= budget
             fits_count = limit <= 0 or count + headroom <= limit
             if fits_tokens and fits_count:
@@ -226,59 +374,35 @@ def plan_tool_deferral(
             chosen.append(name)
             tokens -= group_tokens[name]
             count -= len(members[name])
+        # An eager group gives way to the provider's limit and to nothing
+        # else: not to the token budget, and not to the room kept for loaded
+        # tools, which the request drops before it would exceed the limit.
+        for name in sorted(
+            (n for n in members if n not in chosen and load[n] == "eager"), key=largest_first
+        ):
+            if limit <= 0 or count <= limit:
+                break
+            chosen.append(name)
+            count -= len(members[name])
         if over_tokens:
             reasons.append("tokens")
         if over_count:
             reasons.append("count")
-    if not chosen:
-        return NO_DEFERRAL
-    return _deferral(
-        chosen,
-        members,
-        declared,
-        rc,
-        tuple(dict.fromkeys(reasons)),
-        discovery_names & {tool.name for tool in tools},
-    )
+    return chosen, reasons
 
 
-def _is_dynamic(declared: dict[str, ToolGroup], name: str) -> bool:
+def _is_dynamic(declared: Mapping[str, ToolGroup], name: str) -> bool:
     group = declared.get(name)
     return group is not None and group.dynamic
 
 
-def _deferral(
-    chosen: Sequence[str],
-    members: dict[str, list[Tool]],
-    declared: dict[str, ToolGroup],
-    rc: LoopConstants,
-    reasons: tuple[str, ...],
-    discovery_names: frozenset[str],
-) -> ToolDeferral:
-    if not chosen:
-        return NO_DEFERRAL
-    deferred = {
-        name: sorted(tool.name for tool in members[name]) for name in chosen
-    }
-    return ToolDeferral(
-        deferred_groups=tuple(chosen),
-        deferred_names=frozenset(n for names in deferred.values() for n in names),
-        catalogue=render_tool_catalogue(
-            deferred,
-            declared,
-            discovery_tool=min(discovery_names) if discovery_names else "",
-            max_listed_names=rc.tool_catalogue_max_listed_names,
-        ),
-        reasons=reasons,
-    )
-
-
 def render_tool_catalogue(
     deferred: dict[str, list[str]],
-    declared: dict[str, ToolGroup],
+    declared: Mapping[str, ToolGroup],
     *,
     discovery_tool: str,
     max_listed_names: int,
+    rules: Mapping[str, str] | None = None,
 ) -> str:
     """The system-prompt block naming each held-back group, one line apiece.
 
@@ -288,8 +412,15 @@ def render_tool_catalogue(
     a group declared by prefix with more tools than ``max_listed_names``, the
     exact prefix and the count. An empty ``discovery_tool`` means the run has
     none, and the header says to call by exact name instead.
+
+    ``rules`` are the rules of the groups whose tools the model has in front
+    of it from the start. A held-back group's rules follow its line, indented;
+    the rules of a group on the surface follow the list. Only rules and no
+    held-back group make a block without the header, which would describe
+    nothing.
     """
-    if not deferred:
+    rules = rules or {}
+    if not deferred and not rules:
         return ""
     lines: list[str] = []
     for name in sorted(deferred):
@@ -306,11 +437,24 @@ def render_tool_catalogue(
             lines.append(f"- {name}: {summary}. Tools: {listed}")
         else:
             lines.append(f"- {name}: tools {listed}")
+        if name in rules:
+            lines.extend(
+                f"  {line}" if line else ""
+                for line in group_rules_text(name, rules[name]).splitlines()
+            )
+    trailing = [
+        group_rules_text(name, text) for name, text in sorted(rules.items()) if name not in deferred
+    ]
+    if not deferred:
+        body = "\n\n".join(trailing)
+        return f"<system-reminder>\n{body}\n</system-reminder>"
     if discovery_tool:
         header = (
-            "These tools are available but not loaded. Before calling one, load it "
-            f'with {discovery_tool}: describe what you need, or pass "select:" and '
-            f'exact names, e.g. "select:Name1,Name2". {_CATALOGUE_ADVICE}'
+            "These tools are available but not loaded, and can be loaded at any "
+            f"time. Before calling one, load it with {discovery_tool}: pass "
+            'group="<name>" to load a whole group, or "select:" and exact names '
+            'to load particular tools (e.g. "select:Name1,Name2"), or describe '
+            f"what you need. {_CATALOGUE_ADVICE}"
         )
     else:
         # No discovery tool: the one way in is a call by exact name, which is
@@ -323,6 +467,8 @@ def render_tool_catalogue(
             f"{_CATALOGUE_ADVICE}"
         )
     body = "\n".join(lines)
+    if trailing:
+        body = body + "\n\n" + "\n\n".join(trailing)
     return f"<system-reminder>\n{header}\n\n{body}\n</system-reminder>"
 
 
@@ -344,7 +490,10 @@ def _catalogue_key(engine: QueryEngine) -> tuple[Any, ...]:
     policy = engine.config.tool_visibility_policy
     return (
         tuple(tool.name for tool in engine.tools.list_all()),
+        # Whole declarations, so a group redeclared with another load mode or
+        # other rules is decided again.
         tuple(engine.tools.tool_groups()),
+        tuple(sorted(engine.config.tool_group_loads.items())),
         frozenset(policy.visible),
         frozenset(policy.blocked),
         frozenset(policy.pinned),
@@ -407,6 +556,15 @@ def ensure_tool_deferral(
     if restored is None and current is not None:
         restored = current.deferred_groups
         restored_reasons = current.reasons
+    # The loaded tools' rules go into the catalogue where the run's prompt
+    # begins — its first decision, or after a compaction — and not when a
+    # change of catalogue makes it again mid-run: the tools loaded since came
+    # with their rules in a result, and writing them into the catalogue as
+    # well would move the head of the cached prompt for nothing.
+    loaded: Sequence[str] = ()
+    if current is None or engine._catalogue_takes_loaded_rules:
+        loaded = engine.context_manager.discovered_tool_names()
+    engine._catalogue_takes_loaded_rules = False
     decision = plan_tool_deferral(
         tools=candidates,
         groups=registry.tool_groups(),
@@ -415,10 +573,27 @@ def ensure_tool_deferral(
         rc=engine.config.rc,
         restored=restored,
         restored_reasons=restored_reasons,
+        loads=engine.config.tool_group_loads,
+        loaded=loaded,
+        ruled=current.ruled_groups if current is not None else (),
     )
     engine._tool_deferral = decision
     engine._tool_deferral_key = key
+    # Rules in the catalogue are rules given: a call of one of those tools
+    # is not held back to give them again.
+    engine._tool_group_rules_given.update(decision.ruled_groups)
     return decision
+
+
+def note_prompt_prefix_restarted(engine: QueryEngine) -> None:
+    """Make the catalogue again at the next request, with the loaded tools' rules.
+
+    Called where the cached prefix is gone anyway — after a compaction. The
+    rules a load put in a result may have been summarised away with it, and
+    the catalogue is the one place that outlives a summary.
+    """
+    engine._tool_deferral_key = None
+    engine._catalogue_takes_loaded_rules = True
 
 
 def tool_catalogue_block(engine: QueryEngine) -> str:
@@ -494,6 +669,42 @@ def _fit_loaded(
     return [definition for definition in appended if definition.name in keep]
 
 
+def _group_of(engine: QueryEngine, name: str) -> str:
+    tool = engine.tools.get(name)
+    return tool_group_of(tool, engine.tools.tool_groups()) if tool is not None else ""
+
+
+def _admits(engine: QueryEngine) -> Callable[[str], bool]:
+    """The two stages dispatch applies: the policy, and a child's declared tool set.
+
+    Loading a tool the next call would be refused hands the model a schema it
+    cannot use, and holding one back to give its rules gives rules about a
+    tool it may not call.
+    """
+    policy = engine.effective_tool_policy
+    allowlist = engine.effective_subagent_tool_allowlist
+
+    def admitted(name: str) -> bool:
+        return policy_admits(policy, name) and (allowlist is None or name in allowlist)
+
+    return admitted
+
+
+def _group_loaded_events(
+    engine: QueryEngine, loads: Mapping[str, tuple[str, list[str]]]
+) -> list[TurnEvent]:
+    """One ``tool_group_loaded`` per group, in name order: ``{group: (via, tools)}``."""
+    return [
+        TurnEvent(
+            type=EventType.TOOL_GROUP_LOADED,
+            run_id=engine.config.run_id,
+            payload={"group": group, "via": via, "tools": list(tools)},
+        )
+        for group, (via, tools) in sorted(loads.items())
+        if tools
+    ]
+
+
 def observe_dispatched_tool(
     engine: QueryEngine,
     tool_name: str,
@@ -510,6 +721,11 @@ def observe_dispatched_tool(
     served, since dispatch checks the policy and not the surface; loading it
     puts its schema in front of the model for the next call rather than
     leaving the model to keep calling a tool it cannot see.
+
+    A discovery tool also names the groups it loaded whole
+    (:data:`TOOL_GROUPS_LOADED_METADATA_KEY`), whose tools are then one entry
+    under the loaded-tool cap, and the groups whose rules its result carries
+    (:data:`TOOL_GROUP_RULES_METADATA_KEY`), which count as given.
     """
     manager = engine.context_manager
     registry = engine.tools
@@ -517,24 +733,26 @@ def observe_dispatched_tool(
     if tool is None:
         return []
     manager.note_tool_used(tool_name)
-    policy = engine.effective_tool_policy
-    allowlist = engine.effective_subagent_tool_allowlist
-
-    def admitted(name: str) -> bool:
-        # The same two stages dispatch applies: the policy, and a child's
-        # declared tool set. Loading a tool the next call would be refused
-        # hands the model a schema it cannot use.
-        return policy_admits(policy, name) and (allowlist is None or name in allowlist)
+    admitted = _admits(engine)
 
     events: list[TurnEvent] = []
     discovery = discovery_tool_names([tool], engine.config.tool_roles)
     if tool_name in discovery:
-        raw = (outcome.metadata or {}).get(TOOLS_LOADED_METADATA_KEY)
+        metadata = outcome.metadata or {}
+        raw = metadata.get(TOOLS_LOADED_METADATA_KEY)
         if outcome.is_error or not isinstance(raw, list):
             return events
+        raw_groups = metadata.get(TOOL_GROUPS_LOADED_METADATA_KEY)
+        whole = (
+            {name for name in raw_groups if isinstance(name, str)}
+            if isinstance(raw_groups, list)
+            else set()
+        )
+        via_query = metadata.get("load_via") == "search"
         advertised_now = engine._advertised_tool_names or frozenset()
         loaded: list[str] = []
         newly: list[str] = []
+        by_group: dict[str, tuple[str, list[str]]] = {}
         for name in raw:
             if not isinstance(name, str) or name in loaded:
                 continue
@@ -545,8 +763,21 @@ def observe_dispatched_tool(
             # again would only spend a place under the cap.
             if name in advertised_now and name not in manager.discovered_tool_last_used():
                 continue
-            if manager.discover_tool(name):
+            group = _group_of(engine, name)
+            as_group = group if group and group in whole else ""
+            if manager.discover_tool(name, group=as_group):
                 newly.append(name)
+                if group:
+                    via = "group" if as_group else ("search" if via_query else "select")
+                    by_group.setdefault(group, (via, []))[1].append(name)
+        declared = {group.name: group for group in registry.tool_groups()}
+        raw_rules = metadata.get(TOOL_GROUP_RULES_METADATA_KEY)
+        if isinstance(raw_rules, list):
+            engine._tool_group_rules_given.update(
+                name
+                for name in raw_rules
+                if isinstance(name, str) and name in declared and declared[name].instructions
+            )
         if loaded:
             events.append(
                 TurnEvent(
@@ -561,6 +792,7 @@ def observe_dispatched_tool(
                     },
                 )
             )
+        events.extend(_group_loaded_events(engine, by_group))
         return events
     advertised = engine._advertised_tool_names
     if advertised is None or tool_name in advertised:
@@ -580,6 +812,7 @@ def observe_dispatched_tool(
             payload={
                 "tool_call_id": tool_call_id,
                 "tool_name": tool_name,
+                "executed": True,
                 "success": not outcome.is_error,
                 "deferred": tool_name in (
                     engine._tool_deferral.deferred_names
@@ -591,4 +824,147 @@ def observe_dispatched_tool(
             },
         )
     )
+    group = _group_of(engine, tool_name)
+    if newly_loaded and group:
+        events.extend(_group_loaded_events(engine, {group: ("direct_call", [tool_name])}))
     return events
+
+
+def calls_held_for_rules(engine: QueryEngine, calls: Sequence[ToolCall]) -> dict[str, str]:
+    """The calls of one model message to answer with their group's rules instead of running.
+
+    A call of a tool the request did not advertise was written without its
+    schema, and — when its group has rules the run has not been given — without
+    its rules. Running it anyway acts on a guess about exactly what the rules
+    are there to settle (which browser to drive, whether to ask first), so the
+    call is answered with the rules and the tool is loaded; the call again,
+    one step later, runs. A group without rules keeps the older bargain: the
+    call runs and loads the tool. Maps each held call's id to its group.
+    """
+    advertised = engine._advertised_tool_names
+    if advertised is None:
+        return {}
+    registry = engine.tools
+    groups = registry.tool_groups()
+    declared = {group.name: group for group in groups}
+    given = engine._tool_group_rules_given
+    discovery = discovery_tool_names(registry.list_all(), engine.config.tool_roles)
+    admitted = _admits(engine)
+    held: dict[str, str] = {}
+    for call in calls:
+        if call.name in advertised or call.name in discovery:
+            continue
+        tool = registry.get(call.name)
+        if tool is None or not admitted(call.name):
+            continue
+        group = tool_group_of(tool, groups)
+        declaration = declared.get(group)
+        if declaration is None or not declaration.instructions or group in given:
+            continue
+        held[call.id] = group
+    return held
+
+
+def hold_call_for_rules(
+    engine: QueryEngine, call: ToolCall, group: str
+) -> tuple[str, list[TurnEvent]]:
+    """Load ``call``'s tool and answer it with its group's rules; return the answer.
+
+    The answer is not an error. Nothing failed: the model is one step from the
+    call it wanted, and an error would count against the tool and teach the
+    model that the tool is broken.
+    """
+    manager = engine.context_manager
+    declaration = next((g for g in engine.tools.tool_groups() if g.name == group), None)
+    first = group not in engine._tool_group_rules_given
+    newly_loaded = manager.discover_tool(call.name)
+    manager.note_tool_used(call.name)
+    if first and declaration is not None and declaration.instructions:
+        engine._tool_group_rules_given.add(group)
+        content = (
+            f"Not run yet: {call.name} was not in your tool list, and the {group} "
+            "tools come with rules to read before the first call.\n\n"
+            f"{group_rules_text(group, declaration.instructions)}\n\n"
+            "The tool is loaded now; call it again."
+        )
+    elif not first:
+        # A second call of the same group in the same message: its rules are
+        # in the answer to the first, a few lines up, and once is enough.
+        content = (
+            f"Not run yet: {call.name} was not in your tool list. The rules for "
+            f"the {group} tools are in another result of this step. The tool is "
+            "loaded now; call it again."
+        )
+    else:
+        # The group lost its rules between the start of the message and this
+        # call (redeclared, or forgotten): there is nothing left to give, and
+        # the call was still made blind.
+        content = f"Not run yet: {call.name} was not in your tool list. It is loaded now; call it again."
+    events = [
+        TurnEvent(
+            type=EventType.TOOL_UNADVERTISED_CALL,
+            run_id=engine.config.run_id,
+            payload={
+                "tool_call_id": call.id,
+                "tool_name": call.name,
+                "executed": False,
+                "success": False,
+                "deferred": engine._tool_deferral is not None
+                and call.name in engine._tool_deferral.deferred_names,
+                "loaded": newly_loaded,
+                "discovered_tool_names": list(manager.discovered_tool_names()),
+            },
+        )
+    ]
+    if newly_loaded:
+        events.extend(_group_loaded_events(engine, {group: ("direct_call", [call.name])}))
+    return content, events
+
+
+def seed_group_events(engine: QueryEngine) -> list[TurnEvent]:
+    """``tool_group_loaded`` for the groups the host's seed loaded; once per run.
+
+    Emitted beside the first advertisement rather than at construction, where
+    no stream is being read yet.
+    """
+    seeded = engine._seeded_tool_names
+    engine._seeded_tool_names = ()
+    if not seeded:
+        return []
+    present = set(engine.context_manager.discovered_tool_names())
+    by_group: dict[str, tuple[str, list[str]]] = {}
+    for name in seeded:
+        group = _group_of(engine, name) if name in present else ""
+        if group:
+            by_group.setdefault(group, ("seed", []))[1].append(name)
+    return _group_loaded_events(engine, by_group)
+
+
+def tool_group_states(
+    decision: ToolDeferral | None, advertised: Iterable[str], engine: QueryEngine
+) -> list[dict[str, str]]:
+    """Each group's load mode and state on one request, by name.
+
+    ``advertised``: on the surface as a group. ``deferred``: held back, none
+    of it loaded. ``loaded``: held back, and some of its tools loaded onto
+    this request.
+    """
+    if decision is None:
+        return []
+    names = set(advertised)
+    held = set(decision.deferred_groups)
+    loaded_groups = {
+        _group_of(engine, name)
+        for name in engine.context_manager.discovered_tool_names()
+        if name in names
+    }
+    states: list[dict[str, str]] = []
+    for group, load in decision.group_loads:
+        if group not in held:
+            state = "advertised"
+        elif group in loaded_groups:
+            state = "loaded"
+        else:
+            state = "deferred"
+        states.append({"name": group, "load": load, "state": state})
+    return states

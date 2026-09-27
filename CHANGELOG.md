@@ -110,6 +110,25 @@ All notable changes to this project are recorded here. The format follows
   is the part of them the run called, which is the list worth carrying.
 - `max_tool_calls_per_turn` (default 64): calls past it in one model message are
   each answered with an error and not run.
+- **Load modes and rules for tool groups.** `declare_group` takes
+  `load="eager" | "auto" | "lazy"` and `instructions`. A `lazy` group is held
+  back whenever a discovery tool is admitted, even when everything fits, and
+  is advertised like `auto` when none is; an `eager` group is never held back
+  for size and gives way only to `max_advertised_tools` itself.
+  `QueryEngineConfig.tool_group_loads` overrides the load modes for one run.
+  `ToolSearch` takes `group` (and `group:<name>` entries in `select`) to load
+  every admitted tool of a group; tools loaded that way are one entry under
+  `pinned_tool_max_count`. A group's rules are given once per run: in the
+  catalogue for tools on the surface or loaded when the run starts (and again
+  after a compaction), in the `ToolSearch` result that loads the group's first
+  tools, or — for a blind call of such a tool — instead of running the call,
+  which is answered with the rules and runs on the next try. New event
+  `tool_group_loaded` (`group`, `via`, `tools`); `tool_surface_advertised`
+  carries `tool_groups` with each group's load mode and state, and
+  `tool_unadvertised_call` carries `executed`. The snapshot (still version 7)
+  gains `tool_group_rules_given`, and a discovered-tool row loaded with its
+  whole group carries `group`. The catalogue's header now names the
+  whole-group load. See `docs/tools.md`.
 
 - **The bundled lexicon covers the Russian a developer speaks about trackers,
   chat, calendars and deployments**: loanwords and slang such as "пулреквест",

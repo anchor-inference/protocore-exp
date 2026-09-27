@@ -126,6 +126,11 @@ class ContextManager:
         # loaded tools into the session's next run carries only these, or every
         # unused near-miss rides along on every later request.
         self._called_tools: set[str] = set()
+        # The discovered tools that were loaded as a whole group, mapped to
+        # it. A group is one entry under the cap and is unloaded as one: a
+        # model that asked for the group has no way to notice that eviction
+        # left it half.
+        self._tool_groups: dict[str, str] = {}
         # One estimator per manager, and a manager is built once per run: two
         # runs sharing a process never consult each other's remembered
         # estimates, whatever object identity would have allowed.
@@ -155,7 +160,7 @@ class ContextManager:
     # discovered tools
     # ------------------------------------------------------------------
 
-    def discover_tool(self, name: str) -> bool:
+    def discover_tool(self, name: str, *, group: str = "") -> bool:
         """Load ``name`` for the rest of the run; ``True`` when it is new.
 
         A new tool goes to the END of the discovery order and stays there:
@@ -176,6 +181,8 @@ class ContextManager:
         self._discovery_clock += 1
         new = name not in self._discovered_tools
         self._discovered_tools[name] = self._discovery_clock
+        if group:
+            self._tool_groups[name] = group
         return new
 
     def note_tool_used(self, name: str) -> None:
@@ -203,10 +210,17 @@ class ContextManager:
 
     def discovered_tool_state(self) -> list[dict[str, object]]:
         """The discovered tools as plain rows: name and last use, discovery order."""
-        return [
-            {"name": name, "last_used": tick, "called": name in self._called_tools}
-            for name, tick in self._discovered_tools.items()
-        ]
+        rows: list[dict[str, object]] = []
+        for name, tick in self._discovered_tools.items():
+            row: dict[str, object] = {
+                "name": name,
+                "last_used": tick,
+                "called": name in self._called_tools,
+            }
+            if name in self._tool_groups:
+                row["group"] = self._tool_groups[name]
+            rows.append(row)
+        return rows
 
     def restore_discovered_tools(self, rows: Sequence[object], *, replace: bool = False) -> None:
         """Put back what :meth:`discovered_tool_state` wrote, or a bare name list.
@@ -220,6 +234,7 @@ class ContextManager:
         if replace:
             self._discovered_tools.clear()
             self._called_tools.clear()
+            self._tool_groups.clear()
             self._discovery_clock = 0
         for row in rows:
             if isinstance(row, str):
@@ -236,6 +251,9 @@ class ContextManager:
                 tick = 0
             self._discovered_tools[name] = tick
             self._discovery_clock = max(self._discovery_clock, tick)
+            group = row.get("group")
+            if isinstance(group, str) and group:
+                self._tool_groups[name] = group
             # A row written before calls were told apart was carried because
             # it was loaded, which is the most any row of that time can say.
             if row.get("called", True) is not False:
@@ -244,21 +262,38 @@ class ContextManager:
                 self._called_tools.discard(name)
 
     def evict_discovered_tools(self) -> tuple[str, ...]:
-        """Unload the least recently used tools over the cap; return their names.
+        """Unload the least recently used entries over the cap; return the tools.
 
-        The survivors keep their discovery order. A cap at or below zero is
-        treated as no room at all, which the constants model already refuses.
+        An entry is one tool, or every tool of a group loaded as a whole,
+        which is as recent as its most recently used tool. The survivors keep
+        their discovery order. A cap at or below zero is treated as no room at
+        all, which the constants model already refuses.
         """
         cap = max(0, int(self._rc.pinned_tool_max_count))
-        excess = len(self._discovered_tools) - cap
+        entries: dict[str, list[str]] = {}
+        for name in self._discovered_tools:
+            group = self._tool_groups.get(name)
+            # A tool name and a group name may be spelt alike; the prefix
+            # keeps the two kinds of entry apart.
+            key = f"group:{group}" if group else f"tool:{name}"
+            entries.setdefault(key, []).append(name)
+        excess = len(entries) - cap
         if excess <= 0:
             return ()
-        by_age = sorted(self._discovered_tools.items(), key=lambda item: item[1])
-        evicted = tuple(name for name, _ in by_age[:excess])
+        by_age = sorted(
+            entries.values(),
+            key=lambda names: max(self._discovered_tools[name] for name in names),
+        )
+        evicted = tuple(name for names in by_age[:excess] for name in names)
         for name in evicted:
             del self._discovered_tools[name]
             self._called_tools.discard(name)
+            self._tool_groups.pop(name, None)
         return evicted
+
+    def discovered_tool_groups(self) -> dict[str, str]:
+        """The discovered tools loaded as a whole group, each mapped to it."""
+        return dict(self._tool_groups)
 
     def build_context(
         self,

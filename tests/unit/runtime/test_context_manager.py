@@ -313,6 +313,42 @@ def test_eviction_takes_the_least_recently_used_and_keeps_discovery_order() -> N
     assert mgr.discovered_tool_names() == ("A", "C")
 
 
+def test_a_group_loaded_whole_is_one_entry_under_the_cap_and_leaves_as_one() -> None:
+    """A model that asked for a group cannot tell that eviction left half of it."""
+    mgr = _new_manager(cap=2)
+    for name in ("B1", "B2", "B3"):
+        mgr.discover_tool(name, group="browser")
+    mgr.discover_tool("Solo")
+    # Four tools, two entries: nothing over the cap.
+    assert mgr.evict_discovered_tools() == ()
+    mgr.discover_tool("Other")
+    # The group was last used before Solo and Other, so it goes whole.
+    assert mgr.evict_discovered_tools() == ("B1", "B2", "B3")
+    assert mgr.discovered_tool_names() == ("Solo", "Other")
+
+
+def test_a_group_is_as_recent_as_its_most_recently_used_tool() -> None:
+    mgr = _new_manager(cap=2)
+    mgr.discover_tool("B1", group="browser")
+    mgr.discover_tool("B2", group="browser")
+    mgr.discover_tool("Solo")
+    mgr.discover_tool("Other")
+    mgr.note_tool_used("B1")
+    assert mgr.evict_discovered_tools() == ("Solo",)
+
+
+def test_a_group_load_survives_the_snapshot_rows() -> None:
+    mgr = _new_manager(cap=5)
+    mgr.discover_tool("B1", group="browser")
+    mgr.discover_tool("Solo")
+    rows = mgr.discovered_tool_state()
+    assert rows[0]["group"] == "browser"
+    assert "group" not in rows[1]
+    again = _new_manager(cap=5)
+    again.restore_discovered_tools(rows, replace=True)
+    assert again.discovered_tool_groups() == {"B1": "browser"}
+
+
 def test_a_use_of_a_tool_that_was_never_discovered_changes_nothing() -> None:
     mgr = _new_manager(cap=2)
     mgr.note_tool_used("Read")

@@ -70,6 +70,15 @@ _PROCESS_LOCAL: dict[str, str] = {
         "read off the registry again in the new process. The decision itself "
         "travels, as deferred_tool_groups, and is replayed rather than remade."
     ),
+    "_catalogue_takes_loaded_rules": (
+        "a compaction's request that the next catalogue carry the loaded "
+        "tools' rules. A resumed run's first catalogue is made afresh and "
+        "carries them anyway, so the request has nothing left to ask there."
+    ),
+    "_seeded_tool_names": (
+        "what the host's seed loaded, kept only until it is announced. A "
+        "resume is not a seed and announces nothing, so it empties this."
+    ),
     "events": "the event stream is the host's transport, not run state.",
     "hooks": "the hook manager is injected by the host.",
     "skills": "the skill store is injected by the host.",
@@ -301,6 +310,7 @@ async def test_a_version_one_payload_is_lifted_and_resumes_empty(engine_factory)
         "spans",
         "discovered_tools",
         "deferred_tool_groups",
+        "tool_group_rules_given",
         "skill_catalog_block_sha256",
     ):
         del payload[key]
