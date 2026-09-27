@@ -88,7 +88,10 @@ All notable changes to this project are recorded here. The format follows
 - `ADVERTISED_TOOLS_METADATA_KEY`: the loop stamps the names the calling
   request advertised on `ToolContext.metadata`.
 - A call of a registered tool the request did not advertise still runs and now
-  loads the tool; events `tool_discovered` and `tool_unadvertised_call`.
+  loads the tool; events `tool_discovered` and `tool_unadvertised_call`. When
+  such a call fails on its arguments, the error ends with the tool's line
+  (`It takes: Name(param1*, param2) — first sentence`), the form `ToolSearch`
+  lists tools in, so the retry need not guess again.
 - `QueryEngineConfig.discovered_tools` seeds a new run with the tools the last
   run of the session loaded.
 - `max_tool_calls_per_turn` (default 64): calls past it in one model message are

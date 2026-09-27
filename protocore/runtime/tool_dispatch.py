@@ -82,13 +82,20 @@ from protocore.contracts.run_state import (
     ToolStreak,
 )
 from protocore.contracts.tool_registry import (
+    ADVERTISED_TOOLS_METADATA_KEY,
     TOOL_VISIBILITY_POLICY_METADATA_KEY,
     IToolRegistry,
     ToolVisibilityPolicy,
     policy_admits,
 )
 from protocore.contracts.tool_roles import EMPTY_TOOL_ROLE_MAP, ToolRole, ToolRoleMap
-from protocore.contracts.tools import ToolContext, ToolPolicyDenied, copy_metadata
+from protocore.contracts.tools import (
+    Tool,
+    ToolContext,
+    ToolPolicyDenied,
+    copy_metadata,
+    read_metadata,
+)
 from protocore.contracts.types import (
     TOOL_RESULT_CONSECUTIVE_CAP_ELIGIBLE_METADATA_KEY,
     TOOL_RESULT_COUNT_AS_ERROR_METADATA_KEY,
@@ -108,6 +115,7 @@ from protocore.runtime.tool_preconditions import (
     check_preconditions,
     record_satisfaction,
 )
+from protocore.runtime.tool_retrieval import tool_line
 from protocore.tools.ask_user import AskUserPauseRequested
 
 _logger = get_logger(__name__)
@@ -1671,6 +1679,11 @@ class ToolDispatcher:
             }
         )
 
+        # A call of a tool the request did not advertise was written without
+        # its schema; when such a call fails on its arguments, the answer
+        # carries the tool's line so the retry is right the first time.
+        unseen_signature = _unseen_tool_signature(ctx, tool)
+
         # ── Step 2: schema validation (input dict shape) ───────────
         # Core ABC accepts dict; tool-specific Pydantic input_model
         # validation lives in the host adapter. We
@@ -1689,7 +1702,7 @@ class ToolDispatcher:
                 "tool arguments nest deeper than "
                 f"{depth_ceiling} levels — re-issue the call with a "
                 "flatter payload"
-            )
+            ) + unseen_signature
             final_kind, final_msg = self._apply_consecutive_error_cap(
                 ctx, tool_call.name, DispatchErrorKind.validation, msg
             )
@@ -1707,7 +1720,7 @@ class ToolDispatcher:
         try:
             arguments_json = json.dumps(tool_call.arguments, ensure_ascii=False)
         except (TypeError, ValueError) as exc:
-            msg = f"tool arguments not JSON-serialisable: {exc}"
+            msg = f"tool arguments not JSON-serialisable: {exc}" + unseen_signature
             final_kind, final_msg = self._apply_consecutive_error_cap(
                 ctx, tool_call.name, DispatchErrorKind.validation, msg
             )
@@ -1972,6 +1985,8 @@ class ToolDispatcher:
         except Exception as exc:
             duration_ms = int((loop.time() - started_at) * 1000)
             msg = f"tool {tool_call.name!r} execution failed: {exc}"
+            if isinstance(exc, _ARGUMENT_ERRORS):
+                msg += unseen_signature
             _logger.warning(
                 "tool dispatch raised for tool=%s call_id=%s",
                 tool_call.name,
@@ -2038,6 +2053,8 @@ class ToolDispatcher:
         # tool produced.
         canonical_content = tool_result.content
         content = tool_result.model_content
+        # What the parallel path's replay rebuilds a failed result's text from.
+        replay_message = tool_result.content
         ui_payload = tool_result.ui_payload
         canonical_ref = tool_result.canonical_ref
         result_path = tool_result.path
@@ -2131,6 +2148,12 @@ class ToolDispatcher:
                 TOOL_RESULT_CONSECUTIVE_CAP_ELIGIBLE_METADATA_KEY,
                 default=True,
             )
+            if count_as_error and unseen_signature:
+                # A tool that checks its own arguments reports a bad one as an
+                # error result, not an exception, so every counted failure of an
+                # unseen tool gets the line; a benign exit status does not.
+                content += unseen_signature
+                replay_message += unseen_signature
             if count_as_error:
                 await self._record_tool_error(ctx)
             if cap_eligible:
@@ -2226,7 +2249,7 @@ class ToolDispatcher:
                 **result_metadata,
                 **_dispatch_replay_metadata(
                     DispatchErrorKind.execution,
-                    tool_result.content,
+                    replay_message,
                     replay_extra,
                 ),
             }
@@ -2311,6 +2334,28 @@ class ToolDispatcher:
                 "content_blocks": [{"type": "text", "text": message}],
             },
         )
+
+
+# The exceptions a tool raises when the arguments it was called with do not
+# fit it: a pydantic model's ValidationError (a ValueError), a missing or
+# unexpected keyword (TypeError), a required key read straight off the dict.
+_ARGUMENT_ERRORS: Final[tuple[type[Exception], ...]] = (TypeError, ValueError, KeyError)
+
+
+def _unseen_tool_signature(ctx: ToolContext, tool: Tool) -> str:
+    """The tool's line, to append to a failure, when the model never saw its schema.
+
+    Empty when the loop did not say what it advertised (a dispatch outside a
+    run) or when the tool was on the list, where the schema is already in
+    front of the model and repeating it is noise.
+    """
+    advertised = read_metadata(ctx, ADVERTISED_TOOLS_METADATA_KEY)
+    if not isinstance(advertised, frozenset | set | tuple | list) or tool.name in advertised:
+        return ""
+    return (
+        "\nThis tool was not in your tool list, so it was called without its "
+        f"parameters; it is loaded now. It takes: {tool_line(tool.definition)}"
+    )
 
 
 def consume_transport_down_injection_signal(

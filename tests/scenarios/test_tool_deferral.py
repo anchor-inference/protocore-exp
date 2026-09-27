@@ -395,3 +395,66 @@ async def test_a_search_says_which_tools_were_already_in_the_list(
     assert lines[0] == "Loaded, and callable from your next step: Mcp_Github_list_issues."
     assert lines[1] == "Already in your tool list, nothing to load: Note."
     assert run.advertised_tool_names(1) == ["Note", "Zeta", "ToolSearch", "Mcp_Github_list_issues"]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [{"raises": TypeError("got an unexpected keyword argument 'v'")}, {"is_error": True}],
+    ids=["raised", "error-result"],
+)
+async def test_a_blind_call_that_fails_is_answered_with_the_tools_line(
+    scenario: ScenarioFactory, failure: dict[str, Any]
+) -> None:
+    tools = _tools()
+    for field_name, value in failure.items():
+        setattr(tools[1], field_name, value)
+    run = _with_search(scenario(tools=tools))
+    run.llm.queue_tool_call_response(
+        tool_call_id="c-1", tool_name="Mcp_Github_list_issues", tool_input={"state": "open"}
+    )
+    run.llm.queue_response(text="retrying")
+    await run.run("what is open?")
+
+    (result,) = run.tool_results()
+    assert result.is_error
+    assert result.content.endswith("It takes: Mcp_Github_list_issues(v) — list the issues")
+    assert run.advertised_tool_names(1)[-1] == "Mcp_Github_list_issues"
+
+
+async def test_a_failure_of_a_listed_tool_is_not_given_the_line(
+    scenario: ScenarioFactory,
+) -> None:
+    tools = _tools()
+    tools[0].raises = TypeError("got an unexpected keyword argument 'text'")
+    run = _with_search(scenario(tools=tools))
+    run.llm.queue_tool_call_response(tool_call_id="c-1", tool_name="Note", tool_input={"text": "x"})
+    run.llm.queue_response(text="retrying")
+    await run.run("note it")
+
+    (result,) = run.tool_results()
+    assert result.is_error
+    assert "It takes:" not in result.content
+
+
+async def test_blind_calls_in_one_message_each_get_the_line(
+    scenario: ScenarioFactory,
+) -> None:
+    """Calls gathered in parallel have their failures rebuilt in transcript
+    order; the line must survive that rebuild."""
+    tools = _tools()
+    for tool in tools[1:3]:
+        tool.is_error = True
+        tool.is_concurrent_safe = True
+    run = _with_search(scenario(tools=tools))
+    run.llm.queue_multi_tool_call_response(
+        tool_calls=[
+            ("c-1", "Mcp_Github_list_issues", {"state": "open"}),
+            ("c-2", "Mcp_Github_create_issue", {"title": "bug"}),
+        ]
+    )
+    run.llm.queue_response(text="retrying")
+    await run.run("list and file")
+
+    first, second = run.tool_results()
+    assert first.content.endswith("It takes: Mcp_Github_list_issues(v) — list the issues")
+    assert second.content.endswith("It takes: Mcp_Github_create_issue(v) — open an issue")

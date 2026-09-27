@@ -449,6 +449,17 @@ the loop emits `tool_unadvertised_call`. A name that is not registered at all is
 answered with `unknown tool: 'X'. Did you mean: A, B, C?` — up to three
 registered names the policy admits, compared case-insensitively.
 
+A call made that way was written without the schema, and its arguments are a
+guess. When it fails on them, the error ends with the tool's line in the
+`ToolSearch` form — `It takes: Name(param1*, param2) — first sentence` — so the
+retry is right the first time instead of after one more failure. "Fails on its
+arguments" is read broadly, because a tool that checks its own arguments reports
+a bad one as an error result, not an exception: a dispatch validation error, an
+exception that is a `TypeError`, `ValueError` (which includes a pydantic
+`ValidationError`) or `KeyError`, or an error result the tool counts as a
+failure. A tool that was on the list never gets the line; its schema is already
+in front of the model.
+
 ### A runaway batch
 
 `max_tool_calls_per_turn` (default 64) bounds the tool calls dispatched from one
