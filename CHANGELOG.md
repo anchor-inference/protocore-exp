@@ -98,6 +98,12 @@ All notable changes to this project are recorded here. The format follows
 - `max_tool_calls_per_turn` (default 64): calls past it in one model message are
   each answered with an error and not run.
 
+- **The bundled lexicon covers the Russian a developer speaks about trackers,
+  chat, calendars and deployments**: loanwords and slang such as "пулреквест",
+  "ишью", "тикет", "таска", "смержи", "выкати", "созвон", "заархивируй",
+  "алерт", mapped to the English an MCP server describes its tools in. A
+  Russian request such as "покажи открытые пулреквесты" or "заархивируй тикет
+  поддержки" now finds the server's tool among the first three.
 - `IToolRetriever` and `reciprocal_rank_fusion` (`contracts/tool_retrieval.py`):
   a host may pass its own ranker, for example an embedding model, as
   `ToolRegistry(retriever=...)`, and its ranking is fused with the lexical one

@@ -252,7 +252,10 @@ to the query's own terms. The lexicon ships as package data
 their Russian equivalents); it is generic developer vocabulary translated from
 the English of tool descriptions, never from queries. It is the one thing that
 lets a Russian query find a third-party tool that will never carry a Russian
-hint. A host passes its own with `ToolRegistry(lexicon=Lexicon.from_translations(...))`,
+hint, so it also carries the loanwords and slang a Russian-speaking developer
+uses for the vocabulary of trackers, chat, calendars and deployments —
+"пулреквест", "ишью", "таска", "смержи", "выкати", "созвон", "алерт" — which no
+dictionary lists and which an MCP server's English is full of. A host passes its own with `ToolRegistry(lexicon=Lexicon.from_translations(...))`,
 or turns expansion off with `lexicon=None` or a weight of 0.
 
 **When nothing scores**, a second stage matches loose substrings and shared
