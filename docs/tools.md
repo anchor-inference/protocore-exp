@@ -205,7 +205,12 @@ and `search`.
 **What is indexed.** Each tool is five fields: its name, its `search_hint`, the
 first sentence of its description, the rest of the description, and its
 parameter names and parameter descriptions. The hint and the parameters are for
-finding the tool only; neither is added to the schema the model sees.
+finding the tool only; neither is added to the schema the model sees. The first
+sentence ends at a full stop, `!` or `?` followed by a space, but not at one
+inside brackets or closing an abbreviation (`e.g.`, `i.e.`, `vs.`, `т.е.`,
+`напр.`; `etc.` and `т.д.` only before a capital): the same sentence is the line
+`ToolSearch` shows for the tool, and a line cut at "(e.g." tells the model
+nothing.
 
 **How text is analysed** (`runtime/text_analysis.py`, the same steps for the
 catalogue and the query):

@@ -264,6 +264,35 @@ def test_split_summary_and_parameter_text() -> None:
     assert parameter_text(properties) == "path Where to read limit odd"
 
 
+@pytest.mark.parametrize(
+    ("description", "summary"),
+    [
+        # Cut after "(e.g." the line ToolSearch shows ended mid-bracket.
+        (
+            "Transition a Jira issue to a new status (e.g. Done, In Progress). Needs the key.",
+            "Transition a Jira issue to a new status (e.g. Done, In Progress).",
+        ),
+        ("Find files by pattern, e.g. a glob. Then read them.", "Find files by pattern, e.g. a glob."),
+        ("Compare two runs, i.e. their outputs. More.", "Compare two runs, i.e. their outputs."),
+        ("Local vs. remote copies. More.", "Local vs. remote copies."),
+        ("Ищет файлы, т.е. по маске. Потом читает.", "Ищет файлы, т.е. по маске."),  # noqa: RUF001
+        ("Ищет файлы, напр. по маске. Потом читает.", "Ищет файлы, напр. по маске."),
+        # "etc." ends the sentence only when a capital starts the next one.
+        ("Reads CSV, JSON, etc. Use it for data.", "Reads CSV, JSON, etc."),
+        ("Reads CSV, JSON, etc. and more. Use it.", "Reads CSV, JSON, etc. and more."),
+        ("Read a file (up to 2000 lines. Then stop). Next.", "Read a file (up to 2000 lines. Then stop)."),
+        # A bracket that never closes must not swallow the whole description.
+        ("Stray (bracket. Second. Third", "Stray (bracket."),
+    ],
+)
+def test_split_summary_does_not_stop_at_an_abbreviation_or_inside_brackets(
+    description: str, summary: str
+) -> None:
+    head, rest = split_summary(description)
+    assert head == summary
+    assert f"{head} {rest}".strip() == description
+
+
 def test_fallback_limit_zero_and_stopword_only_query() -> None:
     documents = [ToolDocument("Read", "Read a file.")]
     assert normalized_fallback_match("read", documents, limit=0) == []

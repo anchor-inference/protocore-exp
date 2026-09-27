@@ -60,6 +60,11 @@ All notable changes to this project are recorded here. The format follows
   admits: `unknown tool: 'X'. Did you mean: A, B, C?`
 - An engine built without a host run state now carries its own constants on
   `run_state.rc`, so core tools read the run's tunables.
+- **A description's first sentence no longer ends at an abbreviation** such as
+  "e.g.", "i.e.", "vs.", "т.е." or "напр.", nor at a full stop inside
+  brackets; "etc." and "т.д." end it only before a capital. `ToolSearch` shows
+  that sentence as a tool's line, and it used to read "Transition an issue to a
+  new status (e.g.".
 
 ### Added
 

@@ -70,13 +70,46 @@ _FALLBACK_MIN_PREFIX_LENGTH: Final[int] = 4
 _FIELD_COUNT: Final[int] = 5
 
 _SENTENCE_END: Final[re.Pattern[str]] = re.compile(r"(?<=[.!?])\s+")
+
+# Abbreviations that end in a full stop without ending the sentence. A summary
+# cut after one reads "Transition an issue to a new status (e.g." — a line the
+# model is shown as the whole of what a tool does. Compared folded, with the
+# full stops of the abbreviation itself.
+_NEVER_FINAL: Final[frozenset[str]] = frozenset(
+    {"e.g.", "i.e.", "vs.", "cf.", "approx.", "incl.", "т.е.", "напр.", "т.к.", "т.н.", "см.", "ср."}  # noqa: RUF001 — Russian abbreviations
+)
+# These end a sentence as often as not ("…, CSV, etc. Use it when…"), so they
+# end one only when the next word starts a new sentence with a capital.
+_FINAL_BEFORE_CAPITAL: Final[frozenset[str]] = frozenset({"etc.", "т.д.", "т.п.", "др."})
+_LAST_WORD: Final[re.Pattern[str]] = re.compile(r"(?:\w+\.)+$")
 _WORD: Final[re.Pattern[str]] = re.compile(r"\w+")
 
 
 def split_summary(description: str) -> tuple[str, str]:
-    """The first sentence of ``description``, and everything after it."""
-    parts = _SENTENCE_END.split(description.strip(), maxsplit=1)
-    return parts[0], (parts[1] if len(parts) > 1 else "")
+    """The first sentence of ``description``, and everything after it.
+
+    A full stop inside brackets, or one that closes an abbreviation such as
+    "e.g.", does not end the sentence.
+    """
+    text = description.strip()
+    # A bracket opened and never closed would otherwise make the whole
+    # description its first sentence; the first cut it vetoed is kept for that.
+    bracketed: re.Match[str] | None = None
+    for match in _SENTENCE_END.finditer(text):
+        head = text[: match.start()]
+        last = _LAST_WORD.search(head)
+        word = last.group(0).casefold() if last is not None else ""
+        if word in _NEVER_FINAL:
+            continue
+        if word in _FINAL_BEFORE_CAPITAL and not text[match.end() : match.end() + 1].isupper():
+            continue
+        if head.count("(") > head.count(")") or head.count("[") > head.count("]"):
+            bracketed = bracketed or match
+            continue
+        return head, text[match.end() :]
+    if bracketed is not None:
+        return text[: bracketed.start()], text[bracketed.end() :]
+    return text, ""
 
 
 def parameter_text(properties: Mapping[str, object]) -> str:
