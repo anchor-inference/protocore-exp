@@ -249,6 +249,16 @@ class IToolRegistry(Protocol):
         """Declare (or redeclare) a tool group. See :class:`ToolGroup`."""
         ...
 
+    def undeclare_group(self, name: str) -> None:
+        """Forget a group. Idempotent — no error if it was never declared.
+
+        For a group whose tools are gone for good, such as the proxies of an
+        MCP server the operator removed: a declaration outlives its tools, and
+        one left behind would still claim their prefix if a server of the same
+        name came back with another description.
+        """
+        ...
+
     def tool_groups(self) -> Sequence[ToolGroup]:
         """Every declared group, sorted by name."""
         ...

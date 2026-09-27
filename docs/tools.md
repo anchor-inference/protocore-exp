@@ -321,6 +321,14 @@ longest wins. Membership never reaches the wire and is not part of the surface
 digest. A **dynamic** group is one whose membership is not the host's own code —
 an MCP server's proxies.
 
+`undeclare_group(name)` forgets a group, and forgetting one that was never
+declared is not an error. A host calls it when a group's tools are gone for good
+— the proxies of an MCP server the operator switched off or removed — because a
+declaration outlives its tools, and one left behind would claim the prefix of a
+server added later under the same name. Neither declaring nor forgetting a group
+changes the registry's catalogue generation: groups change no search result, and
+the loop's deferral decision is keyed on the declared groups themselves.
+
 ### When groups are held back
 
 `tool_deferral_mode` is `"auto"` by default and `"off"` turns it off. In `auto`,

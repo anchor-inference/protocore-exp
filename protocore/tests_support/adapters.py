@@ -2124,6 +2124,9 @@ class InMemoryToolRegistry(IToolRegistry):
             name=name, description=description, dynamic=dynamic, prefix=prefix
         )
 
+    def undeclare_group(self, name: str) -> None:
+        self._groups.pop(name, None)
+
     def tool_groups(self) -> Sequence[ToolGroup]:
         return sorted(self._groups.values(), key=lambda group: group.name)
 

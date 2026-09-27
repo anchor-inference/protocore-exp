@@ -32,6 +32,7 @@ from protocore.tests_support.adapters import (
     InMemoryHookManager,
     InMemoryLLMProvider,
     InMemorySkillStore,
+    InMemoryToolRegistry,
 )
 from protocore.tools.tool_search import ToolSearchTool
 from tests.unit.runtime._tool_fixtures import MockTool
@@ -276,6 +277,23 @@ def test_a_group_needs_a_name(name: str) -> None:
     else:
         with pytest.raises(ValueError):
             registry.declare_group(name, "nothing")
+
+
+@pytest.mark.parametrize("registry_type", [ToolRegistry, InMemoryToolRegistry])
+def test_an_undeclared_group_no_longer_claims_its_prefix(
+    registry_type: type[ToolRegistry] | type[InMemoryToolRegistry],
+) -> None:
+    """A removed MCP server's declaration outlives its tools unless the host
+    drops it; a server of the same name added later would inherit it."""
+    registry = registry_type()
+    registry.declare_group("github", "old description", dynamic=True, prefix="Mcp_Github_")
+    registry.declare_group("jira", "Jira", dynamic=True, prefix="Mcp_Jira_")
+    registry.undeclare_group("github")
+    registry.undeclare_group("github")  # idempotent
+    registry.undeclare_group("never-declared")
+    assert [group.name for group in registry.tool_groups()] == ["jira"]
+    tool = MockTool(tool_name="Mcp_Github_list_issues")
+    assert tool_group_of(tool, registry.tool_groups()) == ""
 
 
 # ── the production registry, through the loop ───────────────────────────────

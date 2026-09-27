@@ -187,6 +187,16 @@ class ToolRegistry(IToolRegistry):
                 name=name, description=description, dynamic=dynamic, prefix=prefix
             )
 
+    def undeclare_group(self, name: str) -> None:
+        """Forget a group; idempotent.
+
+        Like declaring one, this leaves the catalogue generation alone: groups
+        change no search result, and the loop's deferral decision is keyed on
+        the declared groups themselves, so it is made again on the next request.
+        """
+        with self._lock:
+            self._groups.pop(name, None)
+
     def tool_groups(self) -> Sequence[ToolGroup]:
         """Every declared group, sorted by name."""
         with self._lock:

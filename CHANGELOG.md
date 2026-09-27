@@ -68,8 +68,9 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
-- **Tool groups and deferral.** `ToolGroup`, `IToolRegistry.declare_group` and
-  `tool_groups`; a tool joins a group by its `tool_group` class attribute or a
+- **Tool groups and deferral.** `ToolGroup`, `IToolRegistry.declare_group`,
+  `undeclare_group` (for a group whose tools are gone, such as a removed MCP
+  server's) and `tool_groups`; a tool joins a group by its `tool_group` class attribute or a
   declared name prefix. With `tool_deferral_mode = "auto"` (the default, inert
   until a group is declared and a discovery tool registered) dynamic groups are
   held back, and other groups largest first while the surface is over

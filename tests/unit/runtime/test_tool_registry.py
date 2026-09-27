@@ -386,6 +386,9 @@ _REQUIRED_PROTOCOL_METHODS: tuple[str, ...] = (
     "filter_by_whitelist",
     "search",
     "compute_effective_surface",
+    "declare_group",
+    "undeclare_group",
+    "tool_groups",
 )
 
 
