@@ -1,102 +1,95 @@
 # Protocore
 
-**Protocore — это агентный цикл, и больше ничего.**
+**Protocore is the agent loop, and nothing else.**
 
-Библиотека на Python 3.12+, в которой лежит ровно одна вещь: ReAct-рантайм,
-ведущий ход LLM-агента шаг за шагом — сам цикл, бюджет контекста, поверхность
-инструментов, компакция, условия остановки. Всё, к чему цикл обращается наружу,
-— это `Protocol`, который реализуете вы: клиент модели, хранилища, транспорт
-событий, сами инструменты. Здесь нет драйвера БД, нет HTTP-эндпоинта, нет логики
-развёртывания и ни одного импорта, уходящего вверх за пределы пакета.
+It is a Python 3.12+ library holding one thing: the ReAct runtime that drives an
+LLM agent turn by turn — the loop, the context budget, the tool surface, the
+compaction, the stop conditions. Everything the loop touches from outside is a
+`Protocol` you implement: the model client, the stores, the event transport, the
+tools themselves. There is no database driver here, no HTTP endpoint, no
+deployment logic, and no import that reaches upward out of the package.
 
-Это ограничение и есть смысл проекта. Агентный цикл — то место, где живёт
-тяжёлая и неблагодарная корректность: что делать, когда модель отвечает прозой
-вместо инструмента, который ей велели вызвать; когда результат инструмента весит
-сто килобайт; когда контекстное окно кончается посреди хода; когда прогон нужно
-снять снимком и возобновить в другом процессе. Protocore отделяет это от
-обвязки, чтобы можно было тестировать исчерпывающе и переиспользовать между
-продуктами.
+That constraint is the point. An agent loop is where the hard, unglamorous
+correctness lives — what to do when the model answers with prose instead of the
+tool it was told to call, when a tool result is a hundred kilobytes, when the
+context window fills mid-turn, when a run must be snapshotted and resumed on
+another process. Protocore isolates that from the plumbing so it can be tested
+exhaustively and reused across products.
 
-> English: [`README.en.md`](README.en.md) · Документация: [`docs/ru/index.md`](docs/ru/index.md) (RU) · [`docs/index.md`](docs/index.md) (EN)
+> Русская версия: [`README.ru.md`](README.ru.md) · Docs: [`docs/index.md`](docs/index.md) (EN) · [`docs/ru/index.md`](docs/ru/index.md) (RU)
 
-## Что внутри
+## What you get
 
-- **20 интерфейсных `Protocol`** — `ILLMProvider`, `IRunStore`, `ISessionStore`,
+- **20 interface Protocols** — `ILLMProvider`, `IRunStore`, `ISessionStore`,
   `IToolRegistry`, `IMemory`, `IWorkspace`, `ISearchIndex`, `IEventStream`,
-  `ISkillStore`, `IHookManager` и остальные, плюс ABC `IBlobStore`. Это вся
-  обращённая наружу поверхность; ядро никогда не узнаёт, что стоит за ней.
-- **ReAct-рантайм** — `QueryEngine` владеет изменяемым состоянием прогона,
-  `query()` ведёт один ход и отдаёт поток типизированных `TurnEvent`.
-  Снимок и возобновление — первого класса, поэтому прогон переживает
-  перезапуск процесса.
-- **Поверхность инструментов, которая растёт вместе с каталогом** — политика
-  тенанта, вся поверхность, пока она помещается, а сверх бюджета токенов или
-  лимита провайдера — объявленные группы инструментов, отложенные за строкой
-  каталога и загружаемые по требованию через `ToolSearch` (поиск BM25F,
-  английский и русский) с дописыванием в конец, чтобы кэш префикса промпта
-  выживал; gate прав доступа перед диспетчеризацией.
-- **Двухуровневая компакция контекста** — цикл продолжает работать, когда
-  транскрипт перерастает окно, и компакция достаточно детерминирована,
-  чтобы её можно было тестировать.
-- **524 runtime-константы** — каждое настраиваемое значение это поле
-  замороженного снимка `RuntimeConstants`, подаваемого на каждого тенанта.
-  Никаких магических чисел в исполняемом пути, а новое поведение по умолчанию
-  выключено.
-- **In-memory адаптеры** прямо внутри пакета, так что полноценный ход можно
-  прогнать вообще без внешних сервисов.
+  `ISkillStore`, `IHookManager`, and the rest, plus an `IBlobStore` ABC. They
+  are the whole outward surface; the core never learns what is behind them.
+- **A ReAct runtime** — `QueryEngine` owns the per-run mutable state, `query()`
+  drives one turn and yields a stream of typed `TurnEvent`s. Snapshot and resume
+  are first-class, so a run survives a process restart.
+- **A tool surface that scales with the catalogue** — tenant policy, the whole
+  surface while it fits, and past a token budget or a provider's tool limit,
+  declared tool groups held back behind a catalogue line and loaded on demand
+  with `ToolSearch` (BM25F retrieval, English and Russian), appended so the
+  cached prompt prefix survives; a permission gate in front of dispatch.
+- **Two-tier context compaction** — the loop keeps working when the transcript
+  outgrows the window, and the compaction is deterministic enough to test.
+- **524 runtime constants** — every tunable value is a field on a frozen
+  `RuntimeConstants` snapshot injected per tenant. No magic numbers in the
+  executable path, and new behaviour defaults off.
+- **In-memory adapters**, shipped inside the package, so you can drive a real
+  turn end to end with no external services at all.
 
-## Установка
+## Install
 
 ```bash
 pip install protocore==2.0.0a23
 ```
 
-Версию нужно назвать явно. Опубликован пре-релиз, а pip их пропускает, пока не
-попросят, — но просить голым `--pre` не стоит: флаг действует на всю резолюцию и
-подтянет пре-релизные сборки `pydantic` заодно. Пин уберётся, когда выйдет
-стабильный релиз.
+Name the version explicitly. The published release is a pre-release, and pip
+skips those unless you ask — but do **not** ask with a bare `--pre`, because
+that flag applies to the whole resolution and will pull pre-release builds of
+`pydantic` too. The pin comes off when there is a stable release.
 
-Или, для работы над самим ядром, через [`uv`](https://docs.astral.sh/uv/):
+Or, to work on it, with [`uv`](https://docs.astral.sh/uv/):
 
 ```bash
 uv sync --extra dev
 ```
 
-Python ≥ 3.12. Зависимости рантайма — `pydantic`, `jinja2` и
-`typing-extensions`, больше ничего.
+Python ≥ 3.12. Runtime dependencies are `pydantic`, `jinja2`, and
+`typing-extensions` — nothing else.
 
-### Дополнительные наборы
+### Extras
 
 ```bash
-pip install "protocore[testing]==2.0.0a23"   # прогнать conformance-наборы на своих адаптерах
+pip install "protocore[testing]==2.0.0a23"   # run the conformance suites against your adapters
 ```
 
-`testing` добавляет только тест-раннер: `protocore.conformance` — это pytest-набор,
-который едет внутри колеса, и хост натравливает его на собственные реализации
-контрактов (`pytest --pyargs protocore.conformance`). Ни линтера, ни проверки
-типов ядра в этот набор не входит — они нужны тому, кто правит ядро, а не тому,
-кто его использует.
+`testing` adds a test runner and nothing more. `protocore.conformance` is a
+pytest suite that ships inside the wheel, and a host points it at its own
+implementations of the contracts (`pytest --pyargs protocore.conformance`). The
+core's linter and type checker are deliberately not in it: those belong to
+someone changing the core, not to someone using it.
 
-У оценки токенов есть и нативная реализация — отдельный дистрибутив
-`protocore-native`. Колёс для него на индексе пока нет, поэтому сейчас он
-собирается из исходников; ядро остаётся чистым Python и выбирает расширение
-только тогда, когда его удаётся импортировать, поэтому оно меняет скорость и
-больше ничего: те же числа, тот же контракт. Если расширение
-установлено, а нужна именно Python-реализация — сравнить результаты, обойти
-подозрение на расхождение, собрать воспроизводимое окружение — переменная
-окружения **`PROTOCORE_DISABLE_NATIVE=1`** оставляет её в силе. Она читается
-**один раз, на импорте**, и отвечает на вопрос «какая сборка этой функции у
-меня сейчас», а не настраивает поведение: менять её в работающем процессе
-бессмысленно.
+Token estimation also has an optional native implementation, published as the
+separate distribution `protocore-native`. Wheels for it are not on the index
+yet, so for now it is built from source; the core stays pure Python and selects
+the extension only when it can import it, so having it changes speed and nothing
+else — same numbers, same contract. When the extension is installed and you want
+the Python implementation anyway — to compare the two, to rule it out as the
+cause of a discrepancy, or to build a reproducible environment — the environment
+variable **`PROTOCORE_DISABLE_NATIVE=1`** keeps it in force. It is read **once,
+at import**, and answers "which build of this function am I running" rather than
+tuning behaviour: changing it inside a live process does nothing.
 
-## Быстрый старт
+## Quickstart
 
-Ядро управляется адаптерами: соберите `QueryEngine` со своими адаптерами и
-итерируйте события `engine.run(message)`. Метод добавляет сообщение пользователя
-и ведёт один ход до терминального состояния.
+The core is adapter-driven: build a `QueryEngine` with your adapters, then
+iterate the events from `engine.run(message)`. The method appends the user's
+message and drives one turn to a terminal state.
 
-Пример ниже использует встроенные in-memory адаптеры, поэтому запускается как
-есть:
+The example below uses the bundled in-memory adapters, so it runs as-is:
 
 ```python
 import asyncio
@@ -113,7 +106,7 @@ from protocore.tests_support.adapters import (
 
 async def main() -> None:
     llm = InMemoryLLMProvider()
-    llm.queue_response(text="Привет от Protocore.", stop_reason=StopReason.end_turn)
+    llm.queue_response(text="Hello from Protocore.", stop_reason=StopReason.end_turn)
 
     engine = QueryEngine(
         config=QueryEngineConfig(
@@ -132,7 +125,7 @@ async def main() -> None:
     )
     message = Message(
         role=MessageRole.user,
-        content_blocks=[TextBlock(text="Поздоровайся.")],
+        content_blocks=[TextBlock(text="Say hello.")],
     )
     async for event in engine.run(message):
         print(event.type)
@@ -142,58 +135,59 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Замените `InMemoryLLMProvider` на адаптер к реальному клиенту модели — и тот же
-код начнёт отвечать на реальные запросы. [Быстрый старт](docs/ru/getting-started.md)
-разбирает, что означает каждое событие и что менять дальше.
+Swap `InMemoryLLMProvider` for an adapter over a real model client and the same
+code answers real prompts. [Getting started](docs/getting-started.md) walks
+through what each event means and what to replace next.
 
-> **Место импорта имеет значение.** `QueryEngine`, `QueryEngineConfig` и `query`
-> берутся из `protocore.runtime.*`, это не реэкспорты верхнего уровня. А вот
-> контрактные типы (`Message`, `StopReason`, `RuntimeConstants`, …) — да.
+> **Import location matters.** `QueryEngine`, `QueryEngineConfig`, and `query`
+> come from `protocore.runtime.*`; they are not top-level re-exports. The
+> contract types (`Message`, `StopReason`, `RuntimeConstants`, …) *are*.
 
-## Документация
+## Documentation
 
-| Документ | О чём |
+| Document | What it covers |
 |---|---|
-| [Навигатор документации](docs/ru/index.md) | начните отсюда — порядок чтения и карта |
-| [Быстрый старт](docs/ru/getting-started.md) | установка и работающий пример |
-| [Архитектура](docs/ru/architecture.md) | глубокий справочник |
-| [Контракты](docs/ru/contracts.md) | граница протоколов и система типов |
-| [Инструменты](docs/ru/tools.md) | лаконичная поверхность инструментов и gate доступа |
-| [Runtime-константы](docs/ru/runtime-constants.md) | модель конфигурации |
-| [Расширение ядра](docs/ru/extending.md) | адаптеры, hooks, переключатели, секции промпта |
-| [Тестирование](docs/ru/testing.md) | запуск тестов и страж границы импортов |
-| [Глоссарий](docs/ru/glossary.md) | ключевые термины |
+| [Documentation hub](docs/index.md) | start here — reading order and a map |
+| [Getting started](docs/getting-started.md) | install plus a runnable example |
+| [Architecture](docs/architecture.md) | the deep reference |
+| [Contracts](docs/contracts.md) | the protocol boundary and the type system |
+| [Tools](docs/tools.md) | the lean tool surface and the permission gate |
+| [Runtime constants](docs/runtime-constants.md) | the configuration model |
+| [Extending the core](docs/extending.md) | adapters, hooks, toggles, prompt sections |
+| [Testing](docs/testing.md) | running the suite and the import-boundary guard |
+| [Glossary](docs/glossary.md) | key terms |
 
-Полное английское зеркало — в [`docs/`](docs/index.md).
+A full Russian mirror lives under [`docs/ru/`](docs/ru/index.md).
 
-## Разработка
+## Development
 
 ```bash
 uv sync --extra dev
-uv run pytest .            # 3215 тестов
+uv run pytest .            # 3215 tests
 uv run ruff check .
 uv run mypy --strict
 uv run bandit -r protocore -q -c pyproject.toml
 ```
 
-Все четыре гейта прогоняются на каждом pull request под Python 3.12, 3.13 и
-3.14. Покрытие держится на уровне 90%.
+All four gates run on every pull request across Python 3.12, 3.13, and 3.14.
+Coverage is enforced at 90%.
 
-Отдельного внимания заслуживает страж `tests/test_core_import_boundary.py`: он
-разбирает через AST каждый модуль пакета и падает, если какой-нибудь из них
-импортирует пакет, стоящий над ядром, — что угодно с именем ядра и
-подчёркиванием после него. Именно этот тест и делает всё сказанное выше правдой.
+The guard worth knowing about is `tests/test_core_import_boundary.py`: it
+AST-parses every module in the package and fails if any of them imports a
+package that sits above the core — anything sharing the core's name with an
+underscore after it. That test is what keeps the rest of this README true.
 
-Мы рады вкладу, см. [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Contributions are welcome; see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-## Лицензия
+## License
 
 [Mozilla Public License 2.0](LICENSE).
 
-MPL — это копилефт **на уровне файла**. На практике это значит: стройте поверх
-Protocore что угодно и держите это закрытым — ваши адаптеры, ваш сервис, ваш
-продукт остаются вашими. Но если вы правите сам файл Protocore, исходник этого
-файла остаётся открытым под той же лицензией, и уведомления об авторстве едут
-вместе с ним. Что именно это требует на практике — в [`NOTICE`](NOTICE).
+The MPL is a **file-level** copyleft. In practice that means: build whatever you
+like on top of Protocore and keep it closed — your adapters, your service, your
+product are yours. But if you modify a Protocore file itself, that file's source
+stays open under the same license, and the notices travel with it. See
+[`NOTICE`](NOTICE) for what that asks of you in concrete terms.
 
-Об уязвимостях — в [`SECURITY.md`](SECURITY.md), а не в публичный трекер задач.
+Security issues go to [`SECURITY.md`](SECURITY.md), not to the public issue
+tracker.

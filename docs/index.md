@@ -60,8 +60,8 @@ lives at [`ru/`](ru/index.md) with a one-to-one file set and matching headings
 and anchors. Any change edits the English file first, then updates its Russian
 counterpart in the same change set; each Russian file records the source path and
 the commit it was translated from. The two project READMEs follow the same pair:
-the Russian [`../README.md`](../README.md) is primary, and the English
-[`../README.en.md`](../README.en.md) is its mirror.
+the English [`../README.md`](../README.md) is primary, and the Russian
+[`../README.ru.md`](../README.ru.md) is its mirror.
 
 ## All documents
 
@@ -82,8 +82,8 @@ the Russian [`../README.md`](../README.md) is primary, and the English
 
 | File | Purpose |
 |---|---|
-| [`../README.md`](../README.md) | Project overview and quickstart (Russian, primary). |
-| [`../README.en.md`](../README.en.md) | Project overview and quickstart (English mirror). |
+| [`../README.md`](../README.md) | Project overview and quickstart (English, primary). |
+| [`../README.ru.md`](../README.ru.md) | Project overview and quickstart (Russian mirror). |
 | [`../LICENSE`](../LICENSE) | License terms (Mozilla Public License 2.0). |
 | [`../NOTICE`](../NOTICE) | Attribution and what the MPL asks of a distributor. |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | What changed in each release, newest first. |
