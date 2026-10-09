@@ -141,8 +141,10 @@ def _history_text(engine: Any) -> str:
     )
 
 
-async def _run_two_attempts(engine_factory: Any, llm: _PartialThenFailLLM) -> Any:
-    engine = engine_factory(rc=LoopConstants(model_context_window=4096))
+async def _run_two_attempts(
+    engine_factory: Any, llm: _PartialThenFailLLM, **rc_overrides: Any
+) -> Any:
+    engine = engine_factory(rc=LoopConstants(model_context_window=4096, **rc_overrides))
     _attach_chain(engine, llm, "primary-model", "fallback-model-x")
     async for _ in engine.run(
         Message(role=MessageRole.user, content_blocks=[TextBlock(text="hi")])
@@ -182,9 +184,16 @@ async def test_rate_limit_fallback_carries_the_streamed_partial(
 async def test_idle_stream_fallback_carries_the_streamed_partial(
     engine_factory: Any, in_memory_runtime: dict[str, object]
 ) -> None:
-    """A silent endpoint is answered by the next provider, not by giving up."""
+    """A silent endpoint is answered by the next provider, not by giving up.
+
+    With no in-place retry budget the first silence goes straight to the chain,
+    which is the branch this file is about; the retry that normally comes first
+    is pinned in ``tests/scenarios/test_provider_failure.py``.
+    """
     llm = _IdleStreamLLM()
-    engine = await _run_two_attempts(engine_factory, llm)
+    engine = await _run_two_attempts(
+        engine_factory, llm, llm_transient_error_retry_max_attempts=0
+    )
 
     assert len(llm.calls) == 2, [call.model for call in llm.calls]
     assert llm.calls[1].model == "fallback-model-x"

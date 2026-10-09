@@ -5090,6 +5090,7 @@ async def _drive_one_stream(
         idle_timeout=rc.llm_stream_idle_timeout_seconds,
         stall_threshold=rc.llm_stream_stall_threshold_seconds,
         reasoning_idle_timeout=rc.llm_stream_reasoning_idle_timeout_seconds,
+        first_delta_timeout=_first_delta_budget(request, rc),
     ):
         if engine.stop_requested:
             break
@@ -5798,12 +5799,27 @@ async def _handle_context_window_exceeded(
     )
 
 
+def _first_delta_budget(request: LLMRequest, rc: LoopConstants) -> float | None:
+    """How long a request may stay silent before its first token, or ``None``.
+
+    A request that asked for thinking may reason for the whole of that silence
+    without streaming any of it, so it gets the reasoning budget; one that did
+    not keeps the baseline. Read from the request rather than the engine so a
+    turn that switched thinking off for itself (a forced terminal tool) is
+    judged by what was actually sent.
+    """
+    if request.extra.get("enable_thinking") is True:
+        return rc.llm_stream_reasoning_idle_timeout_seconds
+    return None
+
+
 async def _iter_with_idle_watchdog(
     source: AsyncIterator[ProviderDelta],
     *,
     idle_timeout: float,
     stall_threshold: float,
     reasoning_idle_timeout: float | None = None,
+    first_delta_timeout: float | None = None,
 ) -> AsyncIterator[ProviderDelta]:
     """Wrap ``source`` with a per-iteration idle/stall watchdog.
 
@@ -5829,22 +5845,39 @@ async def _iter_with_idle_watchdog(
  the model could finish thinking. The error message includes which
  threshold was active so operators can distinguish a true hang from a
  long reasoning gap when the timeout DOES eventually fire.
+
+ First-token window: ``first_delta_timeout``, when set, is the budget until
+ the first delta that is not a :class:`ProviderDeltaKind.progress` heartbeat.
+ The caller sets it for a request that asked for thinking. A provider that
+ reasons without streaming its reasoning (Anthropic with the thinking display
+ omitted, a Responses model without a summary) sends no thinking delta for the
+ reasoning window above to open on, so its whole think lands before the first
+ token and the baseline killed every think longer than it: 38 to 68 s was usual
+ for a large model on an 85k-token prompt, and the 90 s baseline turned the
+ slow tail into an outage and a fallback. Heartbeats reset the clock but do
+ not close this window, for the same reason they do not close the reasoning
+ one: they say the provider is alive, not that it has started answering.
  """
     iterator = source.__aiter__()
     loop = asyncio.get_event_loop()
     last_delta_at: float | None = None
     in_reasoning_window = False
+    awaiting_first_token = first_delta_timeout is not None
 
     while True:
         # Per-iteration budget — reasoning-extended only after a thinking
         # delta has been observed AND only until the next non-reasoning
         # delta lands. This keeps the baseline tight for normal
         # non-reasoning streams.
-        active_timeout = (
-            reasoning_idle_timeout
-            if (in_reasoning_window and reasoning_idle_timeout is not None)
-            else idle_timeout
-        )
+        if awaiting_first_token and first_delta_timeout is not None:
+            active_timeout = max(first_delta_timeout, idle_timeout)
+            window = "first_token"
+        elif in_reasoning_window and reasoning_idle_timeout is not None:
+            active_timeout = reasoning_idle_timeout
+            window = "reasoning"
+        else:
+            active_timeout = idle_timeout
+            window = "baseline"
         try:
             delta = await asyncio.wait_for(
                 iterator.__anext__(), timeout=active_timeout
@@ -5852,10 +5885,9 @@ async def _iter_with_idle_watchdog(
         except StopAsyncIteration:
             return
         except TimeoutError as exc:
-            kind_hint = "reasoning" if in_reasoning_window else "baseline"
             idle_error = LLMStreamIdleError(
                 f"LLM stream idle for >{active_timeout:.1f}s "
-                f"(window={kind_hint}, last_delta_seen=thinking={in_reasoning_window}) "
+                f"(window={window}, last_delta_seen=thinking={in_reasoning_window}) "
                 "— terminating"
             )
             # This watchdog is the only thing that raises the idle error, so it
@@ -5878,7 +5910,7 @@ async def _iter_with_idle_watchdog(
                 gap,
                 stall_threshold,
                 active_timeout,
-                "reasoning" if in_reasoning_window else "baseline",
+                window,
             )
         # Update the reasoning-window flag AFTER observing the delta so
         # the NEXT ``wait_for`` honours the new state. A thinking delta
@@ -5903,6 +5935,8 @@ async def _iter_with_idle_watchdog(
                 delta.kind.value,
             )
             in_reasoning_window = False
+        if delta.kind is not ProviderDeltaKind.progress:
+            awaiting_first_token = False
         last_delta_at = now
         yield delta
 

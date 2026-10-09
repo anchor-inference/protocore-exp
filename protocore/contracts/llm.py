@@ -139,12 +139,13 @@ class LLMStreamIdleError(LLMError):
     when no provider event arrived within
     :attr:`LoopConstants.llm_stream_idle_timeout_seconds`.
 
-    A stream that stops speaking is a statement about the endpoint, not about
-    the request, so it is answered first by the provider chain: the run moves
-    to the next configured provider carrying the partial text it had already
-    streamed. Only when there is no further provider to move to does it wind
-    the run down, and drive terminal FAILED, via the same path as
-    :class:`LLMProviderError`.
+    The first silence of a streak is tried again on the same provider, since a
+    model thinking past the budget looks exactly like a hang from here. A
+    silence that repeats is a statement about the endpoint, not about the
+    request, so it is answered by the provider chain: the run moves to the next
+    configured provider carrying the partial text it had already streamed. Only
+    when there is no further provider to move to does it wind the run down, and
+    drive terminal FAILED, via the same path as :class:`LLMProviderError`.
     """
 
     retryable: bool = True

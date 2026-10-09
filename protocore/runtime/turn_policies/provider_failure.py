@@ -208,15 +208,21 @@ class ProviderFailurePolicy:
             return
 
         if isinstance(exc, LLMStreamIdleError):
-            # A stream that went quiet is as often a queue as a hang, and it
-            # delivered nothing, so the same request is tried again — bounded —
-            # before the run winds down on it.
+            # A stream that went quiet is as often a queue, or a model thinking
+            # longer than the budget, as a hang, and it delivered nothing. So
+            # the first silence of a streak is answered on the same provider,
+            # before the chain moves: a large model's slow tail once demoted
+            # the run onto a weaker provider (and then onto one out of quota)
+            # for a single long think the next attempt would have finished.
+            # A second silence in a row is the endpoint's, and the chain gets
+            # it.
             async for event in self._recover(
                 turn,
                 exc,
                 kind="llm_stream_idle",
                 retryable=_says_retryable(exc),
                 wind_down_when_stuck=True,
+                retry_before_advance=True,
             ):
                 yield event
             return
@@ -316,8 +322,15 @@ class ProviderFailurePolicy:
         kind: str,
         retryable: bool = False,
         wind_down_when_stuck: bool = False,
+        retry_before_advance: bool = False,
     ) -> AsyncIterator[TurnEvent]:
         engine = turn.engine
+
+        if retry_before_advance and retryable and self._retries.read(engine) == 0:
+            async for event in self._retry_in_place(turn, exc, kind=kind):
+                yield event
+            if turn.outcome.directive is not TurnDirective.proceed:
+                return
 
         advanced_to = await self._advance_chain(engine, exc, kind=kind)
         if advanced_to:
