@@ -352,10 +352,9 @@ async def test_the_pause_survives_the_provider_the_run_had_to_step_down_from(
     changes what an approval means.
     """
     tool = ScriptedTool(tool_name="Deploy", content="deployed")
-    primary = FailingProvider(
-        failures={0: classified(LLMStreamIdleError("went quiet"), "timeout")},
-        partial_text="about to deploy",
-    )
+    # Silent twice: the first silence is retried where it is, the second moves the chain.
+    silence = classified(LLMStreamIdleError("went quiet"), "timeout")
+    primary = FailingProvider(failures={0: silence, 1: silence}, partial_text="about to deploy")
     fallback = FailingProvider(
         failures={},
         tool_calls=[("call-1", "Deploy", {"v": "prod"})],
@@ -364,7 +363,7 @@ async def test_the_pause_survives_the_provider_the_run_had_to_step_down_from(
         [("primary-model", primary), ("fallback-model", fallback)]
     )
     run = scenario(
-        rc=_approving_rc(),
+        rc=_approving_rc(llm_transient_error_retry_backoff_base_seconds=0.0),
         tools=[tool],
         llm_provider=primary,
         provider_chain=chain,

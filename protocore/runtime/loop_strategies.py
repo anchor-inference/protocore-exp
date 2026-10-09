@@ -299,6 +299,7 @@ class DeepStrategy:
         provider that wedges before the final plan args cannot hang the run.
         """
         from protocore.runtime.query import (
+            _first_delta_budget,
             _iter_with_idle_watchdog,
             _manifest_request,
             _normalize_outbound_system_messages,
@@ -398,6 +399,7 @@ class DeepStrategy:
             idle_timeout=rc.llm_stream_idle_timeout_seconds,
             stall_threshold=rc.llm_stream_stall_threshold_seconds,
             reasoning_idle_timeout=rc.llm_stream_reasoning_idle_timeout_seconds,
+            first_delta_timeout=_first_delta_budget(request, rc),
         )
         try:
             async for delta in plan_stream:
@@ -499,6 +501,7 @@ class DeepStrategy:
         # Local import — avoid a circular import with ``runtime.query`` (the
         # same pattern ``_fetch_plan`` uses for the shared wire-path helpers).
         from protocore.runtime.query import (
+            _first_delta_budget,
             _iter_with_idle_watchdog,
             _manifest_request,
             _observability_context,
@@ -558,6 +561,7 @@ class DeepStrategy:
                 idle_timeout=rc.llm_stream_idle_timeout_seconds,
                 stall_threshold=rc.llm_stream_stall_threshold_seconds,
                 reasoning_idle_timeout=rc.llm_stream_reasoning_idle_timeout_seconds,
+                first_delta_timeout=_first_delta_budget(request, rc),
             )
             try:
                 async for delta in plan_stream:

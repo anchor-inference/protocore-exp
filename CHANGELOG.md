@@ -26,6 +26,21 @@ All notable changes to this project are recorded here. The format follows
   `[… N more characters of the operator's words — full text in blob <ref>]`,
   pointing at the copy the pass kept. Quotes left out for room are named on
   one line with the same pointer.
+- **A request that asked for thinking may stay silent for the reasoning budget
+  before its first token.** The idle watchdog gave a stream the 90 s baseline
+  until its first delta, and the reasoning window only opened on a `thinking`
+  delta. A provider that reasons without streaming the reasoning (Anthropic
+  with the thinking display omitted, a Responses model without a summary)
+  never sends one, so every think longer than the baseline was killed as an
+  outage. Until the first delta that is not a `progress` heartbeat the budget
+  is now `llm_stream_reasoning_idle_timeout_seconds` when the request carries
+  `enable_thinking=True`; the idle error names the window as `first_token`.
+- **The first stream silence of a streak is retried on the same provider
+  before the provider chain moves.** One slow think demoted the run onto the
+  next provider for the rest of the run. An `LLMStreamIdleError` now takes one
+  in-place retry (from the `llm_transient_error_retry_max_attempts` budget)
+  first; a second silence in a row moves the chain as before, and with that
+  budget at 0 the chain moves at once.
 
 ## [2.0.0a23] - 2026-09-27
 

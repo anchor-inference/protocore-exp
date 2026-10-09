@@ -2007,6 +2007,9 @@ class LoopConstants(BaseModel):
             "legacy 90 s hard cap cancelled the stream before the model could "
             "emit visible text. Default 300 s gives slow aggregators headroom "
             "while still bounding the worst case. "
+            "It is also the budget before the first non-heartbeat delta of a "
+            "request that asked for thinking, because a provider that does not "
+            "stream its reasoning spends the whole think in that silence. "
             "MUST be ``>= llm_stream_idle_timeout_seconds``."
         ),
     )
