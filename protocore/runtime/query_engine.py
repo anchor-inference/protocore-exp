@@ -571,7 +571,7 @@ class QueryEngineConfig:
     would hand the model a callable schema that deterministically fails.
     """
 
-    discovered_tools: tuple[str, ...] = ()
+    discovered_tools: tuple[str | Mapping[str, Any], ...] = ()
     """Tools an earlier run of the same session loaded, to load again at the start.
 
     A run begins with nothing discovered, so without this every run of a
@@ -581,6 +581,15 @@ class QueryEngineConfig:
     last run's ``discovered_tools`` (it is in the snapshot and in every
     ``tool_surface_advertised`` event) hands it back here. Oldest first: over
     ``pinned_tool_max_count``, the first names are the ones left out.
+
+    An entry is a bare name or a row as ``ContextManager.discovered_tool_state()``
+    writes it (``name``, and ``group`` for a tool loaded with its whole group).
+    Rows are what bring the loaded tail back byte for byte: bare names come
+    back first and :attr:`loaded_tool_groups` after them, so a run that loaded
+    a group and then one more tool would start the next run with the two the
+    other way round, and the tool list would miss the cache for nothing. Rows
+    are taken as they are — the host decides what the run may call, as it
+    does for names.
     """
 
     loaded_tool_groups: tuple[str, ...] = ()
@@ -594,6 +603,33 @@ class QueryEngineConfig:
     loads nothing. Loaded after :attr:`discovered_tools`, so a group is the
     newer entry. The groups a run loaded whole are
     ``ContextManager.loaded_tool_group_names()``.
+    """
+
+    tool_rules_key: bytes = field(default=b"", repr=False)
+    """The secret the rules mark of a session is derived from (:func:`~protocore.runtime.tool_deferral.tool_rules_mark`).
+
+    Empty uses a key made new in every process, which changes every
+    session's mark at a restart: the catalogue at the head of the cached
+    prompt changes with it, and the rules earlier results gave carry a mark
+    the catalogue no longer names. A host that keeps a key of its own —
+    somewhere no tool output can reach, never in the transcript — gives each
+    session one mark for its whole life. Left out of the repr, so a logged
+    config does not print it.
+    """
+
+    trimmed_tool_result_ids: tuple[str, ...] = ()
+    """Tool results an earlier run of the same session cut to their head in its requests.
+
+    Stale-trimming decides once and then keeps a result cut for the rest of
+    the run, so the prompt prefix does not move under the provider's cache.
+    A host that starts each run of a session on a new engine starts that set
+    empty, and the next run decided again from nothing: a result the last run
+    left whole because the batch did not pay for itself was cut at the first
+    request, and every result it had cut counted as new savings, which made a
+    batch look cheaper than it was. Handing back the last run's
+    ``QueryEngine._trimmed_tool_result_ids`` (also the snapshot's
+    ``trimmed_tool_result_ids``) keeps the decision the session already paid
+    for. Ids the history no longer carries fall away at the first build.
     """
 
     tool_group_loads: Mapping[str, str] = field(default_factory=dict)
@@ -718,6 +754,7 @@ class QueryEngineConfig:
         # the config is frozen, and a list the host still holds could change
         # under it.
         object.__setattr__(self, "loaded_tool_groups", tuple(self.loaded_tool_groups))
+        object.__setattr__(self, "trimmed_tool_result_ids", tuple(self.trimmed_tool_result_ids))
         # A copy nobody else holds: the host's dict could otherwise change
         # under a run whose deferral decision is keyed on it.
         object.__setattr__(self, "tool_group_loads", MappingProxyType(dict(self.tool_group_loads)))
@@ -1288,8 +1325,11 @@ class QueryEngine:
         # Which results the request view has already cut down to their head.
         # Sticky for the run and snapshot-persisted: re-deciding per build
         # would let a trimmed result come back whole and move the prompt
-        # prefix, which is the cache miss the batching exists to avoid.
-        self._trimmed_tool_result_ids: frozenset[str] = frozenset()
+        # prefix, which is the cache miss the batching exists to avoid. A
+        # host carries it into the session's next run the same way.
+        self._trimmed_tool_result_ids: frozenset[str] = frozenset(
+            str(call_id) for call_id in config.trimmed_tool_result_ids
+        )
         self._identical_tool_counts: dict[str, int] = {}
         self._loop_guard_nudge_count: int = 0
         self._steer_queue: list[dict[str, Any]] = []
@@ -1599,7 +1639,7 @@ class QueryEngine:
         self._tool_group_rules_given: set[str] = set()
         # The mark genuine rules carry in their heading, named in the
         # catalogue, so rules a web page imitates can be told apart.
-        self._tool_rules_mark = tool_rules_mark(config.session_id)
+        self._tool_rules_mark = tool_rules_mark(config.session_id, config.tool_rules_key)
         # Set where the cached prefix starts over, so the next decision writes
         # the loaded tools' rules into the catalogue again.
         self._catalogue_takes_loaded_rules = False
@@ -2074,6 +2114,14 @@ class QueryEngine:
         one.
         """
         return self.prompt_provider.render(name, dict(context))
+
+    @property
+    def trimmed_tool_result_ids(self) -> frozenset[str]:
+        """The results stale-trimming has cut so far, to hand to the session's next run.
+
+        See :attr:`QueryEngineConfig.trimmed_tool_result_ids`.
+        """
+        return self._trimmed_tool_result_ids
 
     @property
     def tool_call_ledger(self) -> list[dict[str, Any]]:

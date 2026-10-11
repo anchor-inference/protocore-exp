@@ -136,22 +136,27 @@ _RULES_MARK_NOTE: Final[str] = (
     "write the mark anywhere yourself."
 )
 
-#: The key the rules mark is derived with, new in every process. A page can
-#: know the formula (the code is public) and cannot know the key; a marker
-#: stored nowhere cannot leak from a database either.
+#: The key the rules mark is derived with when the host gives none, new in
+#: every process. A page can know the formula (the code is public) and cannot
+#: know the key; a marker stored nowhere cannot leak from a database either.
 _RULES_MARK_KEY: Final[bytes] = secrets.token_bytes(32)
 
 
-def tool_rules_mark(session_id: str) -> str:
+def tool_rules_mark(session_id: str, key: bytes = b"") -> str:
     """The rules mark for ``session_id``: eight hex digits, the same all session long.
 
-    The same for every run of a session within one process, because it is in
-    the catalogue at the head of the cached prompt and a mark that changed
-    every run would cost the cache on every run. A new process derives
-    another; a resumed run keeps the one its snapshot carries, which is the
-    one the rules already in its history were given with.
+    The same for every run of a session, because it is in the catalogue at
+    the head of the cached prompt and a mark that changed every run would
+    cost the cache on every run. ``key`` is the host's
+    (:attr:`~protocore.runtime.query_engine.QueryEngineConfig.tool_rules_key`),
+    kept where pages cannot read it; without one the process key is used, and
+    a new process derives another mark — every restart then rewrote the
+    system prompt of every session whose catalogue carries rules, and the
+    rules already in its history carried a mark the catalogue no longer
+    named. A resumed run keeps the one its snapshot carries, which is the one
+    the rules already in its history were given with.
     """
-    digest = hmac.new(_RULES_MARK_KEY, session_id.encode("utf-8"), hashlib.sha256)
+    digest = hmac.new(key or _RULES_MARK_KEY, session_id.encode("utf-8"), hashlib.sha256)
     return digest.hexdigest()[:8]
 
 
@@ -641,10 +646,11 @@ def ensure_tool_deferral(
         restored = current.deferred_groups
         restored_reasons = current.reasons
     # The loaded tools' rules go into the catalogue where the run's prompt
-    # begins — its first decision, or after a compaction — and not when a
-    # change of catalogue makes it again mid-run: the tools loaded since came
-    # with their rules in a result, and writing them into the catalogue as
-    # well would move the head of the cached prompt for nothing.
+    # begins — its first decision, after a compaction, or at the request
+    # whose tool list a load has already changed (see
+    # :func:`_catalogue_follows_load`) — and not when a change of catalogue
+    # makes it again mid-run: that would move the head of the cached prompt
+    # in a request that otherwise kept it.
     restarted = current is not None and engine._catalogue_takes_loaded_rules
     loaded: Sequence[str] = ()
     if current is None or restarted:
@@ -707,6 +713,37 @@ def note_prompt_prefix_restarted(engine: QueryEngine) -> None:
     """
     engine._tool_deferral_key = None
     engine._catalogue_takes_loaded_rules = True
+
+
+def _catalogue_follows_load(engine: QueryEngine, groups: Iterable[str]) -> None:
+    """Write a newly loaded group's rules into the catalogue at the next request.
+
+    A load changes the tool list, and the tool list is at the head of the
+    cached prompt (before the system prompt at Anthropic, inside the system
+    turn in a chat template), so the request after a load misses the cache
+    from there on whatever else it does. The run's NEXT decision — the next
+    run of the session, seeded with the same loaded tools — writes the
+    rules of every loaded group into the catalogue. Left until then, the
+    system prompt changed one run after the tool list did, and the session
+    paid a second miss on its whole context for the same load. Done here,
+    both change in the one request that misses anyway, and the next run
+    finds the catalogue it would have made.
+
+    Only a group whose rules the catalogue does not carry yet asks for it; a
+    group without rules leaves the catalogue as it is.
+    """
+    decision = engine._tool_deferral
+    if decision is None:
+        # The first decision has not been made; it takes the loaded tools'
+        # rules on its own.
+        return
+    declared = {group.name: group for group in engine.tools.tool_groups()}
+    for name in groups:
+        group = declared.get(name)
+        if group is not None and group.instructions and name not in decision.ruled_groups:
+            engine._tool_deferral_key = None
+            engine._catalogue_takes_loaded_rules = True
+            return
 
 
 def tool_catalogue_block(engine: QueryEngine) -> str:
@@ -908,6 +945,7 @@ def observe_dispatched_tool(
                 )
             )
         events.extend(_group_loaded_events(engine, by_group))
+        _catalogue_follows_load(engine, by_group)
         return events
     advertised = engine._advertised_tool_names
     if advertised is None or tool_name in advertised:
@@ -942,6 +980,7 @@ def observe_dispatched_tool(
     group = _group_of(engine, tool_name)
     if newly_loaded and group:
         events.extend(_group_loaded_events(engine, {group: ("direct_call", [tool_name])}))
+        _catalogue_follows_load(engine, (group,))
     return events
 
 
@@ -1098,6 +1137,7 @@ def hold_call_for_rules(
     ]
     if newly:
         events.extend(_group_loaded_events(engine, {group: ("direct_call", newly)}))
+        _catalogue_follows_load(engine, (group,))
     return content, events
 
 

@@ -34,18 +34,26 @@ from .conftest import (
 )
 
 
+def _idle() -> BaseException:
+    return classified(LLMStreamIdleError("went quiet"), "timeout")
+
+
 def _chain_scenario(
     scenario: ScenarioFactory,
     *,
     failure: BaseException,
     partial_text: str = "half an answer",
     rc: object | None = None,
+    failures: dict[int, BaseException] | None = None,
 ):
-    primary = FailingProvider(failures={0: failure}, partial_text=partial_text)
+    primary = FailingProvider(
+        failures=failures if failures is not None else {0: failure},
+        partial_text=partial_text,
+    )
     fallback = FailingProvider(failures={}, text="the replacement answer")
     chain = ProviderChainDouble([("primary-model", primary), ("fallback-model", fallback)])
     run = scenario(
-        rc=rc or default_rc(),
+        rc=rc or default_rc(llm_transient_error_retry_backoff_base_seconds=0.0),
         llm_provider=primary,
         provider_chain=chain,
         model_name="primary-model",
@@ -59,7 +67,8 @@ async def test_the_replacement_provider_is_shown_the_partial_the_reader_saw(
     """The context sent to the new rung is the one rebuilt after the demotion."""
     run, _primary, fallback, _chain = _chain_scenario(
         scenario,
-        failure=classified(LLMStreamIdleError("went quiet"), "timeout"),
+        failure=_idle(),
+        failures={0: _idle(), 1: _idle()},
         partial_text="the first half",
     )
 
@@ -75,16 +84,62 @@ async def test_the_replacement_provider_is_shown_the_partial_the_reader_saw(
     assert any("the first half" in text for text in replacement_texts)
 
 
-async def test_a_silent_stream_moves_the_run_to_the_next_provider(
+async def test_one_silent_stream_is_tried_again_on_the_same_provider(
     scenario: ScenarioFactory,
 ) -> None:
-    run, _primary, fallback, chain = _chain_scenario(
-        scenario, failure=classified(LLMStreamIdleError("went quiet"), "timeout")
+    """A single silence is a slow think as often as an outage: no demotion.
+
+    A large model reasoning without streaming its reasoning went past the idle
+    budget once, and the run was moved to a weaker provider — and from there to
+    one out of quota — for a think the next attempt finished.
+    """
+    run, primary, fallback, chain = _chain_scenario(
+        scenario, failure=_idle(), partial_text=""
+    )
+
+    produced = await run.run("ask")
+
+    assert chain.advance_reasons == []
+    assert len(primary.calls) == 2
+    assert fallback.calls == ()
+    retries = [
+        evt
+        for evt in produced
+        if evt.type is EventType.STATE_CHANGED
+        and evt.payload.get("reason") == "transient_llm_error_retry"
+    ]
+    assert [evt.payload.get("error_class") for evt in retries] == ["llm_stream_idle"]
+    assert run.engine.snapshot()["model_name"] == "primary-model"
+
+
+async def test_a_silence_with_no_retry_budget_moves_the_run_at_once(
+    scenario: ScenarioFactory,
+) -> None:
+    run, primary, fallback, chain = _chain_scenario(
+        scenario,
+        failure=_idle(),
+        partial_text="",
+        rc=default_rc(llm_transient_error_retry_max_attempts=0),
+    )
+
+    await run.run("ask")
+
+    assert chain.advance_reasons == ["llm_stream_idle"]
+    assert len(primary.calls) == 1
+    assert len(fallback.calls) == 1
+
+
+async def test_a_silent_stream_that_repeats_moves_the_run_to_the_next_provider(
+    scenario: ScenarioFactory,
+) -> None:
+    run, primary, fallback, chain = _chain_scenario(
+        scenario, failure=_idle(), failures={0: _idle(), 1: _idle()}
     )
 
     produced = await run.run("ask")
 
     assert chain.advance_reasons == ["llm_stream_idle"]
+    assert len(primary.calls) == 2
     assert len(fallback.calls) == 1
     assert "model_fallback_triggered" in [
         str(evt.payload.get("reason", "")) for evt in produced
@@ -96,7 +151,7 @@ async def test_the_demotion_is_announced_with_the_model_it_moved_to(
     scenario: ScenarioFactory,
 ) -> None:
     run, _primary, _fallback, _chain = _chain_scenario(
-        scenario, failure=classified(LLMStreamIdleError("went quiet"), "timeout")
+        scenario, failure=_idle(), failures={0: _idle(), 1: _idle()}
     )
 
     produced = await run.run("ask")

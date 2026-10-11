@@ -420,16 +420,15 @@ async def test_the_second_process_steps_down_the_chain_it_inherited(
     first.llm.queue_response(text="the answer before the restart")
     await first.run("ask")
 
-    primary = FailingProvider(
-        failures={0: classified(LLMStreamIdleError("went quiet"), "timeout")},
-        partial_text="the first half",
-    )
+    # Silent twice: the first silence is retried where it is, the second moves the chain.
+    silence = classified(LLMStreamIdleError("went quiet"), "timeout")
+    primary = FailingProvider(failures={0: silence, 1: silence}, partial_text="the first half")
     fallback = FailingProvider(failures={}, text="the replacement answer")
     chain = ProviderChainDouble(
         [("primary-model", primary), ("fallback-model", fallback)]
     )
     second = scenario(
-        rc=default_rc(model_context_window=32_000),
+        rc=default_rc(model_context_window=32_000, llm_transient_error_retry_backoff_base_seconds=0.0),
         llm_provider=primary,
         provider_chain=chain,
         model_name="primary-model",

@@ -578,7 +578,10 @@ crashes. The shared assistant loop is **not** a single immutable path:
   of the latest round of tool calls are never touched, whatever their size,
   because that is what the model is about to read. Nothing is cut until the
   trimmable excess crosses `tool_result_stale_trim_batch_chars`, so the prompt
-  prefix moves for a batch and not for one result, and a trimmed id is sticky
+  prefix moves for a batch and not for one result, and the batch must save at
+  least `tool_result_stale_trim_min_share` of the whole view — with cache
+  breakpoints only at the system prompt and the last messages, a cut further
+  back is a cache write of the whole conversation. A trimmed id is sticky
   for the run (`trimmed_tool_result_ids` in the snapshot), so a resumed run
   rebuilds the same prefix. Pins are honoured unless a later write has falsified
   them, and a compacted placeholder is never rewritten. Every line of the cut
@@ -705,6 +708,14 @@ already has — and two rules keep the last of them honest.
   event, so a cancel mid-pause is noticed at once. Each attempt is a WARNING
   naming the run and the attempt number, and a `state_changed` event
   (`reason="transient_llm_error_retry"`) the host can surface.
+- **A silent stream is retried once where it is before the chain moves.** The
+  sibling usually comes first, but an `LLMStreamIdleError` that opens a streak
+  takes one in-place attempt before it: a model thinking past the idle budget
+  is indistinguishable from a hang at the watchdog, and demoting the run for
+  one long think cost it the model for the rest of the run. A second silence in
+  a row moves the chain. The watchdog itself gives a request that asked for
+  thinking `llm_stream_reasoning_idle_timeout_seconds` before its first
+  non-heartbeat delta, and counts a `progress` delta as liveness everywhere.
 - **A run that produced nothing is not asked to write a report.** The wind-down
   asks the model for the best answer its evidence supports; a run with no prose,
   no tool call and no tool result has none, and asked to close anyway it invents
