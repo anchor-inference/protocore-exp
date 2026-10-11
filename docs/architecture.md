@@ -578,7 +578,10 @@ crashes. The shared assistant loop is **not** a single immutable path:
   of the latest round of tool calls are never touched, whatever their size,
   because that is what the model is about to read. Nothing is cut until the
   trimmable excess crosses `tool_result_stale_trim_batch_chars`, so the prompt
-  prefix moves for a batch and not for one result, and a trimmed id is sticky
+  prefix moves for a batch and not for one result, and the batch must save at
+  least `tool_result_stale_trim_min_share` of the whole view — with cache
+  breakpoints only at the system prompt and the last messages, a cut further
+  back is a cache write of the whole conversation. A trimmed id is sticky
   for the run (`trimmed_tool_result_ids` in the snapshot), so a resumed run
   rebuilds the same prefix. Pins are honoured unless a later write has falsified
   them, and a compacted placeholder is never rewritten. Every line of the cut

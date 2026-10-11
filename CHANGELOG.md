@@ -17,8 +17,46 @@ All notable changes to this project are recorded here. The format follows
   the result it writes when a question interrupt is answered. See
   `docs/compaction.md`.
 
+### Added
+
+- **`QueryEngineConfig.trimmed_tool_result_ids`** seeds the results
+  stale-trimming already cut, as `QueryEngine.trimmed_tool_result_ids` hands
+  them out. A host that starts each run of a session on a new engine started
+  the set empty, so the next run cut, at its first request, whatever the last
+  one had left whole, and counted the results already cut as new savings.
+- **`QueryEngineConfig.tool_rules_key`** gives the rules mark a host-kept key.
+  Under the process key every restart changed every session's mark, and with
+  it the system prompt of every session whose catalogue carries rules.
+
+### Changed
+
+- **A group's rules join the catalogue in the request after the load.** The
+  catalogue took a group loaded mid-run only at the next run's first decision,
+  so the system prompt changed one run after the tool list did and a session
+  paid two misses on its whole context for one load. The request after a load
+  already misses from the head of the prompt, so the catalogue is made again
+  there, and the next run seeded with the same tools makes the same one.
+- **`QueryEngineConfig.discovered_tools` takes the rows
+  `ContextManager.discovered_tool_state()` writes**, as well as bare names.
+  Rows bring the loaded tools back in the order they were loaded, with a tool
+  loaded as part of a whole group still one entry with it; names come back
+  before `loaded_tool_groups`, which swapped a group loaded before a single
+  tool and moved the tool list.
+
 ### Fixed
 
+- **Stale-result trimming no longer re-writes a long context to save a few
+  pages.** A cache hit is found only at a breakpoint or a few blocks short of
+  one, so with breakpoints on the system prompt and the last messages a trim
+  further back loses the whole conversation; one measured trim saved 42,000
+  characters of a 1.6-million-character view and was served nothing from the
+  cache past the system prompt. The new `tool_result_stale_trim_min_share`
+  (default `0.25`) requires a batch to save at least that share of the whole
+  view. `0` restores the batch threshold alone.
+- **Stale-result trimming no longer cuts a result into a longer one.** A
+  result a few characters over the head was cut and given a pointer longer
+  than what was removed. A result counts only for what the cut really saves,
+  the pointer and the carried lines paid for.
 - **The compaction ledger no longer clips the operator's words.** Each quote
   was cut at 1,200 characters without a marker. A quote is now kept whole, the
   other sections of the ledger give up their room before it, and a quote that

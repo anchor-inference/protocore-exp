@@ -246,6 +246,9 @@ def test_a_trimmed_result_fits_the_split_that_runs_after_it() -> None:
             tool_result_stale_max_chars=3000,
             tool_result_split_enabled=True,
             tool_result_content_max_chars=500,
+            # What is measured here is the head sizing, not whether the batch
+            # pays for itself: four results of which a quarter goes would not.
+            tool_result_stale_trim_min_share=0.0,
         ),
         PROMPTS,
     )
@@ -401,6 +404,9 @@ def test_a_carried_citation_still_fits_the_split_that_runs_after_it() -> None:
             tool_result_stale_max_chars=3000,
             tool_result_split_enabled=True,
             tool_result_content_max_chars=500,
+            # What is measured here is the head sizing, not whether the batch
+            # pays for itself: four results of which a quarter goes would not.
+            tool_result_stale_trim_min_share=0.0,
         ),
         PROMPTS,
     )
@@ -409,3 +415,67 @@ def test_a_carried_citation_still_fits_the_split_that_runs_after_it() -> None:
     assert len(content) <= 500
     assert citation in content
     assert content.endswith("call the tool again if you need the rest]")
+
+
+def _prose(size: int) -> list[Message]:
+    """A plain exchange of ``size`` characters that no trim can shorten."""
+    return [
+        Message(role=MessageRole.user, content_blocks=[TextBlock(text="q" * size)]),
+        Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="a" * size)]),
+    ]
+
+
+def test_a_trim_that_saves_little_of_the_view_never_happens() -> None:
+    # The case that cost a full cache write of a long context on every trim:
+    # a few pages cut to save three per cent of the view. The batch threshold
+    # is crossed, but re-writing the conversation into the cache would take
+    # hundreds of calls to pay back.
+    history = [*_transcript(3, size=6000), *_prose(250_000), *_transcript(2, size=50, prefix="new")]
+    view, trimmed = trim_stale_results(
+        history, _rc(tool_result_stale_trim_batch_chars=10_000), PROMPTS
+    )
+    assert trimmed == frozenset()
+    assert view == list(history)
+
+
+def test_a_pile_of_stale_output_is_shed_in_one_batch() -> None:
+    history = [*_prose(20_000), *_transcript(12, size=30_000), *_transcript(2, size=50, prefix="new")]
+    _, trimmed = trim_stale_results(
+        history, _rc(tool_result_stale_trim_batch_chars=10_000), PROMPTS
+    )
+    assert trimmed == frozenset(f"call_{index}" for index in range(12))
+
+
+def test_a_share_of_zero_leaves_only_the_batch_threshold() -> None:
+    history = [*_transcript(3, size=6000), *_prose(250_000), *_transcript(2, size=50, prefix="new")]
+    _, trimmed = trim_stale_results(
+        history,
+        _rc(tool_result_stale_trim_batch_chars=10_000, tool_result_stale_trim_min_share=0.0),
+        PROMPTS,
+    )
+    assert trimmed == frozenset({"call_0", "call_1", "call_2"})
+
+
+def test_results_already_cut_count_at_their_head_in_the_stretch() -> None:
+    # The request carries a sticky result at its head, so that is what a later
+    # trim invalidates of it — counting it whole would hold back a batch that
+    # in fact pays for itself.
+    history = [*_transcript(4, size=40_000, prefix="cut"), *_transcript(3, size=6000), *_transcript(2, size=50, prefix="new")]
+    _, trimmed = trim_stale_results(
+        history,
+        _rc(tool_result_stale_trim_batch_chars=1000, tool_result_stale_trim_min_share=0.5),
+        PROMPTS,
+        already_trimmed={"cut_0", "cut_1", "cut_2", "cut_3"},
+    )
+    assert {"call_0", "call_1", "call_2"} <= trimmed
+
+
+def test_a_result_the_pointer_would_lengthen_is_left_whole() -> None:
+    # Thirteen characters over the head: the pointer alone is longer than what
+    # the cut would remove, so cutting it moves the prefix to grow the request.
+    history = [*_transcript(6, size=2000), *_pair("barely", 113), *_transcript(2, size=50, prefix="new")]
+    _, trimmed = trim_stale_results(
+        history, _rc(tool_result_stale_trim_batch_chars=1000), PROMPTS
+    )
+    assert "barely" not in trimmed
+    assert {f"call_{index}" for index in range(6)} <= trimmed
