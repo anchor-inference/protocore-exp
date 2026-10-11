@@ -3421,6 +3421,24 @@ class LoopConstants(BaseModel):
             "there is a batch."
         ),
     )
+    tool_result_stale_trim_min_share: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "The smallest share of the request view a stale-trim must save. "
+            "A cache hit is found only at a breakpoint or a few blocks short "
+            "of one, and with breakpoints on the system prompt and the last "
+            "messages a cut further back loses the whole conversation: the "
+            "provider writes it into its cache again at about 1.25 times the "
+            "input price instead of reading it at about 0.1. So the batch's "
+            "saved characters must be at least this fraction of every "
+            "character the view carries. At 0.25 a trim is repaid within about "
+            "fifty calls; a few pages cut in a long context, which would take "
+            "hundreds, never happen. 0 turns the rule off and leaves only the "
+            "batch threshold."
+        ),
+    )
     tool_result_stale_trim_protected_prefixes: str = Field(
         default="Cite exactly:,Cite:,cite_as:,Source:",
         description=(
