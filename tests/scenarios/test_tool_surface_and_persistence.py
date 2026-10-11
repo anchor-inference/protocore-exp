@@ -201,3 +201,30 @@ async def test_a_reader_that_never_received_the_event_is_still_owed_the_descript
     await again.run("second")
 
     assert _adverts(again)[0]["tool_surface_described"] is True
+
+
+def test_the_results_an_earlier_run_trimmed_stay_trimmed_in_the_next(
+    scenario: ScenarioFactory,
+) -> None:
+    # A host starts each run of a session on a new engine. Seeded with what the
+    # last one cut, the new engine keeps those results cut instead of deciding
+    # again from nothing — which cut the results the last run had left whole,
+    # at its first request, and moved the prompt prefix.
+    run = scenario(trimmed_tool_result_ids=["call-1", "call-2"])
+    assert run.engine.trimmed_tool_result_ids == frozenset({"call-1", "call-2"})
+    assert scenario().engine.trimmed_tool_result_ids == frozenset()
+
+
+def test_a_host_key_gives_a_tenant_one_rules_mark_across_processes(
+    scenario: ScenarioFactory,
+) -> None:
+    # The mark is in the catalogue at the head of the cached prompt. Derived
+    # from the process key, it changed at every restart, and with it the
+    # system prompt of every session whose catalogue carries rules.
+    from protocore.runtime.tool_deferral import tool_rules_mark
+
+    key = "k" * 32
+    run = scenario(tool_rules_mark_key=key)
+    assert run.engine._tool_rules_mark == tool_rules_mark(run.engine.config.tenant_id, key=key)
+    assert run.engine._tool_rules_mark != scenario().engine._tool_rules_mark
+    assert "kkkk" not in repr(run.engine.config)

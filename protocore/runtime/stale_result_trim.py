@@ -23,18 +23,44 @@ of the run in flight: a run that reads twenty pages to answer one question is
 exactly the run this is for, and the first of those pages is not what its answer
 is being written from any more.
 
-*Batches, not drips.* Every rewrite of the view changes the prompt prefix, and a
-changed prefix is a cache miss on the whole request. Trimming one result per turn
-would pay that cost every turn and save a page each time. So nothing happens at
-all until the trimmable excess crosses
-:attr:`~LoopConstants.tool_result_stale_trim_batch_chars`, and then a batch of
-results goes at once.
+*Batches, not drips, and only when the batch pays for the miss.* Every rewrite
+of the view changes the prompt, and a provider's prompt cache serves a request
+only up to the first byte that differs — and finds even that only where a cache
+breakpoint stands or a few blocks short of one. A host that puts its breakpoints
+on the system prompt and the last few messages, as Anthropic's do, loses the
+whole conversation to a cut made further back than that: one measured trim
+rewrote a result 133 messages from the end of a 465,000-token request and was
+served 17,000 tokens from the cache, the system prompt and nothing after it.
+So a trim does not cost what it cuts; it costs the whole view, which the next
+request writes into the cache again instead of reading it. Writing is priced at
+about 1.25 times plain input and reading at about 0.1, so a cut that saves
+``S`` characters of a view of ``V`` is repaid only after some ``11.5 * V / S``
+further calls. Two thresholds stand between a result and the knife. The
+trimmable excess must cross
+:attr:`~LoopConstants.tool_result_stale_trim_batch_chars`, so one result per
+turn never moves the prefix. And it must be at least
+:attr:`~LoopConstants.tool_result_stale_trim_min_share` of the characters the
+view carries. The second rule is the one that matters in a long context:
+shaving forty thousand characters off a view of one and a half million — the
+measured case — writes the whole conversation again to save three per cent of
+it, and the run compacts long before that is repaid; a run that has piled up
+hundreds of thousands of characters of stale output in a view not many times
+larger still sheds them in one batch. The share is of the whole view and not of
+the stretch from the first cut on: with breakpoints only at the ends, the
+shorter stretch is not what the provider re-writes, and measuring the whole
+also makes the batch every eligible result at once, never a later subset.
 
 *Sticky.* Once trimmed, a result stays trimmed for the rest of the run: the ids
 live on the engine, not in the text. Re-deciding per build would let a result
 come back whole after the batch that cut it, and the prefix would flap. The set
 is part of the engine snapshot, so a run resumed in another process keeps the
-prefix it had.
+prefix it had, and a host hands it to the session's next run
+(:attr:`~protocore.runtime.query_engine.QueryEngineConfig.trimmed_tool_result_ids`),
+which otherwise decides again from nothing at its first request.
+
+*Net savings.* A result counts for what the cut really removes, after the
+pointer and the carried lines are paid for; one only a little over the head
+would come out longer and is left whole.
 
 *Identity survives the body.* A result that carries the line telling the model
 how to cite what it just read cannot lose that line to the trim: a citation the
@@ -155,6 +181,25 @@ def _widest_rest(
     return len("\n".join(["", *carried, pointer]))
 
 
+def _message_chars(message: Message, sticky: frozenset[str], limit: int) -> int:
+    """Roughly how many characters a message puts into the request.
+
+    A result already cut counts at its head, since that is what the request
+    carries for it; the rest is the plain text of every block. It is an
+    estimate for weighing a trim against the view it invalidates, not a budget.
+    """
+    total = len(message.reasoning_content or "")
+    for block in message.content_blocks:
+        if isinstance(block, ToolResultBlock):
+            size = len(block.content)
+            total += min(size, limit) if block.tool_call_id in sticky else size
+        elif isinstance(block, ToolUseBlock):
+            total += len(block.name) + len(block.arguments_json)
+        else:
+            total += len(getattr(block, "text", "") or "")
+    return total
+
+
 def trim_stale_results(
     history: Sequence[Message],
     rc: LoopConstants,
@@ -200,7 +245,9 @@ def trim_stale_results(
     fresh = frozenset(block.tool_call_id for block in newest)
 
     to_trim: set[str] = set()
-    new_excess = 0
+    #: The results this build could newly cut, and what cutting them saves.
+    candidates: list[str] = []
+    new_saved = 0
     #: Computed on first need and then reused. The question only arises for a
     #: result that is BOTH pinned and oversized, and the answer costs a pass
     #: over the transcript, so a run with no such result never pays for it.
@@ -225,13 +272,24 @@ def trim_stale_results(
             continue
         if block.tool_call_id in fresh or block.tool_call_id in latest_round:
             continue
-        new_excess += len(block.content) - limit
-        to_trim.add(block.tool_call_id)
+        # What the cut really saves, the pointer and the carried lines paid
+        # for. A result a few characters over the head used to be "cut" into
+        # a longer one — 2013 characters became 2160 — and moved the prefix
+        # for a loss.
+        saved = len(block.content) - len(
+            _shortened(block.content, limit, prefixes, prompts, fresh_count)
+        )
+        if saved <= 0:
+            continue
+        candidates.append(block.tool_call_id)
+        new_saved += saved
 
-    if new_excess <= rc.tool_result_stale_trim_batch_chars:
-        # Not enough to pay for the changed prefix. Whatever was already cut
-        # stays cut; nothing new joins it this build.
-        to_trim &= sticky
+    if new_saved > rc.tool_result_stale_trim_batch_chars:
+        view_chars = sum(_message_chars(message, sticky, limit) for message in history)
+        if new_saved >= rc.tool_result_stale_trim_min_share * view_chars:
+            to_trim.update(candidates)
+    # Otherwise nothing new is worth the changed prefix. Whatever was already
+    # cut stays cut; nothing new joins it this build.
     #: Only ids the view still carries stay sticky. A result compaction has
     #: since replaced with a placeholder, or a checkpoint dropped entirely, is
     #: never coming back whole, so remembering it only grows the set the engine

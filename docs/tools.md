@@ -505,9 +505,14 @@ and never for a group the run does not touch:
     Ask the user before submitting a form.
   ```
 
-  The catalogue is built once per run and is part of the cached prefix, so
-  groups loaded mid-run are not added to it on every load. After a
-  compaction it is written again with the rules of exactly the groups on the
+  The catalogue is built once per run and is part of the cached prefix. It
+  is made again in the request after a load of a group whose rules it does
+  not carry yet — that request has a new tool list and misses the cache from
+  the head of the prompt anyway — so the rules join it there, and the next
+  run of the session, seeded with the same tools, makes the same catalogue.
+  Left for the next run, the system prompt changed one run after the tool
+  list and the session paid a second miss on its whole context for the one
+  load. After a compaction it is written again with the rules of exactly the groups on the
   surface or still loaded, because the result that gave them may now be
   summarised or masked. That costs something: a compaction rewrites the
   conversation, not the system prompt, so when a group with rules was loaded
@@ -685,10 +690,16 @@ The loaded tools and the held-back groups travel in the snapshot
 decision instead of measuring again — as a floor: a dynamic group the snapshot
 does not name (a server that connected since) is still held back, and the
 limits are still enforced on top. A host that wants the next run of a session
-to start with the same tools passes a list as `QueryEngineConfig.discovered_tools`.
-`ContextManager.called_discovered_tool_names()` is the part of the loaded tools
-the run actually called, and is the list to carry: a search loads its best few
-matches whether or not the model wanted them. A seeded tool counts as called.
+to start with the same tools passes a list as `QueryEngineConfig.discovered_tools`:
+bare names, or the rows `ContextManager.discovered_tool_state()` writes. Rows
+bring the loaded tail back in the order it was loaded, a tool loaded with its
+whole group still one entry with it; bare names come back first and
+`loaded_tool_groups` after them, so a run that loaded a group and then one
+more tool would start the next with the two swapped, a miss on the whole
+prompt for nothing. `ContextManager.called_discovered_tool_names()` is the part
+of the loaded tools the run actually called, for a host that would rather
+carry less than keep the prefix: a search loads its best few matches whether
+or not the model wanted them. A seeded tool counts as called.
 Each snapshot row carries `called`; a row without it is taken as called. A row
 of a tool loaded as part of a whole group also carries `group`.
 

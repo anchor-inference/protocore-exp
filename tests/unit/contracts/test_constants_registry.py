@@ -582,6 +582,12 @@ class TestLoopGroup:
         assert spec.exclusive_minimum is False
         assert spec.kind == "int"
 
+    def test_the_share_a_trim_must_save_is_dashboard_configurable(self) -> None:
+        spec = build_loop_group().spec("tool_result_stale_trim_min_share")
+        assert spec.default == 0.25
+        assert spec.minimum == 0.0 and spec.maximum == 1.0
+        assert spec.kind == "float"
+
     def test_the_lines_a_trim_carries_over_are_dashboard_configurable(self) -> None:
         spec = build_loop_group().spec("tool_result_stale_trim_protected_prefixes")
         assert spec.default == "Cite exactly:,Cite:,cite_as:,Source:"
