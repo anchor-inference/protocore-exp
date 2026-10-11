@@ -2007,6 +2007,9 @@ class LoopConstants(BaseModel):
             "legacy 90 s hard cap cancelled the stream before the model could "
             "emit visible text. Default 300 s gives slow aggregators headroom "
             "while still bounding the worst case. "
+            "It is also the budget before the first non-heartbeat delta of a "
+            "request that asked for thinking, because a provider that does not "
+            "stream its reasoning spends the whole think in that silence. "
             "MUST be ``>= llm_stream_idle_timeout_seconds``."
         ),
     )
@@ -3416,6 +3419,24 @@ class LoopConstants(BaseModel):
             "so costs a cache miss on the whole request, which is worth paying "
             "for a batch of results and not for one — so the rule waits until "
             "there is a batch."
+        ),
+    )
+    tool_result_stale_trim_min_share: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "The smallest share of the request view a stale-trim must save. "
+            "A cache hit is found only at a breakpoint or a few blocks short "
+            "of one, and with breakpoints on the system prompt and the last "
+            "messages a cut further back loses the whole conversation: the "
+            "provider writes it into its cache again at about 1.25 times the "
+            "input price instead of reading it at about 0.1. So the batch's "
+            "saved characters must be at least this fraction of every "
+            "character the view carries. At 0.25 a trim is repaid within about "
+            "fifty calls; a few pages cut in a long context, which would take "
+            "hundreds, never happen. 0 turns the rule off and leaves only the "
+            "batch threshold."
         ),
     )
     tool_result_stale_trim_protected_prefixes: str = Field(

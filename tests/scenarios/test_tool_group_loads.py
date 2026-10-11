@@ -192,8 +192,12 @@ async def test_a_group_is_loaded_whole_with_its_rules_once(
     assert open_result.content == "ok"
     assert _invocations(run, "BrowserOpen") == [{"v": "https://example.org"}]
     assert _group_loads(run) == [("browser", "group", ["BrowserClick", "BrowserOpen"])]
-    # The catalogue at the head of the prompt did not move for the load.
-    assert _system_text(run, 0) == _system_text(run, 1) == _system_text(run, 2)
+    # The rules join the catalogue in the request whose tool list the load
+    # already changed, so that one request is the only one to miss the cache
+    # for it, and the next run — seeded with the group — makes the same one.
+    assert _heading(run) not in _system_text(run, 0)
+    assert f"  {_heading(run)}" in _system_text(run, 1)
+    assert _system_text(run, 1) == _system_text(run, 2)
     assert run.engine.context_manager.discovered_tool_groups() == {
         "BrowserClick": "browser",
         "BrowserOpen": "browser",
@@ -377,15 +381,16 @@ async def test_after_a_compaction_the_catalogue_carries_the_loaded_rules(
     )
     run.llm.queue_response(text="loaded")
     await run.run("load the browser")
-    assert "Rules for the browser tools" not in _system_text(run, 1)
+    assert f"  {_heading(run)}" in _system_text(run, 1)
 
-    # Where the prefix starts over, the rules a result gave are written into
-    # the catalogue, which outlives the summary.
+    # Where the prefix starts over the catalogue is made again, and it still
+    # carries the rules of the group that is still loaded: the catalogue
+    # outlives the summary, the result that gave them may not.
     note_prompt_prefix_restarted(run.engine)
     run.engine.rearm()
     run.llm.queue_response(text="still here")
     await run.run("and now?")
-    assert f"  {_heading(run)}" in _system_text(run, 2)
+    assert _system_text(run, 2) == _system_text(run, 1)
 
 
 # ── across a resume ─────────────────────────────────────────────────────────
@@ -441,6 +446,41 @@ def _with_schedule(run: Scenario) -> Scenario:
     _lazy(run)
     run.tools.declare_group("schedule", "Jobs that run later", prefix="Schedule", load="lazy")
     return run
+
+
+async def test_the_next_run_seeded_with_what_was_loaded_starts_where_the_last_ended(
+    scenario: ScenarioFactory,
+) -> None:
+    # A group with rules loaded whole, then one tool of another group by name.
+    # Handed back as rows, the next run's first request carries the same tool
+    # list in the same order and the same catalogue as the last request of the
+    # run before, so a session's runs share one cached prefix.
+    first = _with_schedule(scenario(tools=_many()))
+    first.llm.queue_tool_call_response(
+        tool_call_id="s-1", tool_name="ToolSearch", tool_input={"group": "browser"}
+    )
+    first.llm.queue_tool_call_response(
+        tool_call_id="s-2", tool_name="ToolSearch", tool_input={"query": "select:ScheduleAdd"}
+    )
+    first.llm.queue_response(text="loaded")
+    await first.run("load what you need")
+    rows = [
+        {key: row[key] for key in ("name", "group") if key in row}
+        for row in first.engine.context_manager.discovered_tool_state()
+    ]
+    assert [row["name"] for row in rows] == ["BrowserClick", "BrowserOpen", "ScheduleAdd"]
+
+    second = _with_schedule(scenario(tools=_many(), discovered_tools=tuple(rows)))
+    second.llm.queue_response(text="again")
+    await second.run("and now?")
+
+    last = len(first.requests) - 1
+    assert second.advertised_tool_names(0) == first.advertised_tool_names(last)
+    assert _system_text(second, 0) == _system_text(first, last)
+    assert second.engine.context_manager.discovered_tool_groups() == {
+        "BrowserClick": "browser",
+        "BrowserOpen": "browser",
+    }
 
 
 async def test_seeded_groups_are_one_entry_each_under_the_cap(
@@ -619,7 +659,7 @@ async def test_a_group_a_compaction_unloaded_is_owed_its_rules_again_on_a_blind_
 
     # The result that gave the rules is masked and the browser is not in the
     # catalogue: nothing the model can read holds them, so the call waits.
-    assert _heading(run) not in _system_text(run, 2)
+    assert "Rules for the browser tools" not in _system_text(run, 3)
     held = run.tool_results()[-1]
     assert held.content.startswith("Not run yet: BrowserOpen")
     assert f"{_heading(run)}\n{_RULES}" in held.content
