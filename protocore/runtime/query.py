@@ -3677,6 +3677,7 @@ async def _stream_one_assistant_message(
                     role=MessageRole.assistant,
                     content_blocks=assistant_blocks,
                     reasoning_content=reasoning_buffer or None,
+                    reasoning_items=tuple(stream_result.reasoning_items) or None,
                     metadata=assistant_metadata,
                 )
             )
@@ -4589,6 +4590,7 @@ class _StreamAttemptResult:
         "_text_fragments",
         "finish_reason",
         "narration_prefix_chars",
+        "reasoning_items",
         "tool_calls",
     )
 
@@ -4597,6 +4599,9 @@ class _StreamAttemptResult:
         self.tool_calls: list[ToolCall] = []
         self._text_fragments: list[str] = []
         self._reasoning_fragments: list[str] = []
+        # The provider's opaque reasoning records for this message, kept on it
+        # so the adapter can send them back on the next request.
+        self.reasoning_items: list[dict[str, Any]] = []
         # Where the live stream cut this message's prose into a collapsed
         # leading narration and the answer behind it — an offset into
         # ``text_buffer``, 0 when nothing was split. Recorded by the stream so
@@ -5083,6 +5088,9 @@ async def _drive_one_stream(
     ):
         if engine.stop_requested:
             break
+
+        if delta.reasoning_items:
+            result.reasoning_items.extend(delta.reasoning_items)
 
         if delta.kind is ProviderDeltaKind.finish:
             if open_block_kind is not None:

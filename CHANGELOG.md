@@ -8,6 +8,18 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- **`Message.reasoning_items` and `ProviderDelta.reasoning_items` keep a
+  provider's opaque reasoning on the turn it belongs to.** A provider that
+  holds a model's reasoning on its own side (the Responses API with `store`
+  off) hands back an encrypted copy, and the model reasons from it on the next
+  request; without it a reasoning model starts every tool step from nothing.
+  An adapter puts the records on a delta, the core keeps them on the assistant
+  message it builds, and the adapter decides on the next request whether to
+  send them again. The field is omitted from a dump when unset, so stored
+  messages and request digests without it are unchanged. Tier 1 sheds it
+  together with `reasoning_content`, and the token estimate uses an item's own
+  `tokens` count where it gives one.
+
 - **`OPERATOR_WORDS_METADATA_KEY` (`"protocore.operator_words"`) says who
   wrote a message.** `True` on `Message.metadata` makes the message the
   operator's, `False` makes a user-role message a runtime note, and a list of
