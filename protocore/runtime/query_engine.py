@@ -179,6 +179,15 @@ _REQUIRED_CONTINUITY_FIELDS: tuple[str, ...] = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class PromptAnchor:
+    """The provider's count of one request, and the history (by identity) that request carried."""
+
+    model: str
+    prompt_tokens: int
+    prefix: tuple[weakref.ReferenceType[Message], ...]
+
+
 @dataclass(frozen=True)
 class _RunContinuity:
     """The parsed continuity block, built before the engine is touched."""
@@ -855,6 +864,10 @@ class QueryEngine:
             "compact_checkpoint",
             "context_manager",
             "last_observed_prompt_tokens",
+            # The provider's count of the last request and the history it was
+            # made of: the next turn's first gate is sized from it.
+            "_prompt_anchor",
+            "_dispatched_history",
             # What counting has learned: counts keyed by content, the last full
             # request counted, and a back-off after a failed count. The next
             # turn is the same conversation on the same endpoint, so none of it
@@ -1028,6 +1041,10 @@ class QueryEngine:
         # to later current-request estimates. The scalar itself never floors a
         # different request or a history-only compaction decision.
         self.last_observed_prompt_tokens: int = 0
+        # The history a request in flight was built from, and, once its usage
+        # arrives, that count beside it (see :meth:`prompt_tokens_now`).
+        self._dispatched_history: tuple[weakref.ReferenceType[Message], ...] | None = None
+        self._prompt_anchor: PromptAnchor | None = None
         self.turn_count = 0
         self.last_heartbeat_ms: int = 0
         # Optional verification state is one typed aggregate rather than a
@@ -4042,15 +4059,42 @@ class QueryEngine:
         """The calibrated size of what the last request carried besides the history."""
         return int(self._request_overhead_tokens_raw * self.config.rc.token_estimate_calibration)
 
+    def note_dispatched_history(self) -> None:
+        """Remember the history the request being sent is built from."""
+        self._dispatched_history = tuple(weakref.ref(message) for message in self.history)
+
+    def note_observed_prompt(self, model: str, prompt_tokens: int) -> None:
+        """Anchor the size of the prompt on the provider's count of the request just answered."""
+        if self._dispatched_history is not None and prompt_tokens > 0:
+            self._prompt_anchor = PromptAnchor(model=model, prompt_tokens=prompt_tokens, prefix=self._dispatched_history)
+
+    def prompt_tokens_now(self) -> int:
+        """The size of the whole prompt as the history stands: system prompt, tools and history.
+
+        When the history the provider last counted is still the start of the history, word for
+        word, the answer is that count plus the estimate of what was added since — the
+        assistant's turn and the tool results of one round. Otherwise (a compaction rewrote
+        the history, another model is in use, nothing was counted yet) it is the calibrated
+        estimate of the whole. The estimate alone ran 45% above the provider's count on one
+        session (277k against 191k), and the compaction it triggered threw away a third of a
+        window that was still free; a count is exact for everything but the newest round.
+        """
+        anchor = self._prompt_anchor
+        if anchor is not None and anchor.model == self.effective_model_name:
+            count = len(anchor.prefix)
+            if count <= len(self.history) and all(ref() is message for ref, message in zip(anchor.prefix, self.history, strict=False)):
+                return anchor.prompt_tokens + self.context_manager.current_prompt_tokens(self.history[count:])
+        return self.context_manager.current_prompt_tokens(self.history) + self.request_overhead_tokens()
+
     def needs_compaction(self) -> bool:
         return self.context_manager.needs_compaction(
-            self.history, overhead_tokens=self.request_overhead_tokens()
+            self.history, current_tokens=self.prompt_tokens_now()
         )
 
     def needs_emergency_compaction(self) -> bool:
         """Return True when the prompt exceeds the emergency cliff (proactive force)."""
         return self.context_manager.needs_emergency_compaction(
-            self.history, overhead_tokens=self.request_overhead_tokens()
+            self.history, current_tokens=self.prompt_tokens_now()
         )
 
     @property

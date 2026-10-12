@@ -53,6 +53,15 @@ _PROCESS_LOCAL: dict[str, str] = {
         "provider_chain_model_name, and the engine is re-seated onto it."
     ),
     "compaction_llm": "the summarising provider is injected by the host.",
+    "_dispatched_history": (
+        "weak references to the message objects a request was built from; a "
+        "resumed run's history is new objects, so they could not match it."
+    ),
+    "_prompt_anchor": (
+        "the provider's count tied, by object identity, to the history it was "
+        "made of; on another process no message is that object, and the gate "
+        "falls back to the calibrated estimate until the next usage arrives."
+    ),
     "_exact_token_counts": (
         "a cache of what one endpoint answered and a monotonic back-off clock, "
         "both meaningless in another process. What counting taught the run is "

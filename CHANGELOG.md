@@ -32,6 +32,19 @@ All notable changes to this project are recorded here. The format follows
   messages and request digests without it are unchanged. Tier 1 sheds it
   together with `reasoning_content`, and the token estimate uses an item's own
   `tokens` count where it gives one.
+- **`LoopConstants.compaction_mask_keep_reads_pattern`** keeps the outputs of
+  calls that read an instruction file or a memory note out of the age pass of
+  Tier 1. The default matches `AGENTS.md`, `MEMORY.md` and notes in a
+  `memory/` or `memories/` folder: masked minutes after it was read, the
+  operator's standing knowledge was gone from a long run. Empty keeps nothing.
+- **`QueryEngine.prompt_tokens_now()`** sizes the prompt from the provider's
+  count of the last request plus an estimate of the messages added since, while
+  the counted history is still the start of the history; otherwise from the
+  calibrated estimate. The compaction gates (`needs_compaction`,
+  `needs_emergency_compaction`) decide on it. The estimate alone once ran 45%
+  above the count and compacted a third of a window that was still free.
+  `ContextManager.needs_compaction` and `needs_emergency_compaction` take the
+  measured size as `current_tokens`.
 
 ### Changed
 

@@ -843,6 +843,19 @@ class LoopConstants(BaseModel):
             "first tier: it needs no model and cannot fail."
         ),
     )
+    compaction_mask_keep_reads_pattern: str = Field(
+        default=r"(?:^|[\s/\\'\"=:])(?:AGENTS|MEMORY)\.md\b|[/\\]memor(?:y|ies)[/\\][^\s'\"]*\.md\b",
+        description=(
+            "A regular expression over a tool call's arguments and its result's "
+            "path: the outputs of matching calls are never masked by age. The "
+            "default matches reads of AGENTS.md and MEMORY.md and of notes in "
+            "a memory folder; a host whose agents keep their instructions under "
+            "other names adds them. What the agent read there is the "
+            "operator's standing knowledge, and masking it minutes after it was "
+            "read left the agent asking for what it had just been told. Empty "
+            "keeps nothing from the age pass."
+        ),
+    )
     compaction_mask_min_tokens: int = Field(
         default=300,
         ge=0,

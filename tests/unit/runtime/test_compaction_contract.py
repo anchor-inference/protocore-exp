@@ -238,6 +238,29 @@ async def test_a_masked_output_says_what_it_was_and_where_it_went() -> None:
     assert "First and last lines:" in readable
 
 
+async def test_a_read_of_an_instruction_or_memory_file_is_not_masked_by_age() -> None:
+    """Masking what the agent had just read of the operator's memory left it asking for it again."""
+    rc = LoopConstants(model_context_window=32_768, compaction_mask_keep_recent_results=1)
+    history = _history(4, lines=40)
+    read = Message(
+        role=MessageRole.assistant,
+        content_blocks=[ToolUseBlock(tool_call_id="mem", name="Exec", arguments_json=json.dumps({"command": "cat ~/notes/memory/stands.md"}))],
+    )
+    history[1:1] = [read, Message(role=MessageRole.tool, content_blocks=[ToolResultBlock(tool_call_id="mem", content=_log(9, 40))])]
+    result = await run_tier1_truncation(
+        history, InMemoryBlobStore(), "t", rc, truncation_threshold_tokens=10**9,
+        keep_recent_turns=1, mask_by_age=True,
+    )
+    assert result.masked_by_age == 3, "the three old Exec outputs are masked"
+    kept = next(b for m in history for b in m.content_blocks if isinstance(b, ToolResultBlock) and b.tool_call_id == "mem")
+    assert not kept.canonical_ref and "masked by compaction" not in kept.content
+    unkept = await run_tier1_truncation(
+        _history(4, lines=40), InMemoryBlobStore(), "t", rc.model_copy(update={"compaction_mask_keep_reads_pattern": ""}),
+        truncation_threshold_tokens=10**9, keep_recent_turns=1, mask_by_age=True,
+    )
+    assert unkept.masked_by_age == 3
+
+
 def test_a_masked_output_keeps_the_lines_it_said_once() -> None:
     output = _log(3, 50).split("\n")
     output.insert(20, "admin.bind: 0.0.0.0:47031")
