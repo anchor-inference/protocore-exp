@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import re
 import weakref
 from collections import OrderedDict
@@ -327,6 +328,24 @@ def _estimate_message_tokens_uncached(message: Message, rc: LoopConstants) -> in
         total += estimate_tokens(_block_text_for_estimation(block), rc)
     if message.reasoning_content:
         total += estimate_tokens(message.reasoning_content, rc)
+    total += _reasoning_items_tokens(message, rc)
+    return total
+
+
+def _reasoning_items_tokens(message: Message, rc: LoopConstants) -> int:
+    """What replaying a message's opaque reasoning records costs, as best known.
+
+    An item's own ``tokens`` is the provider's count and is taken as it is. An
+    item without one is estimated from its JSON, which over-counts an encrypted
+    blob — the safe direction, since an under-count is what overflows a window.
+    """
+    total = 0
+    for item in message.reasoning_items or ():
+        stated = item.get("tokens")
+        if isinstance(stated, int) and not isinstance(stated, bool) and stated >= 0:
+            total += stated
+        else:
+            total += estimate_tokens(json.dumps(item, sort_keys=True, default=str), rc)
     return total
 
 
@@ -588,6 +607,9 @@ e.g. the documented content-missing Write-retry spiral — produces the
             digest.update(b"\x00")
     if message.reasoning_content:
         digest.update(message.reasoning_content.encode("utf-8"))
+    if message.reasoning_items:
+        digest.update(b"\x00")
+        digest.update(json.dumps(list(message.reasoning_items), sort_keys=True, default=str).encode("utf-8"))
     return digest.hexdigest()
 
 
@@ -726,7 +748,7 @@ def _tier1_sheds_reasoning(message: Message, rc: LoopConstants) -> bool:
     return (
         rc.compaction_shed_reasoning_enabled
         and message.role is MessageRole.assistant
-        and bool(message.reasoning_content)
+        and bool(message.reasoning_content or message.reasoning_items)
     )
 
 
@@ -800,9 +822,10 @@ def tier1_has_work(
     keep = rc.compaction_keep_recent_turns if keep_recent_turns is None else keep_recent_turns
     eligible_upper = _effective_eligible_upper(history, keep, protect_tail_from_index, rc)
     for message in history[:eligible_upper]:
-        if _tier1_sheds_reasoning(message, rc) and estimate_tokens(
-            message.reasoning_content or "", rc
-        ) > 0:
+        if _tier1_sheds_reasoning(message, rc) and (
+            estimate_tokens(message.reasoning_content or "", rc) > 0
+            or bool(message.reasoning_items)
+        ):
             return True
         if _tier1_reference_candidate(message, rc):
             block = message.content_blocks[0]
@@ -1000,10 +1023,13 @@ async def run_tier1_truncation(
         # Shed re-emitted reasoning_content on aged assistant turns, before the
         # tool-result branch, so a tool-pairing assistant turn with bloated CoT
         # is trimmed even when its result is what gets masked.
-        if _tier1_sheds_reasoning(message, rc) and message.reasoning_content:
-            freed = estimate_tokens(message.reasoning_content, rc)
-            if freed > 0:
-                history[idx] = message.model_copy(update={"reasoning_content": None})
+        # The provider's opaque records go with the text: they are the same
+        # reasoning in the form the provider reads back, and keeping one while
+        # shedding the other would leave the turn neither cheap nor whole.
+        if _tier1_sheds_reasoning(message, rc):
+            freed = estimate_tokens(message.reasoning_content or "", rc) + _reasoning_items_tokens(message, rc)
+            if freed > 0 or message.reasoning_items:
+                history[idx] = message.model_copy(update={"reasoning_content": None, "reasoning_items": None})
                 message = history[idx]
                 tokens_freed += freed
                 modified.add(idx)

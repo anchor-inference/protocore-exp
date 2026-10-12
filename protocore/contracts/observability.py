@@ -304,7 +304,7 @@ def _manifest_value(payload: Any, *, inline_max_bytes: int) -> tuple[ManifestVal
 #: of one request differ from the digest of the same request. That is not a
 #: nicety: it would make every manifest unreproducible and every replay of a
 #: recorded run a mismatch on the strength of a microsecond.
-_MODEL_VISIBLE_MESSAGE_FIELDS = frozenset({"role", "content_blocks", "reasoning_content"})
+_MODEL_VISIBLE_MESSAGE_FIELDS = frozenset({"role", "content_blocks", "reasoning_content", "reasoning_items"})
 
 
 def model_visible(message: Message) -> dict[str, Any]:

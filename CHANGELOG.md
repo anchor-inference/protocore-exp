@@ -21,6 +21,17 @@ All notable changes to this project are recorded here. The format follows
   them out. A host that starts each run of a session on a new engine started
   the set empty, so the next run cut, at its first request, whatever the last
   one had left whole, and counted the results already cut as new savings.
+- **`Message.reasoning_items` and `ProviderDelta.reasoning_items` keep a
+  provider's opaque reasoning on the turn it belongs to.** A provider that
+  holds a model's reasoning on its own side (the Responses API with `store`
+  off) hands back an encrypted copy, and the model reasons from it on the next
+  request; without it a reasoning model starts every tool step from nothing.
+  An adapter puts the records on a delta, the core keeps them on the assistant
+  message it builds, and the adapter decides on the next request whether to
+  send them again. The field is omitted from a dump when unset, so stored
+  messages and request digests without it are unchanged. Tier 1 sheds it
+  together with `reasoning_content`, and the token estimate uses an item's own
+  `tokens` count where it gives one.
 
 ### Changed
 

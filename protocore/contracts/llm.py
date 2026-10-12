@@ -331,6 +331,15 @@ class ProviderDelta(BaseModel):
     :class:`~protocore.contracts.types.ToolResult` so the agent learns to chunk
     large outputs instead of silently failing."""
 
+    reasoning_items: tuple[dict[str, Any], ...] | None = None
+    """Opaque reasoning records to keep on the assistant message this stream
+    builds (:attr:`~protocore.contracts.types.Message.reasoning_items`).
+
+    Read from any delta that carries them, in order; adapters put them on the
+    ``finish`` delta, since a provider hands its encrypted reasoning over once
+    the item is complete. A stream that never finishes keeps none, which is
+    right: a partial turn is not one the provider can resume from."""
+
 
 class LLMResponse(BaseModel):
     """Final response after stream completion."""
