@@ -811,6 +811,26 @@ class Message(BaseModel):
     the next turn iff the provider requires it (DeepSeek, Kimi K2).
     """
 
+    reasoning_items: tuple[dict[str, Any], ...] | None = None
+    """Opaque reasoning records the provider asked to have sent back verbatim.
+
+    Some providers keep a model's reasoning only on their side of the wire and
+    hand the client an encrypted or signed copy of it (the Responses API's
+    ``encrypted_content`` with ``store`` off, a thinking block's signature).
+    The model reasons from that copy on the next request; without it a
+    reasoning model starts every tool step from nothing. The core never reads
+    inside an item: the adapter that produced it writes it and the same
+    adapter decides whether to send it again, so an item says which endpoint
+    and model it belongs to. An item may carry an integer ``tokens``, the
+    provider's own count of what replaying it costs, which the token estimate
+    uses in place of the item's size, because an encrypted blob's length says
+    nothing about how many tokens it decrypts to.
+
+    It lives and dies with its message: compaction that drops the message
+    drops it, and Tier 1 sheds it together with ``reasoning_content``.
+    Serialised only when set — see :meth:`_omit_absent_reasoning_items`.
+    """
+
     created_at: datetime = Field(default_factory=_utcnow)
 
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -838,6 +858,29 @@ class Message(BaseModel):
     def _reject_non_finite_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
         return _reject_non_finite_floats(value, field="Message.metadata")
 
+    @field_validator("reasoning_items", mode="after")
+    @classmethod
+    def _empty_reasoning_items_are_absent(
+        cls, value: tuple[dict[str, Any], ...] | None
+    ) -> tuple[dict[str, Any], ...] | None:
+        """An empty tuple says what ``None`` says, and is stored as ``None``."""
+        return tuple(value) if value else None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_reasoning_items(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        """Leave ``reasoning_items`` out of the dump when there are none.
+
+        Almost no message has any. Writing the key anyway would rewrite the
+        stored bytes of every message in every durable blob, and change the
+        digest of every recorded request, to say nothing.
+        """
+        data: dict[str, Any] = handler(self)
+        if "reasoning_items" in data and data["reasoning_items"] is None:
+            del data["reasoning_items"]
+        return data
+
     @model_validator(mode="after")
     def _validate_blocks(self) -> Self:
         # System/user/tool messages: at most one block. Assistant: free.
@@ -849,6 +892,11 @@ class Message(BaseModel):
         if self.reasoning_content is not None and self.role is not MessageRole.assistant:
             raise ValueError(
                 f"reasoning_content is only valid on assistant messages, "
+                f"got role={self.role}"
+            )
+        if self.reasoning_items is not None and self.role is not MessageRole.assistant:
+            raise ValueError(
+                f"reasoning_items are only valid on assistant messages, "
                 f"got role={self.role}"
             )
         return self
