@@ -34,6 +34,7 @@ Cyrillic-in-JSON-escape safety preserved via
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import re
 import weakref
@@ -736,6 +737,7 @@ def _age_mask_candidates(
         and any(isinstance(block, ToolResultBlock) for block in message.content_blocks)
     ]
     recent = frozenset(result_positions[-keep:]) if keep else frozenset()
+    kept_reads = _kept_read_ids(history, rc)
     return [
         idx
         for idx in result_positions
@@ -743,9 +745,31 @@ def _age_mask_candidates(
         and idx not in recent
         and any(
             _tier1_sheds_result(block, rc, max(1, rc.compaction_mask_min_tokens))
+            and not (isinstance(block, ToolResultBlock) and block.tool_call_id in kept_reads)
             for block in history[idx].content_blocks
         )
     ]
+
+
+def _kept_read_ids(history: list[Message], rc: LoopConstants) -> frozenset[str]:
+    """Call ids whose outputs the age pass leaves alone (``compaction_mask_keep_reads_pattern``)."""
+    pattern = rc.compaction_mask_keep_reads_pattern
+    if not pattern:
+        return frozenset()
+    matcher = _keep_reads_matcher(pattern)
+    kept: set[str] = set()
+    for message in history:
+        for block in message.content_blocks:
+            if isinstance(block, ToolUseBlock) and matcher.search(block.arguments_json or ""):
+                kept.add(block.tool_call_id)
+            elif isinstance(block, ToolResultBlock) and block.path and matcher.search(str(block.path)):
+                kept.add(block.tool_call_id)
+    return frozenset(kept)
+
+
+@functools.lru_cache(maxsize=8)
+def _keep_reads_matcher(pattern: str) -> re.Pattern[str]:
+    return re.compile(pattern)
 
 
 def tier1_has_work(

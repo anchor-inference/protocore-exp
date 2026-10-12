@@ -510,6 +510,9 @@ _WHOLE_HISTORY_BY_DESIGN: dict[str, _Declaration] = {
     "protocore/runtime/context/compaction.py::_age_mask_candidates": _whole(
         "ranks tool outputs by age across the whole transcript to find the old ones"
     ),
+    "protocore/runtime/context/compaction.py::_kept_read_ids": _whole(
+        "finds every call that read an instruction or memory file, wherever in the transcript the age pass may reach"
+    ),
     "protocore/runtime/context/compaction.py::_bounded_span": _whole(
         "measures a run of positions of the transcript against the summariser's input cap"
     ),
@@ -684,6 +687,12 @@ _WHOLE_HISTORY_BY_DESIGN: dict[str, _Declaration] = {
     ),
     "protocore/runtime/query_engine.py::QueryEngine.needs_compaction": _whole(
         "token accounting over the whole transcript"
+    ),
+    "protocore/runtime/query_engine.py::QueryEngine.note_dispatched_history": _whole(
+        "records the whole transcript a request was built from, by identity, for the size anchor"
+    ),
+    "protocore/runtime/query_engine.py::QueryEngine.prompt_tokens_now": _whole(
+        "token accounting over the whole transcript, anchored on the provider's count of its prefix"
     ),
     "protocore/runtime/query.py::_calibrate_near_compaction_trigger": _whole(
         "sizes the same whole transcript the compaction gate measures, so the "

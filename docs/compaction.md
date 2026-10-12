@@ -18,7 +18,7 @@ behind it that happened in a real long-running session.
 | Term | Meaning |
 |---|---|
 | window `W` | `model_context_window`, the provider's context window in tokens |
-| prompt `P` | the whole request: the history **plus** the system prompt and the tool definitions (the *overhead*), in calibrated tokens |
+| prompt `P` | the whole request: the history **plus** the system prompt and the tool definitions (the *overhead*). The provider's count of the last request plus the calibrated estimate of the messages added since, while the counted history is still the start of the history (`QueryEngine.prompt_tokens_now`); otherwise the calibrated estimate of the whole |
 | trigger `T` | `compaction_trigger_tokens` (see [Budget arithmetic](#budget-arithmetic)); a pass opens when `P > T` |
 | target `R` | where an opened pass aims; `R < T` |
 | pass | one run of the cascade below, opened by a gate |
@@ -57,8 +57,10 @@ A pass runs, cheapest first, only while the prompt is above the target:
    replaced by a placeholder: any output of at least
    `tool_result_truncation_ratio × W`, and — oldest first, until the target is
    met — any output older than the `compaction_mask_keep_recent_results` most
-   recent and at least `compaction_mask_min_tokens` long. Needs no model and
-   cannot fail for want of one.
+   recent and at least `compaction_mask_min_tokens` long, except the output of
+   a call that read an instruction file or a memory note
+   (`compaction_mask_keep_reads_pattern`). Needs no model and cannot fail for
+   want of one.
 2. **Summarising** (`run_tier2_summarisation`, then `run_tier3_fold`). The
    oldest spans are replaced by a model summary; then runs of old summaries and
    old operator turns are merged into one fold, which a later fold can absorb.
@@ -339,6 +341,7 @@ nothing or keep nothing; point the same code at a real provider to measure it.
 | `tool_result_truncation_ratio` | 0.10 | an output this share of the window is masked whatever its age |
 | `compaction_mask_keep_recent_results` | 8 | outputs never masked for age |
 | `compaction_mask_min_tokens` | 300 | smaller outputs are not masked for age |
+| `compaction_mask_keep_reads_pattern` | instruction and memory files | outputs of matching reads are not masked for age |
 | `compaction_mask_distinct_lines` | 6 | distinct lines a placeholder keeps |
 | `compaction_placeholder_preview_chars` | 240 | head and tail preview in a placeholder |
 | `compaction_summary_group_max_tokens` | 6,000 | the largest span one summary stands for |

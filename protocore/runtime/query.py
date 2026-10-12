@@ -4987,6 +4987,7 @@ async def _drive_one_stream(
     # derived from this wire cap rather than from the larger pre-fit budget.
     engine._last_fitted_request_max_tokens = request.max_tokens
     engine._last_dispatched_prompt = (request.model, fitted.raw_estimate)
+    engine.note_dispatched_history()
     engine._request_overhead_tokens_raw = estimate_request_overhead_tokens_uncalibrated(
         request, rc
     )
@@ -5148,6 +5149,7 @@ async def _drive_one_stream(
             # never reused as a different request's floor.
             if input_tokens > 0:
                 engine.last_observed_prompt_tokens = input_tokens
+                engine.note_observed_prompt(request.model, input_tokens)
                 _calibrate_token_estimate(engine, request, input_tokens)
             # Feed the optional cache observer one observation per usage
             # envelope. Core cannot import the host's metrics module (import

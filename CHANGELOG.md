@@ -8,6 +8,22 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- **`LoopConstants.compaction_mask_keep_reads_pattern`** keeps the outputs of
+  calls that read an instruction file or a memory note out of the age pass of
+  Tier 1. The default matches `AGENTS.md`, `CLAUDE.md`, `MEMORY.md` and notes in
+  a `memory/` or `memories/` folder: masked minutes after it was read, the
+  operator's standing knowledge was gone from a long run. Empty keeps nothing.
+- **`QueryEngine.prompt_tokens_now()`** sizes the prompt from the provider's
+  count of the last request plus an estimate of the messages added since, while
+  the counted history is still the start of the history; otherwise from the
+  calibrated estimate. The compaction gates (`needs_compaction`,
+  `needs_emergency_compaction`) decide on it. The estimate alone once ran 45%
+  above the count and compacted a third of a window that was still free.
+  `ContextManager.needs_compaction` and `needs_emergency_compaction` take the
+  measured size as `current_tokens`.
+
+### Added
+
 - **`OPERATOR_WORDS_METADATA_KEY` (`"protocore.operator_words"`) says who
   wrote a message.** `True` on `Message.metadata` makes the message the
   operator's, `False` makes a user-role message a runtime note, and a list of
