@@ -97,6 +97,17 @@ All notable changes to this project are recorded here. The format follows
   session_id=None)` in `protocore.runtime.tool_deferral` is the scope the mark
   is derived from. Left unset, the mark is the tenant's, as before.
 
+- **`MessageOrigin` names the loop's own messages: `nudge`, `wind_down`,
+  `recovery` and `background_wake`.** Every message the loop writes for itself
+  already carried `SYNTHETIC_RECOVERY_METADATA_KEY`; `Message.origin` now maps
+  its kind (`synthetic_recovery_origin()`), so a host that hides control notes
+  from a transcript filters on the origin instead of matching a template's
+  wording, which broke whenever a template changed. `ORIGIN_METADATA_KEY`
+  (`"protocore.origin"`) lets a host give its own scaffolding an origin the
+  same way; compaction's tags still outrank both. `SYNTHETIC_RECOVERY_SOFT_STOP`
+  now lives in `protocore.contracts.types` beside the other kinds and is still
+  importable from `protocore.runtime.soft_stop`.
+
 ### Changed
 
 - **`ToolPermissionGate(policies=[])` installs no policy.** An empty list read
@@ -161,6 +172,14 @@ All notable changes to this project are recorded here. The format follows
   `ui_payload` (the hook is not shown it); `path` stays. A host that relies on
   one of them surviving a rewrite has to mask it before the tool returns. A
   hook that allows the result changes nothing.
+
+- **`Message.origin` is no longer `conversation` for a message that carries
+  `SYNTHETIC_RECOVERY_METADATA_KEY` or `ORIGIN_METADATA_KEY`.** A host that
+  keeps only `MessageOrigin.conversation` now also leaves out the loop's
+  nudges, wind-down notice, recovery turns and background wake-ups; one that
+  wants them keeps everything but `MessageOrigin.compaction`, which reads as
+  before. A snapshot's
+  serialised `"origin"` changes the same way and is still ignored on load.
 
 ### Fixed
 

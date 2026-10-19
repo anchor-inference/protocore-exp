@@ -140,6 +140,22 @@ class MessageOrigin(StrEnum):
     compaction = "compaction"
     """A record compaction wrote in place of earlier turns. Not the user's
     message; it stands for turns the host already has in their original form."""
+    nudge = "nudge"
+    """A correction the loop wrote to steer the model's next step: continue
+    after a thinking-only or empty answer, call the terminal tool, write the
+    answer as prose first, verify before finishing. Scaffolding; nobody said it."""
+    wind_down = "wind_down"
+    """The notice that the run is being wound down and its tools are gone. Lives
+    only while the run drives; the loop removes it when the run settles."""
+    recovery = "recovery"
+    """Scaffolding the loop wrote to recover from a failure of the model's
+    output: a resume after an output cap or a cut tool call, the corrective
+    turn of the repeated-tool-error breaker, a synthesised tool call that
+    salvages or seals a long file. Also any recovery marker the core does not
+    know by name."""
+    background_wake = "background_wake"
+    """The note that background tasks finished, written for the model so it
+    reads their outcome. Not a caller's turn."""
 
 
 class StopReason(StrEnum):
@@ -240,6 +256,15 @@ scaffolding (e.g. the empty-marker) as the model's durable answer
 (never-fabricate). The value names the source
 (``"post_tool_empty_nudge"`` / ``"guaranteed_terminal_scaffold"``) for
 observability."""
+
+SYNTHETIC_RECOVERY_SOFT_STOP = "soft_stop"
+"""``SYNTHETIC_RECOVERY_METADATA_KEY`` value on the wind-down notification.
+
+Marks the message as the runtime's words rather than the model's, so it cannot
+be mistaken for an answer by the predicates that ask whether the run produced
+one. Defined here, beside the other values, so the origin it maps to is
+decided in one table; :mod:`protocore.runtime.soft_stop` re-exports it.
+"""
 
 SYNTHETIC_RECOVERY_POST_TOOL_EMPTY_NUDGE = "post_tool_empty_nudge"
 """``SYNTHETIC_RECOVERY_METADATA_KEY`` value for the post-tool empty nudge."""
@@ -365,6 +390,53 @@ placed together become one message, so this is how a host tells which of its
 queued items have now reached the model, without reloading its queue, and
 finds the files of an item that are not images.
 """
+
+ORIGIN_METADATA_KEY = "protocore.origin"
+"""``Message.metadata`` key naming a message's :class:`MessageOrigin` outright.
+
+The loop's own injections need no such tag: their origin follows from
+:data:`SYNTHETIC_RECOVERY_METADATA_KEY`. It exists for a host that writes
+scaffolding of its own (a wake-up, a reminder) and wants it read the same way
+as the core's. A value that is not a :class:`MessageOrigin` is ignored, and
+compaction's tags outrank it."""
+
+_ORIGIN_BY_RECOVERY_KIND: dict[str, MessageOrigin] = {
+    SYNTHETIC_RECOVERY_SOFT_STOP: MessageOrigin.wind_down,
+    SYNTHETIC_RECOVERY_BACKGROUND_WAKE: MessageOrigin.background_wake,
+    SYNTHETIC_RECOVERY_POST_TOOL_EMPTY_NUDGE: MessageOrigin.nudge,
+    SYNTHETIC_RECOVERY_THINKING_CONTINUE: MessageOrigin.nudge,
+    SYNTHETIC_RECOVERY_REASONING_CUT: MessageOrigin.nudge,
+    SYNTHETIC_RECOVERY_PRE_TERMINAL_SELF_VERIFY: MessageOrigin.nudge,
+    SYNTHETIC_RECOVERY_LONGFILE_CONTINUE: MessageOrigin.nudge,
+    SYNTHETIC_RECOVERY_TERMINAL_REPAIR: MessageOrigin.nudge,
+    SYNTHETIC_RECOVERY_PROSE_GATE_REPAIR: MessageOrigin.nudge,
+    SYNTHETIC_RECOVERY_PRE_DISPATCH_TERMINAL_VERIFY: MessageOrigin.nudge,
+    SYNTHETIC_RECOVERY_TERMINAL_TOOL_NUDGE: MessageOrigin.nudge,
+    SYNTHETIC_RECOVERY_TRUNCATION_CONTINUE: MessageOrigin.recovery,
+    SYNTHETIC_RECOVERY_MAX_OUTPUT_CONTINUE: MessageOrigin.recovery,
+    SYNTHETIC_RECOVERY_CIRCUIT_BREAKER: MessageOrigin.recovery,
+    SYNTHETIC_RECOVERY_GUARANTEED_TERMINAL: MessageOrigin.recovery,
+    SYNTHETIC_RECOVERY_LONGFILE_SALVAGE: MessageOrigin.recovery,
+    SYNTHETIC_RECOVERY_LONGFILE_TERMINAL_SEAL: MessageOrigin.recovery,
+}
+
+_ORIGIN_VALUES = frozenset(origin.value for origin in MessageOrigin)
+
+
+def synthetic_recovery_origin(kind: object) -> MessageOrigin:
+    """The origin a :data:`SYNTHETIC_RECOVERY_METADATA_KEY` value stands for.
+
+    A value the table does not name — a host's own kind, or one a later build
+    added — is still the loop's scaffolding, so it reads as
+    :attr:`MessageOrigin.recovery` rather than as the conversation. A falsy
+    value marks nothing.
+    """
+    if not kind:
+        return MessageOrigin.conversation
+    if isinstance(kind, str):
+        return _ORIGIN_BY_RECOVERY_KIND.get(kind, MessageOrigin.recovery)
+    return MessageOrigin.recovery
+
 
 COMPACTION_SUMMARY_METADATA_KEY = "protocore.compaction_summary"
 """``Message.metadata`` flag marking a turn as a Tier-2 compaction summary.
@@ -957,13 +1029,15 @@ class Message(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def origin(self) -> MessageOrigin:
-        """Whose message this is: :attr:`MessageOrigin.compaction` for a record compaction wrote.
+        """Whose message this is: the conversation's, compaction's, or the loop's own scaffolding.
 
         Derived from the tags compaction puts on every record it writes
         (:data:`COMPACTION_SUMMARY_METADATA_KEY` on turn and fold summaries and
         on the floor digest, :data:`COMPACTION_LEDGER_METADATA_KEY` on the
-        ledger), so it cannot drift from them and a history saved before the
-        field existed reads the same. Serialised with the message — a snapshot's
+        ledger), then from :data:`ORIGIN_METADATA_KEY`, then from the
+        :data:`SYNTHETIC_RECOVERY_METADATA_KEY` every injection site of the loop
+        sets (see :func:`synthetic_recovery_origin`), so it cannot drift from
+        them and a history saved before the field existed reads the same. Serialised with the message — a snapshot's
         history carries ``"origin"`` on every entry — and ignored on the way
         back in. Never sent to a provider.
 
@@ -978,7 +1052,10 @@ class Message(BaseModel):
             or metadata.get(COMPACTION_LEDGER_METADATA_KEY) is not None
         ):
             return MessageOrigin.compaction
-        return MessageOrigin.conversation
+        declared = metadata.get(ORIGIN_METADATA_KEY)
+        if isinstance(declared, str) and declared in _ORIGIN_VALUES:
+            return MessageOrigin(declared)
+        return synthetic_recovery_origin(metadata.get(SYNTHETIC_RECOVERY_METADATA_KEY))
 
     @property
     def text(self) -> str:
@@ -1737,6 +1814,7 @@ __all__ = [
     "COMPACTION_LEDGER_METADATA_KEY",
     "COMPACTION_SUMMARY_METADATA_KEY",
     "IMAGE_REFS_METADATA_KEY",
+    "ORIGIN_METADATA_KEY",
     "QUEUED_ITEMS_METADATA_KEY",
     "TERMINAL_REFUSAL_NEEDS_WORK_METADATA_KEY",
     "TERMINAL_TOOL_METADATA_KEY",
@@ -1781,4 +1859,5 @@ __all__ = [
     "ToolResultBlock",
     "ToolUseBlock",
     "message_image_refs",
+    "synthetic_recovery_origin",
 ]

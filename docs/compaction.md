@@ -261,8 +261,9 @@ Everything compaction writes into the history — the ledger, the summaries and
 folds, the floor digest — is user-role, because a provider accepts no system
 message past the first. None of it is the user's message, and a host must not
 store or show it as one. Every such message answers `Message.origin` with
-`MessageOrigin.compaction`; everything else answers
-`MessageOrigin.conversation`. The origin is derived from the tags compaction
+`MessageOrigin.compaction`; the loop's own notes answer one of their own
+origins (see [contracts](contracts.md#messages--content)), and the
+conversation answers `MessageOrigin.conversation`. The origin is derived from the tags compaction
 already sets (`protocore.compaction_summary`, `protocore.compaction_ledger`), is
 serialised with the message — each entry of a snapshot's `history` carries
 `"origin"` — and is never sent to a provider, so what the model reads is

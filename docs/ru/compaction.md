@@ -278,8 +278,10 @@ operator's words omitted for room — full text in …]`, и никогда не
 пола — идёт с ролью user, потому что провайдер не принимает system-сообщение
 нигде, кроме начала. Ничто из этого не сообщение пользователя, и хост не
 должен ни хранить, ни показывать это как таковое. Каждое такое сообщение
-отвечает на `Message.origin` значением `MessageOrigin.compaction`, всё
-остальное — `MessageOrigin.conversation`. Происхождение выводится из меток,
+отвечает на `Message.origin` значением `MessageOrigin.compaction`, служебные
+заметки самого цикла — своими значениями (см.
+[контракты](contracts.md#сообщения-и-контент)), а диалог —
+`MessageOrigin.conversation`. Происхождение выводится из меток,
 которые компакция и так ставит (`protocore.compaction_summary`,
 `protocore.compaction_ledger`), сериализуется вместе с сообщением — у каждой
 записи `history` в снимке есть `"origin"` — и никогда не уходит провайдеру,
