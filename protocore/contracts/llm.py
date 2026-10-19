@@ -366,6 +366,26 @@ class LLMObservabilityContext(BaseModel):
     agent_id: str | None = None
     call_purpose: str | None = None
     call_category: str | None = None
+    #: The key a provider routes this conversation's prompt cache by, when it
+    #: is not the session's own. Providers that keep a prompt cache per machine
+    #: route by a key the client names (a body field such as
+    #: ``prompt_cache_key``, or a header), and a request that reaches another
+    #: machine pays for its whole prefix again. A fork that starts with its
+    #: source's history is cached with the source only when it is routed by the
+    #: source's key, so the run states it here (from
+    #: :attr:`~protocore.runtime.query_engine.QueryEngineConfig.cache_key`)
+    #: rather than the adapter learning it through a side channel. ``None``
+    #: means "route by the session"; read it through :meth:`routing_key`.
+    cache_key: str | None = None
+
+    def routing_key(self) -> str | None:
+        """The key to route this request's prompt cache by, or ``None`` for none.
+
+        :attr:`cache_key` when set, else the session, else the run. Never a
+        fixed value: one key shared by every caller would pin all of them to
+        the same machine, which is worse than no key at all.
+        """
+        return self.cache_key or self.session_id or self.run_id or None
 
 
 class LLMRequest(BaseModel):

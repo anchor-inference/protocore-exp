@@ -1,0 +1,9 @@
+data: {"id":"ds-3","object":"chat.completion.chunk","model":"model-d","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":""},"finish_reason":null}]}
+
+data: {"id":"ds-3","object":"chat.completion.chunk","model":"model-d","choices":[{"index":0,"delta":{"content":null,"reasoning_content":"Check the file first."},"finish_reason":null}]}
+
+data: {"id":"ds-3","object":"chat.completion.chunk","model":"model-d","choices":[{"index":0,"delta":{"content":"Done."},"finish_reason":null}]}
+
+data: {"id":"ds-3","object":"chat.completion.chunk","model":"model-d","choices":[{"index":0,"delta":{"content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":900,"completion_tokens":30,"total_tokens":930,"prompt_cache_hit_tokens":768,"prompt_cache_miss_tokens":132,"completion_tokens_details":{"reasoning_tokens":20}}}
+
+data: [DONE]

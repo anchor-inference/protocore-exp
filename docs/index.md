@@ -34,12 +34,13 @@ A new engineer or agent can read these end to end, in this order:
 
 ## Packaging
 
-The distribution is pure Python and installs with two optional extras, neither of
+The distribution is pure Python and installs with three optional extras, none of
 which is needed to run a turn:
 
 | Extra | For | What it adds |
 |---|---|---|
 | `testing` | a host verifying its own adapters | a test runner, so `pytest --pyargs protocore.conformance` runs the packaged conformance suites |
+| `openai` | a host serving models over the OpenAI chat-completions API | `httpx`, for the reference adapter in `protocore.providers.openai_compat` ([Providers](providers.md)) |
 | `dev` | changing the core itself | the full gate toolchain: tests, coverage, lint, types, security |
 
 Token estimation has an optional native implementation, shipped as the separate
@@ -75,6 +76,7 @@ the English [`../README.md`](../README.md) is primary, and the Russian
 | [`compaction.md`](compaction.md) | The compaction contract: invariants, tiers, budgets, carrier, failure states. |
 | [`tools.md`](tools.md) | Lean verb surface, `@tool`, dispatch, and the permission gate. |
 | [`extending.md`](extending.md) | The four extension seams and the rules you must not break. |
+| [`providers.md`](providers.md) | The reference chat-completions adapter, its capabilities and failure mapping, and the provider chain. |
 | [`testing.md`](testing.md) | Running tests, lint, types, security, and the boundary guard. |
 | [`glossary.md`](glossary.md) | Definitions for the terms used across these docs. |
 

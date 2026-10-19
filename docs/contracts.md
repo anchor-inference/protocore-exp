@@ -286,7 +286,10 @@ Three distinct run shapes — do not conflate them (see
 - **`LLMResponse`** — a non-streaming response shape returned by
   `complete_structured` and `complete_text`.
 - **`LLMObservabilityContext`** — the per-call observability context attached to
-  an LLM request.
+  an LLM request. Its `cache_key` (set from `QueryEngineConfig.cache_key`) and
+  `routing_key()` (the key, else the session, else the run) are what an adapter
+  routes the provider's prompt cache by — a `prompt_cache_key` body field or a
+  sticky-routing header — so a fork can be routed with its source.
 - **`IProviderChain`** — not a request/response type; the failover cursor
   `QueryEngine` rebinds onto `self.llm` when a mid-stream provider fails.
 

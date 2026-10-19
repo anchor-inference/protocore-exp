@@ -266,6 +266,61 @@ All notable changes to this project are recorded here. The format follows
   model, the run's own provider last, each call with
   `compaction_summary_timeout_seconds`. A single `compaction_provider` had no
   fallback; it still works, alone, and passing both is refused.
+- **`QueryEngineConfig.cache_key` and `LLMObservabilityContext.cache_key`
+  name the key a provider routes a conversation's prompt cache by.** Every
+  request the run makes carries the configured key; an adapter reads
+  `observability.routing_key()`, which is the key, else the session, else the
+  run, and never a fixed value. A fork names its source's session so its first
+  request, which carries the source's bytes, reaches the machine holding the
+  source's cache. Left unset, the request's context is unchanged and routing
+  follows the session, so recorded manifests keep their identity.
+- **`protocore.providers.chain.ListProviderChain`, a concrete
+  `IProviderChain`.** Rungs (`ChainRung`: name, model, a built provider or an
+  async factory run only when the run reaches the rung, and the rung's context
+  window and output cap) are walked one way under a lock, so two failures
+  arriving together cannot demote past each other. A fallback whose window
+  cannot hold the prompt the run carries (`prompt_tokens`, bound later with
+  `bind_prompt_size`) plus its reply is skipped, as is one a `resting` check
+  names, and one whose factory raises; each is recorded with its reason in
+  `attempted()`. The primary is never checked. Pure Python, no extra needed.
+- **`protocore.providers.openai_compat`, a reference adapter for
+  chat-completions servers, behind the new `openai` extra
+  (`pip install "protocore[openai]"`, which adds `httpx`).**
+  `OpenAICompatibleProvider(EndpointSpec(...))` streams SSE into
+  `ProviderDelta`s: SSE comments and empty chunks become `progress` deltas so
+  a silent think is not cut as a stalled stream; tool calls are assembled from
+  split fragments, and a call whose arguments were cut short is flagged
+  `args_partial_truncated`, and `truncated_by_output_cap` when the output cap
+  cut it; an error chunk after the 200 is a refusal. Every failure carries a
+  `ProviderFailure`: status and body are classified (`Retry-After`,
+  `retry-after-ms` and, on a 429, the rate-limit reset headers become
+  `retry_after_seconds`; a refused structured-output request is marked
+  `should_fallback`), a connection that could not be made or broke is
+  `connection`, and a context refusal is raised as `LLMContextWindowExceeded`
+  with the sizes vLLM, OpenAI, Anthropic-shaped gateways and llama.cpp state.
+  An optional first-byte watchdog resends a request that got no line back,
+  byte for byte, with a `progress` delta before each resend. What differs
+  between servers is data, `ProviderCapabilities`: the thinking dialect
+  (`openai`, `chat_template`, `llama_cpp`, `deepseek`, `openrouter`, `none`)
+  and effort names, whether reasoning text or opaque `reasoning_details` go
+  back on later turns (the latter only to the endpoint and model that wrote
+  them), `tool_choice` support, tool-pair repair (a call without a result gets
+  an explicit "interrupted" error result, a result without a call is dropped),
+  image limits, `cache_control` markers from the core's breakpoints,
+  `cache_prompt`, the output-cap field and partial-argument repair. The
+  request's `routing_key()` goes into a configurable body field or header.
+  Tool schemas keep `additionalProperties`, so a strict forced tool stays
+  strict on the wire. Usage is normalised, including DeepSeek's
+  `prompt_cache_hit_tokens` and a reported `cost`, and the `on_usage` and
+  `on_failure` observers hear every call. See `docs/providers.md`.
+- **An exact request token count for vLLM and llama.cpp servers.** With
+  `EndpointSpec(tokenize=TokenizeDialect.vllm)` (`POST /tokenize` with the
+  chat messages and tools) or `TokenizeDialect.llama_cpp`
+  (`POST /apply-template`, then `POST /tokenize`), the adapter implements
+  `IRequestTokenCounter.count_request_tokens` on the body it would send,
+  template, tools and thinking switch included. A server without the route
+  answers 404 once and is not asked again; the core then uses its estimate,
+  which is also what `count_tokens` returns.
 
 ### Changed
 

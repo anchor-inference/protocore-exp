@@ -52,6 +52,11 @@ templates. The core declares the *shape* as a `Protocol`; the concrete
 implementation lives in the host (or any other consumer) and is
 **injected** across the boundary.
 
+For the two LLM contracts the core also ships reference implementations a host
+may use as they are or subclass: `OpenAICompatibleProvider` for any
+chat-completions server (the `openai` extra) and `ListProviderChain`. See
+[Providers](providers.md).
+
 There is **no single `protocols.py`** — each interface is in its own module under
 `contracts/`. The principal interfaces (one row per seam, full list in the
 [extension-point table](./architecture.md#extension-points-the-protocols-the-host-implements)):

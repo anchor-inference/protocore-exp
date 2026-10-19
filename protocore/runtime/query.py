@@ -1670,6 +1670,7 @@ def _observability_context(
         agent_id=engine.config.subagent_id,
         call_purpose=call_purpose,
         call_category=call_category,
+        cache_key=engine.config.cache_key,
     )
 
 

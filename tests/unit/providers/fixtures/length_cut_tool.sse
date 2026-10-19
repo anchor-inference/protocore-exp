@@ -1,0 +1,7 @@
+data: {"id":"c-6","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_write","type":"function","function":{"name":"Write","arguments":"{\"path\": \"notes.md\", \"content\": \"first line\\nsecond"}}]},"finish_reason":null}]}
+
+data: {"id":"c-6","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: {"id":"c-6","choices":[],"usage":{"prompt_tokens":400,"completion_tokens":4096,"total_tokens":4496}}
+
+data: [DONE]
