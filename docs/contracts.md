@@ -42,7 +42,7 @@ protocore/contracts/
   agent_dispatch.py# IAgentDispatch
   events.py       # IEventStream
   hooks.py        # IHookManager + HookResult / HookSpec / HookActionKind
-  memory.py       # IMemory (+ IMemoryContentScanner)
+  memory.py       # IMemory (+ IProvenanceMemory, IMemoryWritePolicy, IMemoryContentScanner)
   workspace.py    # IWorkspace
   resilience.py   # IToolTransport + IResilienceClassifier (+ the taxonomy)
   prompts.py      # IPromptTemplateProvider
@@ -137,15 +137,18 @@ concrete adapter. Each is one line: the contract and what a host supplies.
 | `IResilienceClassifier` | `contracts/resilience.py` | Which neutral `ResilienceErrorClass` a failure message describes. The wordings belong to whatever the host put behind its tools, and a pattern for them in core is a copy of another codebase that goes stale without a build ever failing. A host that binds none keeps the neutral behaviour: every failure is told apart by its own text and none is recognised as a transport being down. |
 | `IRunToolErrorCounter` | `contracts/run.py` | Durable per-run tool-error counting that survives a process change. |
 | `IMemoryContentScanner` | `contracts/memory.py` | Injection-scanning of memory content on the way in. |
+| `IProvenanceMemory` | `contracts/memory.py` | An `IMemory` whose `write` also takes `provenance=` and keeps it on the record. A separate contract so a store written against `IMemory` alone still conforms; `RememberTool(record_provenance=True)` requires it. |
+| `IMemoryWritePolicy` | `contracts/memory.py` | The host's say over a memory write before it lands: `async review(MemoryWriteRequest) -> MemoryWriteVerdict` classifies (kind, metadata, source refs, salience) or refuses with a message the model reads. Optional; `None` writes as before. |
 | `ITurnPolicy` | `contracts/turn_policy.py` | One product decision about a turn. Not an adapter the host must supply: the core ships its own set, and a host substitutes a policy into it **by name**. |
 
-The **32 `Protocol`s** in `contracts/` are not one flat list of adapters: some
+The **34 `Protocol`s** in `contracts/` are not one flat list of adapters: some
 are stores the host must supply (`ILLMProvider`, `IRunStore`, `ISessionStore`,
 `IBlobStore`, `ISearchIndex`, `ITodoStorage`, `IToolRegistry`, `ISkillStore`,
 `IAgentDispatch`, `IEventStream`, `IHookManager`, `IMemory`, `IWorkspace`,
 `IWorkPool`), some are optional seams that stay inert when nothing is bound
 (`IToolTransport`, `IResilienceClassifier`, `CacheObserverProtocol`,
-`IRequestManifestSink`, `IProviderChain`, `ILifecycleRegistry`), and some are
+`IRequestManifestSink`, `IProviderChain`, `ILifecycleRegistry`,
+`IProvenanceMemory`, `IMemoryWritePolicy`), and some are
 shapes the core hands *back* rather than asks for (`WorkHandle`,
 `BackgroundTaskView`, `ITurnState`, `ClassifiedLike`).
 `IToolSafetyPolicy` (`runtime/tool_permission.py`) is a runtime-registered
@@ -420,6 +423,32 @@ Three distinct run shapes — do not conflate them (see
   carrying a flag attribute, so delegation is a stated capability rather than a
   duck-typed guess.
 - **`Todo`** / **`TodoStatus`** (`StrEnum`) — per-session todo persistence shape.
+
+### Memory
+
+- **`MemoryRecord`** — one typed fact: `scope` / `scope_key`, `kind`, `text`,
+  `metadata`, additive `source_refs`, `salience`, `version` (the drift guard),
+  timestamps and reinforcement counters.
+- **`MemoryProvenance`** — who wrote a record and from where: `source_kind`
+  (conventionally one of `MEMORY_SOURCE_KINDS`: `agent`, `operator`, `import`,
+  `system`, `unknown`), `run_id`, `root_run_id`, `session_id`, `subagent_id`,
+  `message_id`, `tool_call_id`, `observed_at`. Every field is optional and an
+  absent one means *unknown*: an import without a timestamp keeps
+  `observed_at=None` rather than the moment it was copied. It sits on
+  `MemoryRecord.provenance`, `None` by default, so a record stored before the
+  field existed still loads. It names the write that last changed the record:
+  set on CREATE, replaced on MERGE when the merging write carries one, untouched
+  on SKIP — and a different provenance alone never turns a SKIP into a MERGE.
+  Only a store that implements `IProvenanceMemory` is handed one.
+- **`MemoryWriteRequest`** / **`MemoryWriteVerdict`** — what an
+  `IMemoryWritePolicy` is asked and answers. The request is the write as it
+  would land (resolved scope and key, `kind` and whether the model named it,
+  the host's `extra` input fields, the provenance), built after the content
+  scan and the scope rules, so a policy never decides about a write the core
+  would have refused. The verdict is `MemoryWriteVerdict.allow(kind=…,
+  metadata=…, source_refs=…, salience=…)` or `MemoryWriteVerdict.refuse(message)`;
+  a refusal must carry the message the model reads. `result_metadata` is merged
+  into the tool result either way, under the core's own keys.
 
 ---
 

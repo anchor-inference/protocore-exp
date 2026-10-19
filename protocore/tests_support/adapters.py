@@ -51,10 +51,11 @@ from protocore.contracts.llm import (
 )
 from protocore.contracts.memory import (
     DEFAULT_RECALL_SCOPES,
-    IMemory,
+    IProvenanceMemory,
     MemoryConflictError,
     MemoryHit,
     MemoryNotFoundError,
+    MemoryProvenance,
     MemoryRecord,
     MemoryScope,
     MemoryWriteDecision,
@@ -563,8 +564,8 @@ def _token_jaccard(a: str, b: str) -> float:
     return len(ta & tb) / len(ta | tb)
 
 
-class InMemoryMemory(IMemory):
-    """Dict-backed :class:`IMemory` implementing the full behavioural contract.
+class InMemoryMemory(IProvenanceMemory):
+    """Dict-backed :class:`IProvenanceMemory` implementing the full behavioural contract.
 
     Faithful to the spec the docstrings in :mod:`protocore.contracts.memory`
     pin: two-stage idempotent write (lexical similarity gate →
@@ -659,6 +660,7 @@ class InMemoryMemory(IMemory):
         similarity_threshold: float | None = None,
         max_records_per_scope: int | None = None,
         expected_version: int | None = None,
+        provenance: MemoryProvenance | None = None,
     ) -> MemoryWriteResult:
         if not text or not text.strip():
             raise ValueError("memory text must be non-empty")
@@ -702,6 +704,7 @@ class InMemoryMemory(IMemory):
                 metadata=new_meta,
                 source_refs=new_refs,
                 salience=salience,
+                provenance=provenance,
                 version=1,
                 created_at=now,
                 updated_at=now,
@@ -745,6 +748,10 @@ class InMemoryMemory(IMemory):
                 "metadata": merged_meta,
                 "source_refs": merged_refs,
                 "salience": max(best.salience, salience),
+                # Provenance is not information about the fact, so it never
+                # decides MERGE over SKIP above; once the record changes anyway
+                # it names the write that changed it.
+                "provenance": provenance if provenance is not None else best.provenance,
                 "version": best.version + 1,
                 "updated_at": now,
             }

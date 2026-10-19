@@ -159,6 +159,7 @@ _BOUND: tuple[tuple[str, type], ...] = (
     ("IHookManager", InMemoryHookManager),
     ("ILLMProvider", InMemoryLLMProvider),
     ("IMemory", InMemoryMemory),
+    ("IProvenanceMemory", InMemoryMemory),
     ("IRequestManifestSink", InMemoryRequestManifestSink),
     ("IRunStore", InMemoryRunStore),
     ("ISearchIndex", InMemorySearchIndex),

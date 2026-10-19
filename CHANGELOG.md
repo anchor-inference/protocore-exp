@@ -96,6 +96,40 @@ All notable changes to this project are recorded here. The format follows
   source's session to keep its source's mark. `tool_rules_scope(tenant_id,
   session_id=None)` in `protocore.runtime.tool_deferral` is the scope the mark
   is derived from. Left unset, the mark is the tenant's, as before.
+- **Seams for a host to shape the memory tools without copying them**
+  (`protocore.contracts.memory`, `protocore.tools.memory`). `RememberTool`
+  and `RecallTool` take `input_model=`, a subclass of `RememberInput` /
+  `RecallInput` whose extra fields the model is shown; on `Remember` they are
+  content-scanned like the text. `RememberTool(write_policy=...)` asks an
+  `IMemoryWritePolicy` about every write after the scan and the scope rules,
+  with a `MemoryWriteRequest` (resolved scope and key, `kind` and whether the
+  model named it, the extra fields); its `MemoryWriteVerdict` refuses with a
+  message the model reads, or amends kind, metadata, source refs and salience.
+  `RecallTool.search_filters()` passes extra keywords to the store's `search`,
+  `RecallTool.render_hit()` and `RememberTool.describe_write()` shape the lines
+  the model reads, and `RecallTool.screen_recalled()` is the public scan of a
+  recalled value. A host that subclassed the tools and imported their private
+  scope helpers to keep the scope rules from drifting no longer has to.
+  `build_memory_tools(write_policy=...)` threads a policy through. Every seam is
+  off by default and the tools behave as before without them.
+- **Memory provenance: `MemoryProvenance` on `MemoryRecord.provenance`.** Who
+  wrote a record and from where — `source_kind`, `run_id`, `root_run_id`,
+  `session_id`, `subagent_id`, `message_id`, `tool_call_id`, `observed_at` —
+  with every field optional and an absent one meaning unknown. A store opts in
+  by implementing `IProvenanceMemory`, an `IMemory` whose `write` takes
+  `provenance=`; it is a separate contract because a keyword added to
+  `IMemory.write` would fail every existing store's conformance suite. The
+  reference `InMemoryMemory` implements it: set on CREATE, replaced on MERGE,
+  untouched on SKIP, and a different provenance alone never turns a SKIP into
+  a MERGE. `RememberTool(record_provenance=True)` (or
+  `build_memory_tools(record_provenance=True)`) stamps each write with the
+  run, root run, session, subagent and call id the loop vouches for — never
+  anything from the model's arguments — and refuses at construction a store
+  that cannot take the keyword. Off by default: a store written against
+  `IMemory` alone is called exactly as before, and the field defaults to
+  `None`, so stored records without it still load. The `Remember` result's
+  metadata also names the stored `kind`, and `provenance` when the record has
+  one.
 
 ### Changed
 
