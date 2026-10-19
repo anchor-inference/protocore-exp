@@ -147,6 +147,21 @@ All notable changes to this project are recorded here. The format follows
 - **The resilience map knows the two new reasons:** `connection` is
   `timeout_rebuild` and `budget` is `deterministic_abort`.
 
+- **`post_tool_use` now also fires for failed calls**, with two new payload
+  fields on every call: `is_error` (`False` on success) and `error_kind` (the
+  `DispatchErrorKind` value of the surfaced failure, `None` on success). A
+  hook that should only see successes returns `ALLOW` when `is_error` is true.
+  `success` is still sent. A `MODIFY` on a failure replaces the error text
+  everywhere it goes, as on a success.
+- **A `post_tool_use` hook that rewrites a result now replaces the tool's own
+  value, not only the transcript text.** The canonical value used to be kept
+  beside the projection whatever the hook did. After a `MODIFY` with a string
+  `tool_output` the result carries no `canonical_content`, no `canonical_ref`
+  the tool stored itself (the core cannot mask what it points at) and no
+  `ui_payload` (the hook is not shown it); `path` stays. A host that relies on
+  one of them surviving a rewrite has to mask it before the tool returns. A
+  hook that allows the result changes nothing.
+
 ### Fixed
 
 - **A queued steer or follow-up keeps its attachments.**
@@ -167,23 +182,6 @@ All notable changes to this project are recorded here. The format follows
   each item as a `QueuedPrompt` (`id`, `kind`, text, attachments), and the
   stop's `message_stop` event carries them as `restored_queue_items`.
   `restore_queued_prompts` keeps its `list[str]` return as the text-only view.
-- **`post_tool_use` now also fires for failed calls**, with two new payload
-  fields on every call: `is_error` (`False` on success) and `error_kind` (the
-  `DispatchErrorKind` value of the surfaced failure, `None` on success). A
-  hook that should only see successes returns `ALLOW` when `is_error` is true.
-  `success` is still sent. A `MODIFY` on a failure replaces the error text
-  everywhere it goes, as on a success.
-- **A `post_tool_use` hook that rewrites a result now replaces the tool's own
-  value, not only the transcript text.** The canonical value used to be kept
-  beside the projection whatever the hook did. After a `MODIFY` with a string
-  `tool_output` the result carries no `canonical_content`, no `canonical_ref`
-  the tool stored itself (the core cannot mask what it points at) and no
-  `ui_payload` (the hook is not shown it); `path` stays. A host that relies on
-  one of them surviving a rewrite has to mask it before the tool returns. A
-  hook that allows the result changes nothing.
-
-### Fixed
-
 - **A failed tool call no longer bypasses the `post_tool_use` hook.** A tool
   that raised, timed out, returned something other than a `ToolResult`, was
   called with arguments that could not be serialised, was unknown, or was
