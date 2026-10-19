@@ -15,6 +15,7 @@ from protocore.providers.openai_compat.stream import map_finish, sse_events
 
 from ._openai_support import (
     FakeServer,
+    chunk_stream,
     collect,
     kinds,
     provider,
@@ -191,6 +192,20 @@ async def test_an_error_chunk_after_the_200_is_a_classified_refusal() -> None:
 
 
 # The assembler on its own --------------------------------------------------
+
+
+async def test_calls_streamed_without_a_finish_reason_end_the_turn_as_tool_use() -> None:
+    """Some servers end a stream of tool calls with no ``finish_reason`` at all.
+    The finish was read after the open calls were closed and cleared, so it fell
+    back to ``stop`` and the loop took a turn that asked for a tool as finished."""
+    body = chunk_stream(
+        {"choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "id": "c1", "function": {"name": "Read", "arguments": '{"path": "a"}'}}]}}]},
+    )
+    deltas = await collect(provider(FakeServer(sse_response(body))).stream_with_tools(user_request()))
+
+    finish = [delta for delta in deltas if delta.kind is K.finish]
+    assert [delta.finish_reason for delta in finish] == [map_finish("tool_calls")]
 
 
 def test_calls_numbered_alike_are_told_apart_by_id() -> None:

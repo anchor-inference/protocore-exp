@@ -276,6 +276,11 @@ class StreamAssembler:
                     args_partial_truncated=partial,
                 )
             )
+        if self.finish_reason is None and self._calls:
+            # Some servers end a stream of calls with no finish reason. It used to
+            # be read after the calls below were cleared, fell back to ``stop``, and
+            # the loop took a turn that asked for a tool as finished.
+            self.finish_reason = "tool_calls"
         self._calls.clear()
         self._slot_by_index.clear()
         return out
