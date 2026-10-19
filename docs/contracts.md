@@ -122,7 +122,7 @@ concrete adapter. Each is one line: the contract and what a host supplies.
 | `ISkillStore` | `contracts/skills.py` | Skill-bundle storage and lookup **and** the multi-file API: `list_files` / `load_file` returning `SkillFileRef` rows (at minimum the canonical `SKILL.md` / `SKILL_ENTRY_PATH` entry). The **core loop never calls** `list_files` / `load_file` — it catalogs via `list` / `list_enabled_subset` and loads a triggered body via `load` / `list_subset`. Store reads key on `QueryEngineConfig.account_id`, not `tenant_id`. The catalog is rendered by `render_skills_catalog` (+ `derive_skill_index_budget_tokens`) in `runtime/skill_index.py` as `Skill(skill="{name}")` lines, not file paths. |
 | `IHookManager` | `contracts/hooks.py` | Hooks whose executor is out of process (`invoke(event, payload, tenant_id)`), driven at the permission gate and around tool dispatch. |
 | `ILifecycleRegistry` | `contracts/middleware.py` | The one lifecycle seam: observe / decide / transform / around / notify, with an owner, a scope and an idempotent disposer per registration. |
-| `IEventStream` | `contracts/events.py` | Cross-pod durable event stream for SSE reconnect / replay. |
+| `IEventStream` | `contracts/events.py` | Cross-pod durable event stream for SSE reconnect / replay. Must keep every event `event_durability()` calls `durable`; may drop `live_only` ones after fanning them out, and may keep a by-reference payload member once (`payload_by_reference()`). |
 | `IBlobStore` | `contracts/blob.py` | Content-addressed blob storage used by Tier-1 compaction. |
 | `ISearchIndex` | `contracts/search.py` | A generic lexical search index. |
 | `ITodoStorage` | `contracts/todo.py` | Per-session todo persistence. |
@@ -297,6 +297,28 @@ await persister.flush()   # at a terminal state, before handing the session on
   `HistoryPersistError` (cause: the store's exception) while the store is
   behind. Queued writes are process-local, so a crash before the flush loses
   them, and the next run's first hand-over is a rewrite.
+
+#### What an event stream has to keep
+
+`contracts/events.py` says which events an `IEventStream` must keep for
+replay and which payloads it may keep once. Both are hints: a stream that keeps
+everything verbatim is still correct, only larger.
+
+- **`event_durability(name)`** → `EventDurability.durable` or `live_only`.
+  `LIVE_ONLY_EVENT_NAMES` is `content_block_delta` and `tool_use_input_delta`:
+  the text and tool input they carry are in the message by its stop event and
+  in the history after that, so they are fanned out to current subscribers and
+  need not be stored. Every other name, a host's own included, is durable; a
+  host with live-only events of its own passes
+  `live_only=LIVE_ONLY_EVENT_NAMES | {...}`.
+- **`payload_by_reference(name, payload)`** → a `PayloadReference` for an event
+  in `BY_REFERENCE_EVENTS` (today `tool_surface_advertised`, member `tools`):
+  the row's payload with the member replaced by `{"digest", "count"}`, the
+  digest (the emitter's `tool_surface_digest` when it names one, else the
+  SHA-256 of the value's canonical JSON), the value, and `complete`. A store
+  writes a complete value over what it holds for the digest and an abridged one
+  (`tool_surface_described` false) only where it holds nothing. Live
+  subscribers are handed the event as emitted.
 
 ### LLM request / response
 

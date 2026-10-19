@@ -125,7 +125,7 @@ protocore/contracts/
 | `ISkillStore` | `contracts/skills.py` | Хранение и поиск skill-бандлов **и** многофайловый API: `list_files` / `load_file`, возвращающие строки `SkillFileRef` (как минимум каноническая запись `SKILL.md` / `SKILL_ENTRY_PATH`). **Цикл ядра никогда не вызывает** `list_files` / `load_file` — каталог строится через `list` / `list_enabled_subset`, тело по триггеру — через `load` / `list_subset`. Чтения store ключуются по `QueryEngineConfig.account_id`, не по `tenant_id`. Каталог рендерит `render_skills_catalog` (+ `derive_skill_index_budget_tokens`) в `runtime/skill_index.py` строками `Skill(skill="{name}")`, а не путями файлов. |
 | `IHookManager` | `contracts/hooks.py` | Хуки, исполнитель которых живёт вне процесса (`invoke(event, payload, tenant_id)`); цикл ведёт их на гейте разрешений и вокруг диспетча инструмента. |
 | `ILifecycleRegistry` | `contracts/middleware.py` | Единственный шов жизненного цикла: observe / decide / transform / around / notify, с владельцем, скоупом и идемпотентным диспозером у каждой регистрации. |
-| `IEventStream` | `contracts/events.py` | Кросс-подовый долговечный поток событий для переподключения / повтора SSE. |
+| `IEventStream` | `contracts/events.py` | Кросс-подовый долговечный поток событий для переподключения / повтора SSE. Обязан хранить каждое событие, которое `event_durability()` называет `durable`; может отбрасывать `live_only` после раздачи и хранить поле с полезной нагрузкой по ссылке один раз (`payload_by_reference()`). |
 | `IBlobStore` | `contracts/blob.py` | Content-addressed хранилище блобов, используемое компакцией Tier-1. |
 | `ISearchIndex` | `contracts/search.py` | Универсальный лексический поисковый индекс. |
 | `ITodoStorage` | `contracts/todo.py` | Посессионное хранение todo. |
@@ -307,6 +307,28 @@ await persister.flush()   # в терминальном состоянии, до
   отстаёт, он бросает `HistoryPersistError` (причина — исключение хранилища).
   Очередь живёт в процессе, поэтому падение до `flush()` её теряет, и первая
   передача следующего прогона — полная перезапись.
+
+#### Что поток событий обязан хранить
+
+`contracts/events.py` говорит, какие события `IEventStream` обязан хранить для
+повтора и какие полезные нагрузки может хранить один раз. И то и другое —
+подсказки: поток, хранящий всё дословно, по-прежнему корректен, только больше.
+
+- **`event_durability(name)`** → `EventDurability.durable` или `live_only`.
+  `LIVE_ONLY_EVENT_NAMES` — это `content_block_delta` и `tool_use_input_delta`:
+  текст и вход инструмента, которые они несут, оказываются в сообщении к его
+  событию остановки, а затем в истории, поэтому их раздают текущим подписчикам и
+  хранить не обязательно. Любое другое имя, включая собственные события хоста,
+  долговечно; хост со своими live-only событиями передаёт
+  `live_only=LIVE_ONLY_EVENT_NAMES | {...}`.
+- **`payload_by_reference(name, payload)`** → `PayloadReference` для события из
+  `BY_REFERENCE_EVENTS` (сейчас `tool_surface_advertised`, поле `tools`):
+  полезная нагрузка строки с полем, заменённым на `{"digest", "count"}`, дайджест
+  (`tool_surface_digest` эмиттера, если он его назвал, иначе SHA-256
+  канонического JSON значения), само значение и `complete`. Хранилище пишет
+  полное значение поверх того, что держит под дайджестом, а сокращённое
+  (`tool_surface_described` ложно) — только туда, где ничего нет. Живые
+  подписчики получают событие в том виде, в каком оно испущено.
 
 ### LLM-запрос / ответ
 

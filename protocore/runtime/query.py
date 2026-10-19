@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 from protocore.contracts.agent_dispatch import IDelegationTool
 from protocore.contracts.background import describe_finished_task
+from protocore.contracts.events import TOOL_SURFACE_DESCRIBED_FIELD, TOOL_SURFACE_DIGEST_FIELD
 from protocore.contracts.evidence import ToolEvidenceContext
 from protocore.contracts.hooks import HookActionKind
 from protocore.contracts.interrupt import (
@@ -1806,8 +1807,8 @@ def _tool_surface_advertised_payload(
         "turn_id": engine.turn_id(),
         "tool_count": len(tool_names),
         "tool_names": tool_names,
-        "tool_surface_digest": surface.digest,
-        "tool_surface_described": describe,
+        TOOL_SURFACE_DIGEST_FIELD: surface.digest,
+        TOOL_SURFACE_DESCRIBED_FIELD: describe,
         # Discovery order, not name order: it is the order the loaded tools
         # sit in at the end of ``tool_names``, and the order a host hands
         # back as ``QueryEngineConfig.discovered_tools`` for the next run.

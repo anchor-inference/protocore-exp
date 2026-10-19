@@ -141,6 +141,20 @@ All notable changes to this project are recorded here. The format follows
   `HistoryPersistError` while the store is behind; `cancel()` is for a
   shutdown that cannot wait. `attach(engine)` installs it. A store that writes
   inside the hand-over is unaffected.
+- **Event durability hints on the event-stream contract**
+  (`protocore.contracts.events`). `event_durability(name)` returns
+  `EventDurability.live_only` for `LIVE_ONLY_EVENT_NAMES` (`content_block_delta`,
+  `tool_use_input_delta`) — fanned out to subscribers and free to drop, since
+  what they carry reaches the message and the history — and `durable` for every
+  other name, a host's own included. `payload_by_reference(name, payload)`
+  splits an event in `BY_REFERENCE_EVENTS` (`tool_surface_advertised`, member
+  `tools`) into the row's payload, the digest the value is kept under (the
+  runtime's `tool_surface_digest` when named), the value and whether it is the
+  complete copy, so a store keeps one copy of the surface instead of one per
+  run and never lets an abridged copy replace the full one.
+  `TOOL_SURFACE_DIGEST_FIELD` and `TOOL_SURFACE_DESCRIBED_FIELD` name the keys
+  the runtime already writes. Hints only: a stream that keeps every event
+  verbatim is still correct.
 
 ### Changed
 
