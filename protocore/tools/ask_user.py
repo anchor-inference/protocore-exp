@@ -356,6 +356,17 @@ class AskUserTool(Tool):
     # that omits it still keeps it out — see
     # ``ToolRegistry.compute_effective_surface`` always-load semantics.
     always_load: ClassVar[bool] = True
+    # Always loading the tool does not take it out of ToolSearch's ranking,
+    # and a request to be asked ("clarify with me", or the same in Russian)
+    # shares no word with the description above. Without a hint a host subclassed the
+    # tool only to give it one. Joined to the discovery corpus, never sent to
+    # the model.
+    search_hint: ClassVar[str] = (
+        "ask user question options choose clarify confirm pause for answer "
+        "ask me which one "
+        "спросить спроси пользователя уточнить уточни выбрать выбери варианты "
+        "вопрос спроси меня подтвердить"
+    )
 
     @property
     def name(self) -> str:

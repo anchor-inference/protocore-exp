@@ -332,7 +332,9 @@ the core ships none.
 ### Writing a `search_hint`
 
 Descriptions are written for the model, in English; the hint is written for
-the person or model searching. Every host tool should carry one:
+the person or model searching. Every host tool should carry one, as the core's
+own do (`AskUser`, `ToolSearch` and the memory tools; `AskUser` is always loaded
+but still ranked by `ToolSearch`):
 
 - **8–14 English synonyms** for the action and its object, not repeating the
   tool's name ("screenshot capture snap picture image page").

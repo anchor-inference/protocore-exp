@@ -96,6 +96,11 @@ All notable changes to this project are recorded here. The format follows
   source's session to keep its source's mark. `tool_rules_scope(tenant_id,
   session_id=None)` in `protocore.runtime.tool_deferral` is the scope the mark
   is derived from. Left unset, the mark is the tenant's, as before.
+- **The core's `AskUser` carries a `search_hint`** (English and Russian), like
+  the other core tools. It is always loaded, but `ToolSearch` still ranks it,
+  and a request to be asked shares no word with its description. A host that
+  subclassed the tool only to add a hint can drop the subclass; one that wants
+  its own hint still overrides the class attribute.
 
 ### Changed
 
