@@ -45,9 +45,20 @@ All notable changes to this project are recorded here. The format follows
   above the count and compacted a third of a window that was still free.
   `ContextManager.needs_compaction` and `needs_emergency_compaction` take the
   measured size as `current_tokens`.
+- **`QueryEngine(tool_safety_policies=...)`** sets the safety policies the
+  tool permission gate runs: `None` for the core's default stack, `[]` for
+  none, a sequence for exactly those. The engine builds the dispatcher around
+  them with the run's tool-error counter, the tool roles and the resilience
+  classifier. A host that replaced the engine's dispatcher to install its own
+  policies built it without those three, and lost the error count, role-aware
+  transport-down detection and classification from every run. A re-arm keeps
+  the policies. See `docs/extending.md`.
 
 ### Changed
 
+- **`ToolPermissionGate(policies=[])` installs no policy.** An empty list read
+  as "use the defaults", so a host that passed one to turn the shell deny list
+  off still had it. Only `None` means the defaults now.
 - **A group's rules join the catalogue in the request after the load.** The
   catalogue took a group loaded mid-run only at the next run's first decision,
   so the system prompt changed one run after the tool list did and a session

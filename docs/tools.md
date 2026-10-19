@@ -134,9 +134,10 @@ one policy:
   the core does not know where to look.
 
 `HttpDnsAllowlistPolicy` and `WorkspacePathPolicy` are provided but **not** in
-the default stack; the host stacks them on at runtime via `register_policy`,
-which keeps the core API frozen. The gate is always on. The `pre_tool_use`
-coordinate is the highest-leverage seam for an LLM-as-policy gate.
+the default stack; the host passes the stack its runs enforce as
+`QueryEngine(tool_safety_policies=...)` — `None` for the default above, `[]`
+for none, a list for exactly those (see [`extending.md`](./extending.md)).
+The gate is always on. The `pre_tool_use` coordinate is the highest-leverage seam for an LLM-as-policy gate.
 
 See the [Permission gate](architecture.md#dispatch-roles-the-canonical-result-and-pairing-repair) section for the
 gate's place in the dispatch flow and the side-effect class map.
@@ -909,9 +910,10 @@ repeated call with a side effect applies that effect twice.
   register the resulting `ToolDefinition` with the `IToolRegistry`.
 - **Control visibility:** set `visible` / `blocked` / `pinned` on a
   `ToolVisibilityPolicy`.
-- **Add a safety check:** implement `IToolSafetyPolicy` and register it with
-  `ToolPermissionGate.register_policy` — it evaluates after the defaults; the
-  core gate stays frozen.
+- **Add a safety check:** implement `IToolSafetyPolicy` and pass it in
+  `QueryEngine(tool_safety_policies=...)`, after `ShellSafetyPolicyAdapter` if
+  the run should keep the shell deny list; the engine builds the gate around
+  them.
 - **Declare what it does:** add the tool's `ToolRole`s and argument slots to the
   `ToolRoleMap` you pass as `QueryEngineConfig.tool_roles`. A tool the map does
   not describe still runs; what it loses is every behaviour that depends on

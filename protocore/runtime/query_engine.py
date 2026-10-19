@@ -121,6 +121,7 @@ from protocore.runtime.usage import TokenUsage
 _logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from protocore.runtime.tool_permission import IToolSafetyPolicy
     from protocore.runtime.turn_policies import TurnPolicyRegistry
 
 
@@ -829,6 +830,9 @@ class QueryEngine:
             "tools",
             "events",
             "hooks",
+            # The host's safety policies are its standing choice, not a turn's
+            # allowance; the dispatcher a re-arm drops is rebuilt from them.
+            "tool_safety_policies",
             "skills",
             "blobs",
             "lifecycle_hooks",
@@ -987,6 +991,7 @@ class QueryEngine:
         provider_chain: IProviderChain | None = None,
         background_pool: IBackgroundTaskPool | None = None,
         lifecycle_hooks: ILifecycleRegistry | None = None,
+        tool_safety_policies: Sequence[IToolSafetyPolicy] | None = None,
     ) -> None:
         self.config = config
         self.llm: ILLMProvider = llm_provider
@@ -1004,6 +1009,15 @@ class QueryEngine:
         # The lifecycle seam. ``None`` is a host that registered nothing, and
         # the loop's coordinates then cost one attribute read apiece.
         self.lifecycle_hooks: ILifecycleRegistry | None = lifecycle_hooks
+        # The policies the tool permission gate runs on each call. ``None`` is
+        # the core's defaults, an empty tuple is none, and a sequence is
+        # exactly those. Taken here so the dispatcher the run builds is the
+        # core's own: a host that built one itself to install its policies
+        # lost the run's error counter, the tool roles and the resilience
+        # classifier, and every parameter the dispatcher gains after it.
+        self.tool_safety_policies: tuple[IToolSafetyPolicy, ...] | None = (
+            None if tool_safety_policies is None else tuple(tool_safety_policies)
+        )
         self.skills = skill_store
         self.blobs = blob_store
 

@@ -53,6 +53,10 @@ _PROCESS_LOCAL: dict[str, str] = {
         "provider_chain_model_name, and the engine is re-seated onto it."
     ),
     "compaction_llm": "the summarising provider is injected by the host.",
+    "tool_safety_policies": (
+        "policy objects the host constructs, often bound to its own state; the "
+        "host passes them again to the engine it resumes into."
+    ),
     "_dispatched_history": (
         "weak references to the message objects a request was built from; a "
         "resumed run's history is new objects, so they could not match it."

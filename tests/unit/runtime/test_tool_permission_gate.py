@@ -168,6 +168,21 @@ async def test_bash_rm_rf_denied() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_empty_policy_list_installs_no_policy() -> None:
+    """``[]`` is a host saying it wants none; only ``None`` means the defaults.
+    The two used to collapse, so a host that turned the deny list off got it
+    back without being told."""
+    gate = ToolPermissionGate(policies=[], roles=CONVENTIONAL_TOOL_ROLES)
+    decision = await gate.check(
+        tool=MockTool(tool_name="Bash"),
+        arguments={"command": "rm -rf /"},
+        ctx=make_default_ctx(),
+        visibility_policy=ToolVisibilityPolicy(),
+    )
+    assert decision.outcome is ToolPermissionOutcome.allow
+
+
+@pytest.mark.asyncio
 async def test_bash_safe_command_allowed() -> None:
     gate = ToolPermissionGate(roles=CONVENTIONAL_TOOL_ROLES)
     tool = MockTool(tool_name="Bash")
