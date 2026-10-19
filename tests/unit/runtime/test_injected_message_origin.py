@@ -139,6 +139,7 @@ async def test_the_post_tool_empty_nudge_pair_is_a_nudge(engine_factory, in_memo
 _UNMARKED_ON_PURPOSE: dict[tuple[str, str], str] = {
     ("compact_checkpoint.py", "apply_checkpoint"): "a placeholder replaced two lines later by the tagged summary",
     ("context/compaction.py", "_run_summariser"): "the summariser's own request, never put into history",
+    ("context/session_compaction.py", "call"): "a session summariser's own request, never put into history",
     ("context/session_memory.py", "bound_catchup_source"): "a gap marker inside a summariser's source text",
     ("context/session_memory.py", "_summary_message"): "a cross-run seed, tagged by _tag_seeded_reference",
     ("context/session_memory.py", "_ledger_message"): "a cross-run seed, tagged by _tag_seeded_reference",

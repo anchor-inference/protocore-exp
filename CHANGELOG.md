@@ -126,6 +126,27 @@ All notable changes to this project are recorded here. The format follows
   with the new `protocore.runtime.history_persist.history_rewrite`. A host
   labels the summary from them instead of diffing two histories.
 
+- **Session compaction between runs
+  (`protocore.runtime.context.session_compaction`).** `compact_session(history,
+  summarisers=[Summariser(provider, model), ...])` replaces all but a kept tail
+  with one summary and returns the new history (`SessionCompaction`) without
+  writing anything: the previous summary is the base it updates, a long
+  transcript is summarised in parallel parts merged in rounds, the summary's
+  sections are checked with one retry, the summarisers form a ladder with
+  fallback, transient failures are retried after a pause (a rate limit and a
+  refusal are not), a stalled call gets one more try at twice the time, and the
+  kept tail never splits a tool exchange. `commit_session_compaction(engine,
+  result)` commits through `replace_history` only while the summarised prefix is
+  unchanged and no turn drives; cancelling leaves the history untouched.
+  `CompactionHold` / `CompactionHoldPolicy` are the back-off after a failed or
+  low-yield pass, as a value the host persists. The prompt texts are
+  `SummaryPrompts` parameters with generic defaults.
+- **`QueryEngine(compaction_providers=[Summariser(...), ...])`** gives the
+  in-run summariser tiers a ladder (`SummariserLadder`): each rung with its own
+  model, the run's own provider last, each call with
+  `compaction_summary_timeout_seconds`. A single `compaction_provider` had no
+  fallback; it still works, alone, and passing both is refused.
+
 ### Changed
 
 - **`ToolPermissionGate(policies=[])` installs no policy.** An empty list read

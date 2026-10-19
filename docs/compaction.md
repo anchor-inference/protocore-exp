@@ -313,6 +313,71 @@ the same way.
 the size of the history it had just shrunk, and nearly half the compactions of
 a long session re-summarised a tail the previous one had already made small.
 
+### Compacting a session
+
+`protocore.runtime.context.session_compaction.compact_session(history,
+summarisers=[...], ...)` replaces all but a kept tail of a history with one
+summary, and returns the new history without writing anything
+(`SessionCompaction`); `commit_session_compaction(engine, result)` puts it into
+an engine through `replace_history`, and `result.apply(history)` builds it for a
+host's own store. Its clauses:
+
+- **The previous summary is the base.** Compaction records at the head of the
+  history (`leading_summaries`) go to the summariser whole, inside
+  `<previous-summary>`, with `SummaryPrompts.base_rule`; the transcript after
+  them is rendered whole (`render_for_summary`): the user's words never cut,
+  agents' text, notes and tool exchanges cut in the middle past their bounds,
+  the ledger and the loop's scaffolding (`nudge`, `wind_down`, `recovery`) left
+  out. *Why.* A summary re-condensed as part of a clipped transcript broke the
+  chain at every pass, and a session kept only its last topic.
+- **Parts, merged in rounds.** A transcript longer than
+  `SessionCompactionSettings.chunk_tokens` is cut on line ends into parts
+  summarised in parallel (at most `parallel_calls` at once); while the notes are
+  still longer than one part they are merged in groups of at least two, up to
+  `merge_rounds_max` rounds; the last merge is made onto the base.
+- **Sections, checked once more.** A summary that lacks one of
+  `SummaryPrompts.sections`, repeats one or reorders them is asked for again
+  with `SummaryPrompts.retry` naming the problem; a second miss is accepted and
+  reported as `section_problem`. The word budget grows with the window
+  (`words_for`).
+- **A ladder of summarisers.** `summarisers` are tried in order; a provider
+  error, a timeout or an empty answer hands over to the next, and
+  `SessionCompactionFailed` lists every rung's failure when none answered.
+  *Why.* A summary model past its limit ended a compaction in a bare error
+  while the session's own model stood ready.
+- **Retries.** A retryable failure is asked again after each of
+  `retry_pauses`; a rate limit and a permanent refusal go to the next rung at
+  once; a call that exceeds `call_timeout_seconds` gets one more try at twice
+  that.
+- **The kept tail starts at a turn boundary** (`session_compaction_cut`): a
+  user's own turn, never a tool result or scaffolding, so no tool exchange is
+  split. The newest ledger is carried past the summariser unchanged, after the
+  summary. `decorate` adds code-written text (quotes, an index, a pointer to an
+  archive) to the summary before it is wrapped, and the summary carries the
+  user's passages under `OPERATOR_WORDS_METADATA_KEY` for the next pass.
+- **Atomic and cancellable.** Nothing is held while the summary is made. The
+  result keeps the summarised prefix by identity and applies only while the
+  history still starts with exactly those messages: turns appended meanwhile
+  are kept after the summary; a changed summarised message makes it stale, and
+  `commit_session_compaction` returns `None` with the history untouched — as it
+  does while a turn is driving. Setting `cancel`, or cancelling the task,
+  raises `SessionCompactionCancelled` and leaves nothing behind.
+
+`CompactionHold` and `CompactionHoldPolicy` are the pause on automatic
+compaction a host persists (`to_dict` / `from_dict`): after a failure for
+`retry_seconds`, doubling per failure up to `retry_max_seconds`; after a pass
+that left the prompt over the trigger or freed less than `min_freed_ratio`,
+until the prompt grows; either ends when the prompt grows by `growth_ratio` of
+the window. *Why.* A session whose summariser timed out was held three minutes
+per message and never shrank.
+
+Inside a run, `QueryEngine(compaction_providers=[Summariser(provider, model),
+...])` gives the tiers the same ladder (`SummariserLadder`): each rung is asked
+with its own model and the run's own provider is the last rung. Each call gets
+`compaction_summary_timeout_seconds`, and the whole exchange one such deadline
+per rung. `compaction_provider` (one provider, no fallback) still works and
+cannot be combined with it.
+
 ## Budget arithmetic
 
 With `O = min(W × llm_output_max_tokens_ratio, llm_output_min_tokens)` when the

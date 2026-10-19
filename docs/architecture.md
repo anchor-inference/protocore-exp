@@ -569,6 +569,15 @@ crashes. The shared assistant loop is **not** a single immutable path:
   keeping the seed tag. `compaction_completed` reports every tier and the
   pass's `outcome`; both instructions are templates
   (`compaction_turn_summary`, `compaction_fold_summary`).
+- `runtime/context/session_compaction.py` — compaction between runs, outside
+  the loop: `compact_session` summarises all but a kept tail into one summary
+  built on the previous one (parts in parallel, merged in rounds, sections
+  checked, a ladder of summarisers, retries) and returns the new history
+  without writing it; `commit_session_compaction` applies it through
+  `QueryEngine.replace_history` only while the summarised prefix is unchanged.
+  `CompactionHoldPolicy` is the back-off after a failed or low-yield pass, and
+  `SummariserLadder` is what `QueryEngine(compaction_providers=...)` gives the
+  in-run tiers. See [compaction](compaction.md#between-runs).
 - `runtime/stale_result_trim.py` — the prompt-shrinking pass that costs no LLM
   call. RC-gated by `tool_result_stale_trim_enabled` (**off by default**), it
   rewrites the REQUEST view only — `engine.history` keeps every byte, so

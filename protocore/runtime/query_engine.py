@@ -109,6 +109,11 @@ from protocore.prompts import bundled_prompt_provider
 from protocore.runtime.candidate_delivery import CandidateDeliveryGate
 from protocore.runtime.context.compaction import CompactionState
 from protocore.runtime.context.manager import ContextManager
+from protocore.runtime.context.session_compaction import (
+    Summariser,
+    SummariserLadder,
+    _weak_fallback,
+)
 from protocore.runtime.deadline_clock import (
     consumed_deadline_seconds,
     restore_deadline_clock,
@@ -1038,7 +1043,10 @@ class QueryEngine:
         background_pool: IBackgroundTaskPool | None = None,
         lifecycle_hooks: ILifecycleRegistry | None = None,
         tool_safety_policies: Sequence[IToolSafetyPolicy] | None = None,
+        compaction_providers: Sequence[Summariser] | None = None,
     ) -> None:
+        if compaction_providers and compaction_provider is not None:
+            raise ValueError("pass compaction_provider or compaction_providers, not both")
         self.config = config
         self.llm: ILLMProvider = llm_provider
         # The consumer's remaining model preferences. ``None`` — every caller
@@ -1048,7 +1056,19 @@ class QueryEngine:
         # the loop rebinds BOTH on an advance, because the endpoint, the key and
         # the capability flags travel with the provider, not with its name.
         self.provider_chain: IProviderChain | None = provider_chain
-        self.compaction_llm: ILLMProvider = compaction_provider or llm_provider
+        # The in-run tiers summarise with the first of ``compaction_providers``
+        # that answers and fall back to the run's own provider; a single
+        # ``compaction_provider`` has no fallback, and none at all means the
+        # run's own provider, as before.
+        self.compaction_llm: ILLMProvider = (
+            SummariserLadder(
+                compaction_providers,
+                fallback=_weak_fallback(self),
+                per_call_timeout_seconds=config.rc.compaction_summary_timeout_seconds,
+            )
+            if compaction_providers
+            else compaction_provider or llm_provider
+        )
         self.tools = tool_registry
         self.events = event_stream
         self.hooks = hook_manager
