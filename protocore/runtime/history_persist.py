@@ -59,6 +59,7 @@ dropped are never offered again.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -67,7 +68,7 @@ from protocore.contracts.types import Message
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from protocore.runtime.query_engine import QueryEngine
 
-__all__ = ["HistoryDelta", "HistoryPersister", "persist_history"]
+__all__ = ["HistoryDelta", "HistoryPersister", "history_rewrite", "persist_history"]
 
 
 @dataclass(frozen=True)
@@ -178,3 +179,24 @@ def persist_history(engine: QueryEngine) -> None:
         return
     engine.note_history_persisted(history)
     engine.note_session_state_persisted()
+
+
+def history_rewrite(before: Sequence[Message], after: Sequence[Message]) -> dict[str, object]:
+    """Which messages of ``before`` are gone from ``after``, and which of ``after`` are new, by position.
+
+    Compared by identity, like the persist marker: a message compaction touched
+    is a new object even where its text is the same, and an untouched one is
+    the very object it was. Messages carry no id of their own, so positions are
+    what a store can act on — ``replaced_indices`` index the history the store
+    was handed just before the pass, ``inserted_indices`` the history after it.
+    ``before`` must hold its messages strongly for the comparison to be sound:
+    an object freed in between could hand its identity to a new one.
+    """
+    kept = {id(message) for message in after}
+    known = {id(message) for message in before}
+    return {
+        "replaced_indices": [index for index, message in enumerate(before) if id(message) not in kept],
+        "inserted_indices": [index for index, message in enumerate(after) if id(message) not in known],
+        "history_messages_before": len(before),
+        "history_messages_after": len(after),
+    }

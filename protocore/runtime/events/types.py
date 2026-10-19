@@ -79,6 +79,11 @@ class EventType(StrEnum):
     HEARTBEAT = "heartbeat"
     COMPACTION_STARTED = "compaction_started"
     COMPACTION_COMPLETED = "compaction_completed"
+    # The history was rewritten outside the loop (a compaction between runs, a
+    # revert, a clear, an import) through ``QueryEngine.replace_history``:
+    # payload ``{reason, messages_before, messages_after, prompt_tokens_before,
+    # prompt_tokens_after}``.
+    HISTORY_REPLACED = "history_replaced"
     RUN_SETTLED = "run_settled"
     LOOP_GUARD_FIRED = "loop_guard_fired"
     TOOL_RESULT_EVICTED = "tool_result_evicted"

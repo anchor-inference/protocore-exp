@@ -46,6 +46,7 @@ from protocore.contracts.outcome import RunCause, RunOutcome
 from protocore.contracts.tool_registry import ToolVisibilityPolicy
 from protocore.contracts.types import (
     SYNTHETIC_RECOVERY_METADATA_KEY,
+    SYNTHETIC_RECOVERY_SOFT_STOP,
     Message,
     MessageRole,
     TextBlock,
@@ -57,15 +58,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from protocore.runtime.query_engine import QueryEngine
 
 _logger = get_logger(__name__)
-
-
-SYNTHETIC_RECOVERY_SOFT_STOP: Final[str] = "soft_stop"
-"""``SYNTHETIC_RECOVERY_METADATA_KEY`` value on the wind-down notification.
-
-Marks the message as the runtime's words rather than the model's, so it cannot
-be mistaken for an answer by the predicates that ask whether the run produced
-one.
-"""
 
 
 # ---- causes ---------------------------------------------------------------

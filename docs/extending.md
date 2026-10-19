@@ -475,6 +475,37 @@ core's own ceilings with it, which is exactly the failure the merge prevents.
 
 ---
 
+### Compact a session between runs
+
+**Use when** the session outlives its runs and its history must shrink between
+them. Do not write the summariser loop yourself; give the core your words and
+your models:
+
+```python
+from protocore.runtime.context.session_compaction import (
+    CompactionHoldPolicy, Summariser, SummaryPrompts,
+    commit_session_compaction, compact_session,
+)
+
+result = await compact_session(
+    engine.history,
+    summarisers=[Summariser(cheap_provider, "small-model"), Summariser(engine.llm, engine.effective_model_name)],
+    keep_recent_messages=20,
+    prompts=SummaryPrompts(sections=("Rules", "Facts", "Threads"), section_rules=OUR_RULES),
+    decorate=add_our_quotes,
+)
+if await commit_session_compaction(engine, result) is None:
+    ...  # a run started or the history changed meanwhile: nothing was replaced
+```
+
+The summary is made without holding the session, so take your lock only around
+the commit. Persist the `CompactionHold` that `CompactionHoldPolicy` returns
+after a failed or low-yield pass and ask `policy.holds(...)` before the next
+automatic one. Section texts and the rendering are yours; everything else is in
+[compaction](compaction.md#compacting-a-session).
+
+---
+
 ## Hard rules (do not cross these)
 
 Two rules bound every extension. Violating either is a process failure, not a

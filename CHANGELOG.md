@@ -164,6 +164,56 @@ All notable changes to this project are recorded here. The format follows
   carried in the snapshot (`classified_reasoning_effort`). Unset, the effort is
   chosen as before.
 
+- **`MessageOrigin` names the loop's own messages: `nudge`, `wind_down`,
+  `recovery` and `background_wake`.** Every message the loop writes for itself
+  already carried `SYNTHETIC_RECOVERY_METADATA_KEY`; `Message.origin` now maps
+  its kind (`synthetic_recovery_origin()`), so a host that hides control notes
+  from a transcript filters on the origin instead of matching a template's
+  wording, which broke whenever a template changed. `ORIGIN_METADATA_KEY`
+  (`"protocore.origin"`) lets a host give its own scaffolding an origin the
+  same way; compaction's tags still outrank both. `SYNTHETIC_RECOVERY_SOFT_STOP`
+  now lives in `protocore.contracts.types` beside the other kinds and is still
+  importable from `protocore.runtime.soft_stop`.
+
+- **`QueryEngine.replace_history(messages, *, reason)` rewrites the history
+  from outside the loop** — a compaction between runs, a revert, a clear, an
+  import — and retires what the old history left behind: the compaction
+  checkpoint, the compaction state and its back-offs, the persist marker (the
+  next hand-over is a rewrite) and the prompt measurement, which it re-sizes by
+  scaling the provider's last count by the share of history that survived. It
+  emits the new `EventType.HISTORY_REPLACED` and returns it, and raises while a
+  turn is driving. A host that assigned `engine.history` and reset the fields by
+  hand missed the measurement, and the next turn re-compacted a history the
+  last pass had already shrunk.
+
+- **`compaction_completed` says what the pass replaced:** `replaced_indices`
+  (positions in the history handed to the store just before the pass),
+  `inserted_indices` (positions of what it wrote in the history after it),
+  `history_messages_before` and `history_messages_after`, compared by identity
+  with the new `protocore.runtime.history_persist.history_rewrite`. A host
+  labels the summary from them instead of diffing two histories.
+
+- **Session compaction between runs
+  (`protocore.runtime.context.session_compaction`).** `compact_session(history,
+  summarisers=[Summariser(provider, model), ...])` replaces all but a kept tail
+  with one summary and returns the new history (`SessionCompaction`) without
+  writing anything: the previous summary is the base it updates, a long
+  transcript is summarised in parallel parts merged in rounds, the summary's
+  sections are checked with one retry, the summarisers form a ladder with
+  fallback, transient failures are retried after a pause (a rate limit and a
+  refusal are not), a stalled call gets one more try at twice the time, and the
+  kept tail never splits a tool exchange. `commit_session_compaction(engine,
+  result)` commits through `replace_history` only while the summarised prefix is
+  unchanged and no turn drives; cancelling leaves the history untouched.
+  `CompactionHold` / `CompactionHoldPolicy` are the back-off after a failed or
+  low-yield pass, as a value the host persists. The prompt texts are
+  `SummaryPrompts` parameters with generic defaults.
+- **`QueryEngine(compaction_providers=[Summariser(...), ...])`** gives the
+  in-run summariser tiers a ladder (`SummariserLadder`): each rung with its own
+  model, the run's own provider last, each call with
+  `compaction_summary_timeout_seconds`. A single `compaction_provider` had no
+  fallback; it still works, alone, and passing both is refused.
+
 ### Changed
 
 - **`ToolPermissionGate(policies=[])` installs no policy.** An empty list read
@@ -238,6 +288,32 @@ All notable changes to this project are recorded here. The format follows
   resumed into bound no pool. A host that watched for the old report on fresh
   runs to detect a missing pool binds the pool, or checks
   `engine.background_pool` itself.
+
+- **`Message.origin` is no longer `conversation` for a message that carries
+  `SYNTHETIC_RECOVERY_METADATA_KEY` or `ORIGIN_METADATA_KEY`.** A host that
+  keeps only `MessageOrigin.conversation` now also leaves out the loop's
+  nudges, wind-down notice, recovery turns and background wake-ups; one that
+  wants them keeps everything but `MessageOrigin.compaction`, which reads as
+  before. A snapshot's
+  serialised `"origin"` changes the same way and is still ignored on load.
+
+- **The snapshot carries `prompt_anchor`** (`model`, `prompt_tokens`,
+  `prefix_length`: the provider's last count and how much of the history it
+  covered), and a resumed run sizes its prompt from it instead of from the
+  estimate while that prefix is still the start of the history. Optional on the
+  way in and read leniently, so the schema stays at version 8: a payload
+  without it, or with one that does not fit the history, resumes on the
+  estimate as before. A consumer that wants the old reading drops the key from
+  the payload before resuming.
+
+- **The loop hands the history to the session store before each compaction
+  inside a run** (`persist_history` before `compaction_started`, on both the
+  proactive and the reactive path). The rounds a run produced since the last
+  hand-over used to reach the store only as the compacted result, so a host
+  transcribed the history itself on that event. A delta store now sees one more
+  append before the pass and the rewrite at the next hand-over; a store that
+  writes the history whole is called once more per pass. Nothing turns it off:
+  a host that does not want the extra write ignores a delta that only appends.
 
 ### Fixed
 

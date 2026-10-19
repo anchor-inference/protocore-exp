@@ -174,14 +174,25 @@ Every conversation primitive flows as one of these Pydantic models (the
 - **`Message`** — the sole conversation primitive (role-scoped). Assistant turns
   carry `content_blocks` (text + tool_use + thinking interleaved).
 - **`MessageRole`** (`StrEnum`) — `system` · `user` · `assistant` · `tool`.
-- **`MessageOrigin`** (`StrEnum`) — `conversation` · `compaction`; read as
-  `Message.origin`. Compaction's records (ledger, summaries, floor digest) are
-  user-role but `compaction` in origin, so a host that persists or shows
-  history does not take them for the user's turn (see
-  [compaction](compaction.md#13-its-records-are-marked-as-its-own)). The
-  origin is derived from the message's tags and cannot be set:
-  `Message(origin=...)` is accepted and ignored. Set the tag instead
-  (`COMPACTION_SUMMARY_METADATA_KEY: True` in `metadata`).
+- **`MessageOrigin`** (`StrEnum`) — `conversation` · `compaction` · `nudge` ·
+  `wind_down` · `recovery` · `background_wake`; read as `Message.origin`.
+  Compaction's records (ledger, summaries, floor digest) are user-role but
+  `compaction` in origin, so a host that persists or shows history does not
+  take them for the user's turn (see
+  [compaction](compaction.md#13-its-records-are-marked-as-its-own)). Every
+  message the loop writes for itself carries a non-conversation origin as well:
+  a correction of the model's next step is a `nudge`, the notice that the run
+  is wound down is `wind_down`, a resume after a cut answer, the tool-error
+  breaker's turn or a synthesised salvage call is `recovery`, and the note that
+  background tasks finished is `background_wake`. A host filters on the value
+  instead of matching the wording of a template. The origin is derived from the
+  message's tags and cannot be set: `Message(origin=...)` is accepted and
+  ignored. It reads, in order, the compaction tags
+  (`COMPACTION_SUMMARY_METADATA_KEY: True`), `ORIGIN_METADATA_KEY`
+  (`"protocore.origin"`, a `MessageOrigin` value — for a host's own
+  scaffolding), and the loop's `SYNTHETIC_RECOVERY_METADATA_KEY`, whose kinds
+  `synthetic_recovery_origin()` maps; a kind it does not name reads as
+  `recovery`.
 - **`ContentBlock`** — a **union type**, not a class:
   `TextBlock | ThinkingBlock | ImageRefBlock | ToolUseBlock | ToolResultBlock`.
 - **`ContentBlockKind`** (`StrEnum`) — the discriminant: `text` · `thinking` ·

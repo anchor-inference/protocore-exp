@@ -309,6 +309,9 @@ _WHOLE_HISTORY_BY_DESIGN: dict[str, _Declaration] = {
         "said, and a marker covering any less of it would let the next "
         "hand-over append onto rows that were never written"
     ),
+    "protocore/runtime/history_persist.py::history_rewrite": _whole(
+        "compares the whole transcript before and after a compaction pass, by identity"
+    ),
     "protocore/runtime/history_persist.py::persist_history": _whole(
         "hands the session store what changed in the session transcript: what "
         "is persisted is the whole of what the session has said, because that "
@@ -704,6 +707,36 @@ _WHOLE_HISTORY_BY_DESIGN: dict[str, _Declaration] = {
     ),
     "protocore/runtime/query_engine.py::QueryEngine.prompt_tokens_now": _whole(
         "token accounting over the whole transcript, anchored on the provider's count of its prefix"
+    ),
+    "protocore/runtime/query_engine.py::QueryEngine._live_prompt_anchor": _whole(
+        "compares the counted prefix with the start of the whole transcript, by identity"
+    ),
+    "protocore/runtime/query_engine.py::QueryEngine.replace_history": _whole(
+        "replaces the whole session transcript and re-sizes the prompt from both of them"
+    ),
+    "protocore/runtime/context/session_compaction.py::SessionCompaction.applies_to": _whole(
+        "compares the start of the whole session transcript with the prefix a summary replaces"
+    ),
+    "protocore/runtime/context/session_compaction.py::SessionCompaction.apply": _whole(
+        "builds the whole session transcript with the summarised prefix replaced"
+    ),
+    "protocore/runtime/context/session_compaction.py::_operator_passages": _whole(
+        "collects the user's passages of everything a session summary replaces"
+    ),
+    "protocore/runtime/context/session_compaction.py::commit_session_compaction": _whole(
+        "commits a session summary over the whole transcript, between runs"
+    ),
+    "protocore/runtime/context/session_compaction.py::compact_session": _whole(
+        "summarises the whole session transcript but its kept tail, between runs"
+    ),
+    "protocore/runtime/context/session_compaction.py::leading_summaries": _whole(
+        "finds the summaries at the head of the whole session transcript"
+    ),
+    "protocore/runtime/context/session_compaction.py::render_for_summary": _whole(
+        "renders the part of the session transcript a summary replaces, across runs"
+    ),
+    "protocore/runtime/context/session_compaction.py::session_compaction_cut": _whole(
+        "places the kept tail of the whole session transcript at a turn boundary"
     ),
     "protocore/runtime/query.py::_calibrate_near_compaction_trigger": _whole(
         "sizes the same whole transcript the compaction gate measures, so the "

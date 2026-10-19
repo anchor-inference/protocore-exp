@@ -485,6 +485,38 @@ engine.turn_policies = core_policies.merged_with(
 
 ---
 
+### Компакция сессии между запусками
+
+**Когда использовать:** сессия переживает свои запуски, и её история должна
+сжиматься между ними. Не пишите цикл суммаризатора сами; дайте ядру свои слова
+и свои модели:
+
+```python
+from protocore.runtime.context.session_compaction import (
+    CompactionHoldPolicy, Summariser, SummaryPrompts,
+    commit_session_compaction, compact_session,
+)
+
+result = await compact_session(
+    engine.history,
+    summarisers=[Summariser(cheap_provider, "small-model"), Summariser(engine.llm, engine.effective_model_name)],
+    keep_recent_messages=20,
+    prompts=SummaryPrompts(sections=("Rules", "Facts", "Threads"), section_rules=OUR_RULES),
+    decorate=add_our_quotes,
+)
+if await commit_session_compaction(engine, result) is None:
+    ...  # запуск начался или история изменилась: ничего не заменено
+```
+
+Выжимка пишется, не удерживая сессию, поэтому берите блокировку только вокруг
+фиксации. Сохраняйте `CompactionHold`, который `CompactionHoldPolicy`
+возвращает после неудачного или малополезного прохода, и спрашивайте
+`policy.holds(...)` перед следующим автоматическим. Тексты разделов и
+отрисовка — ваши; всё остальное — в
+[компакции](compaction.md#компакция-сессии).
+
+---
+
 ## Жёсткие правила (не нарушайте их)
 
 Два правила ограничивают любое расширение. Нарушение любого из них — провал

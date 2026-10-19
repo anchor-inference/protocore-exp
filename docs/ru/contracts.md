@@ -178,14 +178,25 @@ value-объекты.
 - **`Message`** — единственный примитив диалога (с привязкой к роли). Ходы
   ассистента несут `content_blocks` (text + tool_use + thinking вперемешку).
 - **`MessageRole`** (`StrEnum`) — `system` · `user` · `assistant` · `tool`.
-- **`MessageOrigin`** (`StrEnum`) — `conversation` · `compaction`; читается
-  как `Message.origin`. Записи компакции (реестр, выжимки, сводка пола) имеют
-  роль user, но происхождение `compaction`, поэтому хост, который сохраняет
-  или показывает историю, не принимает их за реплику пользователя (см.
-  [компакцию](compaction.md#13-её-записи-помечены-как-её-собственные)).
-  Происхождение выводится из меток сообщения и не задаётся:
-  `Message(origin=...)` принимается и игнорируется. Ставьте метку
-  (`COMPACTION_SUMMARY_METADATA_KEY: True` в `metadata`).
+- **`MessageOrigin`** (`StrEnum`) — `conversation` · `compaction` · `nudge` ·
+  `wind_down` · `recovery` · `background_wake`; читается как `Message.origin`.
+  Записи компакции (реестр, выжимки, сводка пола) имеют роль user, но
+  происхождение `compaction`, поэтому хост, который сохраняет или показывает
+  историю, не принимает их за реплику пользователя (см.
+  [компакцию](compaction.md#13-её-записи-помечены-как-её-собственные)). Каждое
+  сообщение, которое цикл пишет сам для себя, тоже несёт происхождение, отличное
+  от `conversation`: поправка следующего шага модели — `nudge`, уведомление о
+  сворачивании запуска — `wind_down`, продолжение после обрезанного ответа, ход
+  прерывателя повторяющихся ошибок инструмента или синтезированный спасающий
+  вызов — `recovery`, заметка о завершении фоновых задач — `background_wake`.
+  Хост фильтрует по значению, а не по формулировке шаблона. Происхождение
+  выводится из меток сообщения и не задаётся: `Message(origin=...)` принимается
+  и игнорируется. Читаются по порядку метки компакции
+  (`COMPACTION_SUMMARY_METADATA_KEY: True`), `ORIGIN_METADATA_KEY`
+  (`"protocore.origin"`, значение `MessageOrigin` — для собственных служебных
+  сообщений хоста) и метка цикла `SYNTHETIC_RECOVERY_METADATA_KEY`, виды которой
+  отображает `synthetic_recovery_origin()`; неизвестный ей вид читается как
+  `recovery`.
 - **`ContentBlock`** — это **union-тип**, а не класс:
   `TextBlock | ThinkingBlock | ImageRefBlock | ToolUseBlock | ToolResultBlock`.
 - **`ContentBlockKind`** (`StrEnum`) — дискриминант: `text` · `thinking` ·

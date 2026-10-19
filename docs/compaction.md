@@ -261,8 +261,9 @@ Everything compaction writes into the history — the ledger, the summaries and
 folds, the floor digest — is user-role, because a provider accepts no system
 message past the first. None of it is the user's message, and a host must not
 store or show it as one. Every such message answers `Message.origin` with
-`MessageOrigin.compaction`; everything else answers
-`MessageOrigin.conversation`. The origin is derived from the tags compaction
+`MessageOrigin.compaction`; the loop's own notes answer one of their own
+origins (see [contracts](contracts.md#messages--content)), and the
+conversation answers `MessageOrigin.conversation`. The origin is derived from the tags compaction
 already sets (`protocore.compaction_summary`, `protocore.compaction_ledger`), is
 serialised with the message — each entry of a snapshot's `history` carries
 `"origin"` — and is never sent to a provider, so what the model reads is
@@ -280,6 +281,102 @@ of the run, so work done before a pass still counts as the run's output.
 
 *Why.* The ledger was stored by a host as the user's own message, drawn as a
 user bubble, and seeded into the next run as an operator turn.
+
+## Between runs
+
+The tiers above run inside a run. A host that keeps a session alive across
+runs also rewrites the history between them — a compaction after a run, a
+revert of the last turn, a clear, an import — and those rewrites go through the
+engine, not around it.
+
+### Replacing the history
+
+`await engine.replace_history(messages, reason=...)` puts `messages` in place
+of the history and retires what was derived from the old one: the compaction
+checkpoint, the compaction state and its back-offs, the store's persist marker
+(the next hand-over is a rewrite, so a revert to a prefix does not leave the
+dropped rows in the store) and the prompt measurement. It emits
+`history_replaced` (`reason`, `messages_before`, `messages_after`,
+`prompt_tokens_before`, `prompt_tokens_after`) on the engine's event stream and
+returns it. It raises while a turn is driving.
+
+The prompt is re-sized without a call: the provider's last count, less the
+fixed part, is scaled by how much of the history survived, and never exceeds
+the count. The estimator's calibration cancels out of the ratio, so the answer
+errs only low — the next compaction comes a turn late at most — and messages
+added afterwards are estimated on top of it, as after any count. With no count
+to scale, the estimate stays the authority. The scaled anchor rides the
+snapshot (`prompt_anchor`), so a run resumed on another engine sizes its prompt
+the same way.
+
+*Why.* A host assigned the history and forgot the measurement; the trigger read
+the size of the history it had just shrunk, and nearly half the compactions of
+a long session re-summarised a tail the previous one had already made small.
+
+### Compacting a session
+
+`protocore.runtime.context.session_compaction.compact_session(history,
+summarisers=[...], ...)` replaces all but a kept tail of a history with one
+summary, and returns the new history without writing anything
+(`SessionCompaction`); `commit_session_compaction(engine, result)` puts it into
+an engine through `replace_history`, and `result.apply(history)` builds it for a
+host's own store. Its clauses:
+
+- **The previous summary is the base.** Compaction records at the head of the
+  history (`leading_summaries`) go to the summariser whole, inside
+  `<previous-summary>`, with `SummaryPrompts.base_rule`; the transcript after
+  them is rendered whole (`render_for_summary`): the user's words never cut,
+  agents' text, notes and tool exchanges cut in the middle past their bounds,
+  the ledger and the loop's scaffolding (`nudge`, `wind_down`, `recovery`) left
+  out. *Why.* A summary re-condensed as part of a clipped transcript broke the
+  chain at every pass, and a session kept only its last topic.
+- **Parts, merged in rounds.** A transcript longer than
+  `SessionCompactionSettings.chunk_tokens` is cut on line ends into parts
+  summarised in parallel (at most `parallel_calls` at once); while the notes are
+  still longer than one part they are merged in groups of at least two, up to
+  `merge_rounds_max` rounds; the last merge is made onto the base.
+- **Sections, checked once more.** A summary that lacks one of
+  `SummaryPrompts.sections`, repeats one or reorders them is asked for again
+  with `SummaryPrompts.retry` naming the problem; a second miss is accepted and
+  reported as `section_problem`. The word budget grows with the window
+  (`words_for`).
+- **A ladder of summarisers.** `summarisers` are tried in order; a provider
+  error, a timeout or an empty answer hands over to the next, and
+  `SessionCompactionFailed` lists every rung's failure when none answered.
+  *Why.* A summary model past its limit ended a compaction in a bare error
+  while the session's own model stood ready.
+- **Retries.** A retryable failure is asked again after each of
+  `retry_pauses`; a rate limit and a permanent refusal go to the next rung at
+  once; a call that exceeds `call_timeout_seconds` gets one more try at twice
+  that.
+- **The kept tail starts at a turn boundary** (`session_compaction_cut`): a
+  user's own turn, never a tool result or scaffolding, so no tool exchange is
+  split. The newest ledger is carried past the summariser unchanged, after the
+  summary. `decorate` adds code-written text (quotes, an index, a pointer to an
+  archive) to the summary before it is wrapped, and the summary carries the
+  user's passages under `OPERATOR_WORDS_METADATA_KEY` for the next pass.
+- **Atomic and cancellable.** Nothing is held while the summary is made. The
+  result keeps the summarised prefix by identity and applies only while the
+  history still starts with exactly those messages: turns appended meanwhile
+  are kept after the summary; a changed summarised message makes it stale, and
+  `commit_session_compaction` returns `None` with the history untouched — as it
+  does while a turn is driving. Setting `cancel`, or cancelling the task,
+  raises `SessionCompactionCancelled` and leaves nothing behind.
+
+`CompactionHold` and `CompactionHoldPolicy` are the pause on automatic
+compaction a host persists (`to_dict` / `from_dict`): after a failure for
+`retry_seconds`, doubling per failure up to `retry_max_seconds`; after a pass
+that left the prompt over the trigger or freed less than `min_freed_ratio`,
+until the prompt grows; either ends when the prompt grows by `growth_ratio` of
+the window. *Why.* A session whose summariser timed out was held three minutes
+per message and never shrank.
+
+Inside a run, `QueryEngine(compaction_providers=[Summariser(provider, model),
+...])` gives the tiers the same ladder (`SummariserLadder`): each rung is asked
+with its own model and the run's own provider is the last rung. Each call gets
+`compaction_summary_timeout_seconds`, and the whole exchange one such deadline
+per rung. `compaction_provider` (one provider, no fallback) still works and
+cannot be combined with it.
 
 ## Budget arithmetic
 
@@ -356,6 +453,18 @@ a 2,400-token cap; the ledger may spend 5,120 tokens.
 | `tier3_failures` | fold failures by kind |
 | `floor_dropped`, `floor_reached` | messages the floor removed; whether it ran out of things to remove |
 | `ledger_tokens` | the size of the rebuilt ledger |
+| `replaced_indices` | positions, in the history handed to the store just before the pass, of the messages the pass removed or rewrote |
+| `inserted_indices` | positions, in the history after the pass, of the messages it wrote (summaries, folds, the ledger, masked outputs) |
+| `history_messages_before`, `history_messages_after` | the lengths of those two histories |
+
+Before `compaction_started` the loop hands the history to the session store
+(`persist_history`), so the rounds the run produced since the last hand-over
+are durable before the pass rewrites them, and `replaced_indices` index exactly
+the rows the store was just given. Messages carry no id of their own; the
+positions are compared by object identity, like the persist marker. *Why.* A
+host transcribed the whole history itself on `compaction_started`, because
+otherwise those rounds existed only as the summary, and labelled the summary on
+`compaction_completed` by diffing two histories.
 
 Every pass also logs one line, `DIAG compaction.pass`, with the same figures,
 and the floor logs `DIAG compaction.floor`.

@@ -1733,9 +1733,13 @@ async def _run_summariser(
     if record_request is not None:
         await record_request(request)
     try:
-        response = await asyncio.wait_for(
-            compaction_llm.complete_text(request), timeout=rc.compaction_summary_timeout_seconds
-        )
+        # A ladder of summarisers gives each rung the deadline, so the whole
+        # exchange may take one deadline per rung before it is abandoned.
+        deadline_for = getattr(compaction_llm, "deadline_for", None)
+        timeout = rc.compaction_summary_timeout_seconds
+        if callable(deadline_for):
+            timeout = float(deadline_for(timeout))
+        response = await asyncio.wait_for(compaction_llm.complete_text(request), timeout=timeout)
     except LLMContextWindowExceeded as exc:
         _logger.warning("summariser rejected %s as too large; skipping (err=%s)", unit_label, exc)
         return _SummaryOutcome(anchor_key, None, 0, repeatable_failure=True, failure="too_large")
