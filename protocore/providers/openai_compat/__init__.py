@@ -53,8 +53,10 @@ from protocore.providers.openai_compat.spec import (
     ProviderCapabilities,
     ReasoningReplay,
     ThinkingDialect,
+    TokenizeDialect,
 )
 from protocore.providers.openai_compat.stream import StreamAssembler, normalize_usage
+from protocore.providers.openai_compat.tokenize import TokenizeCounter
 from protocore.providers.openai_compat.wire import (
     INTERRUPTED_TOOL_RESULT,
     REASONING_ENVELOPE,
@@ -77,6 +79,8 @@ __all__ = [
     "ReasoningReplay",
     "StreamAssembler",
     "ThinkingDialect",
+    "TokenizeCounter",
+    "TokenizeDialect",
     "UsageObservation",
     "UsageObserver",
     "classify_failure",

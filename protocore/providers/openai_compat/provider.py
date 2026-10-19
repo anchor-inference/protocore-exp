@@ -56,6 +56,7 @@ from protocore.providers.openai_compat.stream import (
     normalize_usage,
     sse_events,
 )
+from protocore.providers.openai_compat.tokenize import TokenizeCounter
 from protocore.providers.openai_compat.wire import (
     ImageLoader,
     apply_cache_control,
@@ -150,6 +151,16 @@ class OpenAICompatibleProvider(ILLMProvider):
         self._image_loader = image_loader
         self._on_usage = on_usage
         self._on_failure = on_failure
+        self._counter = (
+            TokenizeCounter(
+                self._client,
+                root=endpoint.counting_root(),
+                dialect=endpoint.tokenize,
+                headers=self.request_headers(None),
+            )
+            if endpoint.tokenize is not None
+            else None
+        )
 
     async def __aenter__(self) -> Self:
         return self
@@ -296,6 +307,19 @@ class OpenAICompatibleProvider(ILLMProvider):
     def count_tokens(self, text: str, model: str | None = None) -> int:
         """The core's estimate; the loop re-anchors on the size the server reports."""
         return max(1, _estimate(text)) if text else 0
+
+    async def count_request_tokens(self, request: LLMRequest) -> int | None:
+        """The exact prompt size from the endpoint's counting route, or ``None``.
+
+        ``None`` when the endpoint has no counting route configured, or the
+        route turned out not to exist; the loop then uses its own estimate.
+        The body is built exactly as the call would build it, so the count
+        covers the chat template, the tool definitions and the thinking switch.
+        """
+        if self._counter is None:
+            return None
+        body = await self.build_body(request, stream=False)
+        return await self._counter.count(body)
 
     # Extension points -----------------------------------------------------
 

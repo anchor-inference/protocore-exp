@@ -177,6 +177,17 @@ class ProviderCapabilities:
         return DEFAULT_EFFORT_NAMES.get(self.thinking, {}).get(effort, effort)
 
 
+class TokenizeDialect(StrEnum):
+    """Which counting route an endpoint exposes beside its chat API."""
+
+    #: ``POST /tokenize`` with the chat ``messages`` and ``tools``; the answer
+    #: carries ``count`` (vLLM).
+    vllm = "vllm"
+    #: ``POST /apply-template`` renders the messages through the chat template,
+    #: then ``POST /tokenize`` counts the rendered prompt (llama.cpp server).
+    llama_cpp = "llama_cpp"
+
+
 @dataclass(frozen=True, slots=True)
 class EndpointSpec:
     """One chat-completions endpoint: where it is, how to reach it, what it supports.
@@ -216,6 +227,11 @@ class EndpointSpec:
     #: Fields added to every request body. The adapter's own fields win, so
     #: this extends a request and cannot rewrite one.
     extra_body: Mapping[str, Any] = field(default_factory=dict)
+    #: The counting route, for an exact prompt size; ``None`` counts nothing.
+    tokenize: TokenizeDialect | None = None
+    #: Where the counting route lives. ``None`` takes ``base_url`` without a
+    #: trailing ``/v1``, since both servers mount it at their root.
+    tokenize_url: str | None = None
 
     def __post_init__(self) -> None:
         parsed = urlsplit(self.base_url)
@@ -234,6 +250,13 @@ class EndpointSpec:
         """``path`` under the API root."""
         return self.base_url.rstrip("/") + path
 
+    def counting_root(self) -> str:
+        """Where the counting route is mounted."""
+        if self.tokenize_url:
+            return self.tokenize_url.rstrip("/")
+        base = self.base_url.rstrip("/")
+        return base[: -len("/v1")] if base.endswith("/v1") else base
+
 
 __all__ = [
     "DEFAULT_EFFORT_NAMES",
@@ -242,4 +265,5 @@ __all__ = [
     "ProviderCapabilities",
     "ReasoningReplay",
     "ThinkingDialect",
+    "TokenizeDialect",
 ]

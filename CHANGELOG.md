@@ -143,6 +143,14 @@ All notable changes to this project are recorded here. The format follows
   strict on the wire. Usage is normalised, including DeepSeek's
   `prompt_cache_hit_tokens` and a reported `cost`, and the `on_usage` and
   `on_failure` observers hear every call. See `docs/providers.md`.
+- **An exact request token count for vLLM and llama.cpp servers.** With
+  `EndpointSpec(tokenize=TokenizeDialect.vllm)` (`POST /tokenize` with the
+  chat messages and tools) or `TokenizeDialect.llama_cpp`
+  (`POST /apply-template`, then `POST /tokenize`), the adapter implements
+  `IRequestTokenCounter.count_request_tokens` on the body it would send,
+  template, tools and thinking switch included. A server without the route
+  answers 404 once and is not asked again; the core then uses its estimate,
+  which is also what `count_tokens` returns.
 
 ### Changed
 
