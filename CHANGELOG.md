@@ -145,6 +145,13 @@ All notable changes to this project are recorded here. The format follows
   `extra["volatile_suffix_messages"]` says how many trailing messages are
   volatile, and `build_llm_request` takes `volatile_suffix_messages`. Unset,
   requests are unchanged.
+- **`diff_request_manifests(previous, current)`** in
+  `protocore.runtime.manifest_diff` says why a call missed the prompt cache: a
+  `ManifestDiff` naming every part that changed, the earliest one that cost
+  the prefix (`model`, `tools`, `system_prompt` or `messages`), the index of
+  the first history message that is not where it was, and a one-line
+  `describe()`. Message bodies come from the manifest when inline or from the
+  bodies the sink stored; a request's volatile suffix is left out.
 
 ### Changed
 

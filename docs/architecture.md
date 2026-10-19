@@ -1008,7 +1008,14 @@ owner, a scope, and a disposer, or by implementing `IHookManager` in the host.
   carry it by value — and hands it to the sink. Where it is kept, and for how
   long, is the host's decision: the core has neither a store nor a retention
   policy, and acquiring one mid-run is exactly the obligation the loop must
-  not take on.
+  not take on. Two manifests of consecutive calls also say why a call missed
+  the prompt cache: `runtime/manifest_diff.py::diff_request_manifests` names
+  every part that changed and the earliest one that cost the prefix — the
+  model, the tool catalogue, the system prompt, or the history, with the index
+  of the first message that is not where it was. The history is compared
+  message by message from the inline bodies or the bodies the host's sink
+  stored; without them a break in the history is never claimed. A request's
+  declared volatile suffix (the turn context) is left out on both sides.
 
 **How wired.** The loop yields `TurnEvent`s throughout; the usage delta feeds
 the cache observer, and `build_llm_request` feeds the manifest sink when
