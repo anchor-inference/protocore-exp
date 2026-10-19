@@ -84,6 +84,11 @@ final item, a `DispatchOutcome`. The lifecycle:
 5. **Execute** — `tool.invoke(ctx)` wrapped in `asyncio.wait_for` honouring
    `rc.tool_timeout_seconds`.
 6. **The `post_tool_use` coordinate** — fire-and-await; may rewrite the output.
+   It fires exactly once for every call that produces a result, including each
+   failure above (unknown tool, validation, refusal, unmet precondition,
+   timeout, raised exception, unreadable result shape). Only a call parked for
+   approval or for an answer from the user skips it, because it has no result
+   yet. See [the hook payload](#the-post_tool_use-payload).
 
 `DispatchOutcome` (frozen) carries `success`, `content`, `is_error`,
 `error_kind`, `approval_required` / `approval_token`, `ask_user_required` /
@@ -98,6 +103,42 @@ A tool may attach a machine-readable `structured_error` dict (e.g.
 `{"finalization_recommended": True, "reason": ...}`) to a raised exception; the
 dispatch except-branch forwards it on `DispatchOutcome.metadata` and the loop
 surfaces a finalize hint to the model.
+
+### The `post_tool_use` payload
+
+The host's `IHookManager` receives `run_id`, `tenant_id`, `tool_call_id`,
+`tool_name`, `tool_output` (the text the model would read), `success`,
+`is_error`, `error_kind` and `duration_ms`. `error_kind` is `None` on success
+and otherwise the `DispatchErrorKind` value the model will see. It is taken
+after the consecutive-error cap, so a capped failure arrives as
+`consecutive_error_cap` with the original text inside it. A tool's own
+`ToolResult(is_error=True)` arrives as `execution`.
+
+A failure's text is often the one place a secret turns up: a command line
+with a token in an exception, a URL with credentials, a server echoing the key
+it refused. That is why a failure passes through the hook like a success does.
+A `MODIFY` with a string `tool_output` replaces the text in the
+`DispatchOutcome`, the `tool_result` event and the history block, and so in
+every later request and snapshot. The copy of the error text kept in the
+outcome's metadata for the parallel replay is replaced too, and
+`tool_dispatch.post_tool_output_modified` is set. A hook that only cares about
+successes returns `ALLOW` when `is_error` is true. A hook that raises is
+logged and ignored on either path, and the result stands as written.
+
+A rewrite also ends the tool's own value: the original must not outlive the
+process, so `canonical_content` is dropped and the hook's text is the value
+from then on. A result over the entry limit is offloaded as the rewritten text,
+never as the original. A `canonical_ref` the tool stored itself is dropped too,
+because the core cannot mask what that reference points at, and so is the
+`ui_payload`, which the hook is not shown; a host that wants either kept must
+mask it before the tool returns. `path` stays. A hook that returns `ALLOW`, or
+a `MODIFY` without a string `tool_output`, leaves all of these as they were.
+
+`tool_output` is the model projection. When a tool states a
+`model_projection`, the canonical value behind it is not in the payload and,
+unless the hook rewrites the output, is kept; a tool whose canonical value may
+carry a secret should not hide it behind a projection the hook cannot see
+through.
 
 See the [Tool dispatch + gating](architecture.md#dispatch-roles-the-canonical-result-and-pairing-repair) section
 for the event-emission contract.
@@ -901,6 +942,10 @@ a tool names none, compaction stores the value itself at the moment it first
 needs the room and fills this in on the block it rewrites. A tool that names no
 projection says the value is small enough to be its own, which is the common
 case and costs it nothing.
+The one exception is a `post_tool_use` hook that rewrites the output: the
+hook's text then becomes the value, and the original is dropped with the
+`canonical_ref` and the `ui_payload`, which the hook never saw (see
+[the hook payload](#the-post_tool_use-payload)).
 
 **A record before the call.** Every dispatched call commits an `IntentRecord`
 (`runtime/intent.py`) before the tool is touched, with its result ids reserved

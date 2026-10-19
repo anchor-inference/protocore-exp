@@ -167,6 +167,42 @@ All notable changes to this project are recorded here. The format follows
   each item as a `QueuedPrompt` (`id`, `kind`, text, attachments), and the
   stop's `message_stop` event carries them as `restored_queue_items`.
   `restore_queued_prompts` keeps its `list[str]` return as the text-only view.
+- **`post_tool_use` now also fires for failed calls**, with two new payload
+  fields on every call: `is_error` (`False` on success) and `error_kind` (the
+  `DispatchErrorKind` value of the surfaced failure, `None` on success). A
+  hook that should only see successes returns `ALLOW` when `is_error` is true.
+  `success` is still sent. A `MODIFY` on a failure replaces the error text
+  everywhere it goes, as on a success.
+- **A `post_tool_use` hook that rewrites a result now replaces the tool's own
+  value, not only the transcript text.** The canonical value used to be kept
+  beside the projection whatever the hook did. After a `MODIFY` with a string
+  `tool_output` the result carries no `canonical_content`, no `canonical_ref`
+  the tool stored itself (the core cannot mask what it points at) and no
+  `ui_payload` (the hook is not shown it); `path` stays. A host that relies on
+  one of them surviving a rewrite has to mask it before the tool returns. A
+  hook that allows the result changes nothing.
+
+### Fixed
+
+- **A failed tool call no longer bypasses the `post_tool_use` hook.** A tool
+  that raised, timed out, returned something other than a `ToolResult`, was
+  called with arguments that could not be serialised, was unknown, or was
+  refused by the gate got its error text — the exception message included —
+  written into the history, the `tool_result` event and the next request
+  without the hook being asked, so a redaction hook missed a token in a failed
+  command line or a key a server echoed back. Every such path now asks the
+  hook once, after the consecutive-error cap, and a `MODIFY` lands in the
+  outcome, the event and the transcript. The hook's rewrite also replaces the
+  unmasked text in the result's replay metadata; the parallel path keys its
+  error streak on the original words, held in memory only. A hook that raises
+  on a failure is logged and ignored, as on a success.
+- **The original of a result a `post_tool_use` hook rewrote no longer leaves
+  the process (security).** The rewritten text went to the model, but the
+  original stayed on the result block as `canonical_content`: in the history,
+  every snapshot and the request handed to the adapter, and a result over the
+  entry limit wrote the original to the blob store. A redaction hook masked
+  the transcript and left the secret beside it. The hook's text is now the
+  value everywhere, and the entry cap offloads that text.
 - **The compaction ledger no longer clips the operator's words.** Each quote
   was cut at 1,200 characters without a marker. A quote is now kept whole, the
   other sections of the ledger give up their room before it, and a quote that

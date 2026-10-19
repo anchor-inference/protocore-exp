@@ -10260,7 +10260,13 @@ def _replay_dispatch_state(
             kind = None
     if kind is None:
         kind = outcome.error_kind or DispatchErrorKind.execution
-    message = raw_message if isinstance(raw_message, str) else outcome.content
+    # A result the PostToolUse hook rewrote carries the tool's own words on the
+    # outcome, not in its persisted metadata; the streak is keyed on those, as
+    # the serial path keyed it.
+    if outcome.replay_message is not None:
+        message = outcome.replay_message
+    else:
+        message = raw_message if isinstance(raw_message, str) else outcome.content
     final_kind, final_message = _ensure_tool_dispatcher(engine)._apply_consecutive_error_cap(
         ctx,
         tool_call.name,
