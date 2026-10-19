@@ -11,13 +11,15 @@ A host extends it at three points, each a method meant to be overridden:
 :meth:`OpenAICompatibleProvider.request_headers` (headers it adds), and the two
 observers it passes in, which hear every usage report and every refusal (for a
 ledger, for learning a model's real context window from what the server said).
+A spend budget hangs on ``admission`` (see :mod:`protocore.providers.spend`).
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import aclosing
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Literal, Self
@@ -65,6 +67,15 @@ from protocore.providers.openai_compat.wire import (
     reasoning_envelope,
     tool_choice_for,
     tools_to_wire,
+)
+from protocore.providers.spend import (
+    ISpendAdmission,
+    PricingLookup,
+    SpendEnd,
+    SpendEstimate,
+    SpendRefused,
+    SpendSettlement,
+    budget_error,
 )
 from protocore.runtime.token_counting import estimate_tokens
 
@@ -131,7 +142,9 @@ class OpenAICompatibleProvider(ILLMProvider):
     by :meth:`aclose`) when none is given. Tests pass a client over
     ``httpx.MockTransport``. ``image_loader`` resolves an image's blob
     reference to its bytes; without it no image is sent, whatever the
-    capabilities say.
+    capabilities say. ``admission`` is asked before every call and told how
+    it ended; ``pricing`` prices a model's usage where the server reports no
+    cost of its own (both in :mod:`protocore.providers.spend`).
     """
 
     def __init__(
@@ -142,8 +155,12 @@ class OpenAICompatibleProvider(ILLMProvider):
         image_loader: ImageLoader | None = None,
         on_usage: UsageObserver | None = None,
         on_failure: FailureObserver | None = None,
+        admission: ISpendAdmission | None = None,
+        pricing: PricingLookup | None = None,
     ) -> None:
         self.endpoint = endpoint
+        self._admission = admission
+        self._pricing = pricing
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(endpoint.timeout_seconds, connect=endpoint.connect_timeout_seconds)
@@ -188,11 +205,27 @@ class OpenAICompatibleProvider(ILLMProvider):
         ``finish`` are yielded.
         """
         body = await self.build_body(request, stream=True)
+        reservation = await self._reserve(request, body, "stream")
+        ended = _SpendState()
+        try:
+            # aclosing: a caller that stops reading closes this generator, and
+            # the inner one must close with it, now, so its response is closed
+            # rather than left to the garbage collector.
+            async with aclosing(self._stream(request, body, ended, reservation)) as stream:
+                async for delta in stream:
+                    yield delta
+        finally:
+            await self._release_unsettled(reservation, ended)
+
+    async def _stream(
+        self, request: LLMRequest, body: dict[str, Any], ended: _SpendState, reservation: str | None
+    ) -> AsyncGenerator[ProviderDelta, None]:
         started = time.monotonic()
         caps = self.endpoint.capabilities
         assembler = StreamAssembler(
             repair_partial_arguments=caps.repair_partial_arguments,
             keep_reasoning_details=caps.replay_reasoning_details,
+            text_tool_calls=caps.text_tool_calls,
         )
         try:
             silent = 0
@@ -220,6 +253,7 @@ class OpenAICompatibleProvider(ILLMProvider):
             try:
                 if response.status_code >= 400:
                     text = (await response.aread()).decode("utf-8", "replace")
+                    ended.outcome = SpendEnd.refused
                     raise await self._refused(request, body, response.status_code, text, response.headers)
                 async for data in sse_events(lines):
                     if data is None:
@@ -249,8 +283,12 @@ class OpenAICompatibleProvider(ILLMProvider):
             raise self._transport_error(exc) from exc
         for delta in assembler.close():
             yield delta
-        normalized = normalize_usage(assembler.usage or {})
+        normalized = self._priced(request, normalize_usage(assembler.usage or {}))
         await self._observe_usage(request, "stream", assembler.usage or {}, normalized, started)
+        # Settled before the usage is yielded: the loop may stop reading at
+        # ``finish``, and a settlement placed after the last yield would then
+        # never run, leaving the reservation to be released as interrupted.
+        await self._settle(reservation, ended, assembler.usage or {}, normalized)
         yield ProviderDelta(kind=ProviderDeltaKind.usage, usage=normalized)
         kept = None
         if assembler.reasoning_details:
@@ -456,6 +494,21 @@ class OpenAICompatibleProvider(ILLMProvider):
         return response, _prepend(first, lines)
 
     async def _complete(self, request: LLMRequest, body: dict[str, Any], purpose: CallPurpose) -> LLMResponse:
+        reservation = await self._reserve(request, body, purpose)
+        ended = _SpendState()
+        try:
+            return await self._complete_admitted(request, body, purpose, ended, reservation)
+        finally:
+            await self._release_unsettled(reservation, ended)
+
+    async def _complete_admitted(
+        self,
+        request: LLMRequest,
+        body: dict[str, Any],
+        purpose: CallPurpose,
+        ended: _SpendState,
+        reservation: str | None,
+    ) -> LLMResponse:
         started = time.monotonic()
         try:
             response = await self._client.post(
@@ -464,6 +517,7 @@ class OpenAICompatibleProvider(ILLMProvider):
         except httpx.HTTPError as exc:
             raise self._transport_error(exc) from exc
         if response.status_code >= 400:
+            ended.outcome = SpendEnd.refused
             raise await self._refused(request, body, response.status_code, response.text, response.headers)
         try:
             data = response.json()
@@ -483,8 +537,9 @@ class OpenAICompatibleProvider(ILLMProvider):
         message = (choice.get("message") or {}) if isinstance(choice, dict) else {}
         usage = data.get("usage")
         raw_usage: dict[str, Any] = usage if isinstance(usage, dict) else {}
-        normalized = normalize_usage(raw_usage)
+        normalized = self._priced(request, normalize_usage(raw_usage))
         await self._observe_usage(request, purpose, raw_usage, normalized, started)
+        await self._settle(reservation, ended, raw_usage, normalized)
         finish = choice.get("finish_reason") if isinstance(choice, dict) else None
         return LLMResponse(
             message=Message(role=MessageRole.assistant, content_blocks=[TextBlock(text=_message_text(message))]),
@@ -571,6 +626,85 @@ class OpenAICompatibleProvider(ILLMProvider):
             failure = ProviderFailure(reason=reason, retryable=True, provider_message=str(exc) or type(exc).__name__)
         return LLMProviderError(message, classified=failure)
 
+    async def estimate_spend(self, request: LLMRequest, body: dict[str, Any], purpose: CallPurpose) -> SpendEstimate:
+        """What the call is about to cost, for the admission. Override to count exactly.
+
+        The prompt size is the core's estimate of the messages and tools as
+        they go on the wire; asking a counting route here would add a round
+        trip to every call for a number that only has to err high.
+        """
+        prompt_tokens = _estimate(
+            json.dumps([body.get("messages") or [], body.get("tools") or []], ensure_ascii=False)
+        )
+        pricing = self._pricing(request.model) if self._pricing is not None else None
+        return SpendEstimate(
+            endpoint=self.endpoint.name,
+            model=request.model,
+            purpose=purpose,
+            prompt_tokens=prompt_tokens,
+            max_output_tokens=request.max_tokens,
+            cost_usd=pricing.estimate(prompt_tokens=prompt_tokens, max_output_tokens=request.max_tokens)
+            if pricing is not None
+            else None,
+            observability=request.observability,
+        )
+
+    async def _reserve(self, request: LLMRequest, body: dict[str, Any], purpose: CallPurpose) -> str | None:
+        if self._admission is None:
+            return None
+        estimate = await self.estimate_spend(request, body, purpose)
+        try:
+            return await self._admission.reserve(estimate)
+        except SpendRefused as refused:
+            raise budget_error(self.endpoint.name, refused) from refused
+
+    def _priced(self, request: LLMRequest, normalized: dict[str, Any]) -> dict[str, Any]:
+        """The usage with ``cost_usd`` from the price table, when the server reported none."""
+        if "cost_usd" in normalized or self._pricing is None or not _reported_counts(normalized):
+            return normalized
+        pricing = self._pricing(request.model)
+        if pricing is not None:
+            normalized["cost_usd"] = pricing.cost(normalized)
+        return normalized
+
+    async def _settle(
+        self,
+        reservation: str | None,
+        ended: _SpendState,
+        raw: Mapping[str, Any],
+        normalized: Mapping[str, Any],
+    ) -> None:
+        if reservation is None or self._admission is None:
+            return
+        ended.settled = True
+        settlement = SpendSettlement(
+            usage=dict(normalized),
+            raw=dict(raw),
+            cost_usd=normalized.get("cost_usd"),
+            complete=_reported_counts(normalized),
+        )
+        try:
+            await self._admission.settle(reservation, settlement)
+        except Exception:
+            # The answer arrived and was paid for; a ledger that failed to book
+            # it must not take the answer away from the run.
+            _logger.exception("%s: the spend admission failed to settle %s", self.endpoint.name, reservation)
+
+    async def _release_unsettled(self, reservation: str | None, ended: _SpendState) -> None:
+        if reservation is None or self._admission is None or ended.settled:
+            return
+        detail = (
+            "the server refused the request"
+            if ended.outcome is SpendEnd.refused
+            else "the request ended without a usage report"
+        )
+        try:
+            await self._admission.release(reservation, outcome=ended.outcome, detail=detail)
+        except Exception:
+            # Runs while the call's own error or cancellation is in flight;
+            # raising here would replace it.
+            _logger.exception("%s: the spend admission failed to release %s", self.endpoint.name, reservation)
+
     async def _observe_usage(
         self,
         request: LLMRequest,
@@ -595,6 +729,19 @@ class OpenAICompatibleProvider(ILLMProvider):
         except Exception:
             # A ledger that failed to record must not fail the answer it recorded.
             _logger.exception("%s: the usage observer raised", self.endpoint.name)
+
+
+@dataclass(slots=True)
+class _SpendState:
+    """How one admitted call is ending: settled, or which way it failed."""
+
+    settled: bool = False
+    outcome: SpendEnd = SpendEnd.interrupted
+
+
+def _reported_counts(normalized: Mapping[str, Any]) -> bool:
+    """Whether the server reported any token count; all zeros means it reported none."""
+    return bool(normalized.get("input_tokens") or normalized.get("output_tokens"))
 
 
 def _message_text(message: Any) -> str:

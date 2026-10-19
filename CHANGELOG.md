@@ -380,6 +380,70 @@ All notable changes to this project are recorded here. The format follows
   `TOOL_SURFACE_DIGEST_FIELD` and `TOOL_SURFACE_DESCRIBED_FIELD` name the keys
   the runtime already writes. Hints only: a stream that keeps every event
   verbatim is still correct.
+- **Tool calls a model writes as text are recovered while the reply
+  streams.** `protocore.providers.text_tool_calls.TextToolCallGuard` holds
+  reply text back from the first marker of a known markup, and at the end of
+  the stream turns a complete block into tool calls, releasing the prose
+  around it, or releases what it held unchanged (an unfinished block, or a
+  marker merely mentioned in prose past a 4 000-character hold limit).
+  Markups are pluggable (`TextToolCallGrammar`); the first is `DSML`, the
+  markup DeepSeek models emit. The reference adapter applies it when an
+  endpoint lists grammars in the new `ProviderCapabilities.text_tool_calls`,
+  sending a `progress` delta for each held piece and reporting the turn as
+  `tool_use`. The default is empty, which passes text through exactly as
+  before. See `docs/providers.md`.
+- **A spend admission hook and per-model prices
+  (`protocore.providers.spend`).** `ISpendAdmission` is asked before every
+  call (`reserve`, with a `SpendEstimate`: endpoint, model, purpose, the
+  estimated prompt, the output cap and an upper-bound cost) and told how it
+  ended: `settle` with the reported usage and cost, or `release` with
+  `SpendEnd.refused` (the server answered 4xx/5xx) or
+  `SpendEnd.interrupted` (sent and never finished: a broken stream, a
+  first-byte timeout, a caller that stopped reading). Raising `SpendRefused`
+  refuses the call before anything is sent, and the loop sees a `budget`
+  `ProviderFailure` that nothing retries. `ModelPricing(input, output,
+  cached_input, cache_write, reasoning)` prices a usage report
+  (`cost(usage)`) and gives the upper bound a reservation needs
+  (`estimate(...)`); an omitted rate falls back to the one that cannot
+  undercharge. The reference adapter takes `admission=` and `pricing=`;
+  without them it behaves as before. See `docs/providers.md`.
+- **A model's context window is found out rather than typed in
+  (`protocore.providers.context_window`).** `ContextWindowResolver` takes it
+  from the first source that knows: the server's listing through a probe,
+  a models.dev-shaped catalogue file the host passes in
+  (`WindowCatalogue`), a table of model-family patterns the host keeps
+  (`WindowTable`), and refusals — a server that said "maximum context length
+  is N tokens" wins when N is smaller (`stated_window` reads the OpenAI/vLLM,
+  Anthropic, llama.cpp, Google and LM Studio phrasings). Answers are cached
+  (a day; a miss ten minutes), concurrent lookups share one probe, and
+  `observe_failure` plugs into the adapter's `on_failure` observer. No model
+  list is bundled. `ListingWindowProbe` (in `protocore.providers.openai_compat`)
+  reads `/models`, `/models/{id}` and llama.cpp's `/props`, quietly and
+  without following redirects. `ListProviderChain` takes `window_of=`
+  (for instance `resolver.rung_window`); its fit check then uses the smaller
+  of the configured and the discovered window. Without it the chain behaves
+  as before. See `docs/providers.md`.
+- **An MCP server's tools as core tools (`protocore.mcp`, extra `mcp`).**
+  `McpServer.stdio(...)` or `McpServer.http(...)` connects to a server,
+  lists its tools and publishes them in an `IToolRegistry` as `McpTool`
+  proxies named `Mcp_<Name>_<tool>`, declared as one dynamic tool group with
+  the server's handshake `instructions` as the group's rules and a host
+  `search_hint`, so a large server is held back behind `ToolSearch` and named
+  in one catalogue line. Schemas keep `properties`, `required` and a boolean
+  `additionalProperties`, with local `$ref`s inlined; results map text,
+  images, audio, resources and structured content, and `isError` is an error
+  result; protocol errors, timeouts (with `notifications/cancelled`) and lost
+  connections raise `ToolInvocationError`, saying when a call's outcome is
+  unknown. A call that finds the connection closed reconnects once before
+  sending; one whose connection breaks in flight is not retried. A changed
+  tool list is listed again and the registry updated. The stdio transport
+  passes the server only a few inherited environment variables plus its own
+  `env`; the streamable-HTTP transport carries the session id and protocol
+  revision, takes per-connection `auth` headers, and needs `httpx`, which
+  the new `mcp` extra installs. The client is a small JSON-RPC session
+  (`McpClientSession`) rather than the official SDK, and any object with the
+  five `McpTransport` methods can carry it. Nothing else imports the
+  package. See `docs/mcp.md`.
 
 ### Changed
 

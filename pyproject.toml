@@ -43,9 +43,16 @@ testing = [
 openai = [
     "httpx>=0.27",
 ]
+# The MCP client tool adapter in ``protocore.mcp``. Its stdio transport needs
+# nothing; the streamable-HTTP transport needs httpx. The official MCP SDK is
+# deliberately not a dependency: it brings a web server, a JWT library and
+# telemetry into a host that only wants to call a few tools.
+mcp = [
+    "httpx>=0.27",
+]
 dev = [
-    # The adapter's own tests run in every gate, so the toolchain carries its
-    # one dependency too.
+    # The adapter's and the MCP client's tests run in every gate, so the
+    # toolchain carries their one dependency too.
     "httpx>=0.27",
     "pytest>=8.2",
     "pytest-asyncio>=0.23",

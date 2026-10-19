@@ -80,6 +80,7 @@ at most some efficiency.
 | `max_tokens_field` | `max_tokens` | the body field of the output cap (`max_completion_tokens` for newer OpenAI reasoning models) |
 | `json_schema_response` | `False` | `complete_structured` asks for `json_schema` rather than `json_object` |
 | `repair_partial_arguments` | `True` | hand the loop the repaired prefix of a cut tool call |
+| `text_tool_calls` | `()` | markups in which a model writes tool calls as text (below) |
 
 ### Thinking dialects
 
@@ -181,6 +182,35 @@ windows are not added together by the idle watchdog. After
 and is never resent. Leave it off for a local server that may spend minutes
 reading a long prompt before its first byte.
 
+### Tool calls written as text
+
+Some models now and then write a tool call in their own markup inside the
+reply instead of as a structured call. The server passes it on as text: the
+markup is shown to the reader and the turn ends without the call. List the
+markup in `ProviderCapabilities(text_tool_calls=(DSML,))` and the adapter
+guards the text stream with a `TextToolCallGuard`
+(`protocore.providers.text_tool_calls`, pure Python):
+
+- text before a marker is released as it comes (only the few characters that
+  might be the start of a marker split across chunks wait for the next one);
+- from the marker on, text is held back, and a `progress` delta goes to the
+  loop in place of each held piece so the idle watchdog does not cut the
+  stream;
+- at the end of the stream a complete block becomes ordinary tool calls (a
+  `tool_use_start` and a `tool_use_stop` each, ids `call_<stream>_text<n>`)
+  and a `stop` finish becomes `tool_use`; prose around the block is released;
+- an incomplete block is released unchanged, and so is held text that passes
+  the hold limit (4 000 characters) without looking like a call block — a
+  model that merely mentions the markup keeps its reply.
+
+`DSML` (`DsmlGrammar`) reads DeepSeek's `<｜DSML｜tool_calls>` markup in every
+spelling of the bars; a parameter marked `string="true"` is text, any other is
+read as JSON. Another markup is a class with `name`, `markers`,
+`is_call_block(held)` and `parse(held) -> ParsedText | None`
+(`TextToolCallGrammar`); the earliest marker of any listed grammar wins. The
+guard is not tied to this adapter: any adapter can feed its own text deltas
+through it.
+
 ## Failures
 
 Every error the adapter raises carries a `ProviderFailure`
@@ -228,6 +258,67 @@ Three points are meant to be overridden or passed in:
   `FailureObservation` keeps only the retry headers, so it cannot store a
   credential a proxy echoed back.
 
+## Spend budgets and prices
+
+The loop budgets tokens; money is the host's to budget. The adapter gives that
+decision one place to happen (`protocore.providers.spend`, pure Python):
+
+```python
+from protocore.providers.spend import ModelPricing, SpendRefused
+
+prices = {"model-a": ModelPricing(input=0.30, output=1.20, cached_input=0.03)}
+
+class DailyCap:
+    async def reserve(self, estimate):          # before every call
+        if spent_today() + (estimate.cost_usd or 0) > CAP:
+            raise SpendRefused("daily cap reached", retry_after_seconds=until_midnight())
+        return hold(estimate)                   # a reservation id, or None
+    async def settle(self, reservation, settlement):   # the call reported usage
+        book(reservation, settlement.cost_usd, complete=settlement.complete)
+    async def release(self, reservation, *, outcome, detail):  # no usage came
+        drop_or_keep(reservation, outcome)
+
+provider = OpenAICompatibleProvider(spec, admission=DailyCap(), pricing=prices.get)
+```
+
+- `reserve(SpendEstimate)` is asked before each call (stream, text,
+  structured) with the endpoint, model, purpose, the estimated prompt size,
+  the output cap, the pricing's upper bound in `cost_usd` (when the model's
+  prices are known) and the request's observability context. Raising
+  `SpendRefused` refuses the call: nothing is sent, and the loop sees
+  `LLMProviderError` with a `budget` `ProviderFailure` — every rung meets the
+  same cap, so nothing retries it or moves past it. Returning `None` means
+  the call needs no accounting.
+- Exactly one of `settle` and `release` follows a reservation. `settle(id,
+  SpendSettlement)` carries the normalised usage, the raw usage, `cost_usd`
+  (the server's own `cost`, else the pricing's price) and `complete`, which is
+  `False` when the server reported no token counts: the call may still have
+  been billed, so a host usually keeps the reservation as spent. It runs
+  before the `usage` delta is yielded, because the loop may stop reading at
+  `finish`.
+- `release(id, outcome=..., detail=...)` says the call ended without usage:
+  `SpendEnd.refused` when the server answered with a 4xx or 5xx (usually not
+  billed), `SpendEnd.interrupted` when it was sent and never finished — a
+  broken stream, a first-byte timeout, a caller that stopped reading (output
+  may already have been generated).
+
+A failing `settle` or `release` is logged and never replaces the call's own
+result or error. Override `estimate_spend(request, body, purpose)` to estimate
+the prompt exactly; the default is the core's estimate of the messages and
+tools as they go on the wire, which only has to err high.
+
+`ModelPricing(input, output, cached_input=None, cache_write=None,
+reasoning=None)` holds US dollars per million tokens. `cost(usage)` prices
+fresh input, cache reads, cache writes, visible output and reasoning each at
+its own rate, reading the keys the adapter reports (`input_tokens` is the
+whole prompt, cache included; `output_tokens` includes `reasoning_tokens`).
+An omitted cache price is the input price and an omitted reasoning price the
+output price, so a missing number never makes tokens free.
+`estimate(prompt_tokens=, max_output_tokens=)` is the upper bound: no cache
+hit, the whole output cap spent at the dearer output rate. With `pricing=`
+given, a usage report without a server-stated cost gets `cost_usd` from the
+table, on the `usage` delta and on `LLMResponse.usage.response_cost_usd`.
+
 ## Exact token counts
 
 With `EndpointSpec(tokenize=TokenizeDialect.vllm)` or
@@ -239,6 +330,70 @@ vLLM counts the chat request on `POST /tokenize`; llama.cpp renders it on
 the server root (`base_url` without `/v1`, or `tokenize_url`). A server without
 the route answers 404 once and is not asked again; the count is then `None`,
 and the core uses its own estimate, which `count_tokens` also returns.
+
+## Finding a model's context window
+
+Everything that sizes a run reads the window, and a number typed by hand is a
+question many operators cannot answer. `ContextWindowResolver`
+(`protocore.providers.context_window`, pure Python) takes it from the first
+source that knows:
+
+1. **the server's own listing**, through a probe;
+2. **a catalogue** in the shape of models.dev's `api.json`, a file the host
+   downloads and passes in (`WindowCatalogue.from_file(path)`);
+3. **a table** of model-family patterns the host keeps
+   (`WindowTable({"family-*": 128_000})` or `WindowTable.from_toml(path)`,
+   reading a `[windows]` section; the most specific pattern wins, matched
+   against the id in lower case without a `vendor/` prefix or `:tag`);
+4. **a refusal**: a server that said "maximum context length is N tokens" has
+   stated the real limit, and when N is smaller than what the sources above
+   say it wins over all of them.
+
+```python
+from protocore.providers.context_window import ContextWindowResolver, WindowCatalogue
+from protocore.providers.openai_compat import ListingWindowProbe
+
+resolver = ContextWindowResolver(
+    probe=ListingWindowProbe.for_endpoint(spec, props=is_llama_cpp),
+    catalogue=WindowCatalogue.from_file(Path("models.json")),
+)
+provider = OpenAICompatibleProvider(spec, on_failure=resolver.observe_failure)
+window = await resolver.resolve("model-a")      # ResolvedWindow(tokens, source, detail) or None
+chain = ListProviderChain(rungs, window_of=resolver.rung_window)
+```
+
+Nothing is bundled: which models exist and how large they are changes every
+month, and a number shipped in a library goes stale long before anyone
+updates it. When no source knows, `resolve` returns `None` and the host keeps
+the number it has.
+
+- **The probe.** `ListingWindowProbe(base_url, *, client=None, api_key="",
+  headers=None, props=False)` reads `GET {base}/models` (and `{base}/v1/models`
+  for a base without `/v1`), then the model's own entry `GET .../models/{id}`;
+  with `props=True` it first reads llama.cpp's `GET /props`, the length the
+  server was started with rather than what the model was trained for. It
+  reads the window from whichever field a server uses (`max_model_len`,
+  `context_length`, `context_window`, `max_context_length`,
+  `loaded_context_length`, `max_input_tokens`, `inputTokenLimit`,
+  `limit.context`; `ENTRY_FIELDS` lists them in order). Every failure is quiet,
+  and redirects are never followed, since the request may carry the key. Any
+  async callable `model -> FoundWindow | None` is a probe.
+- **The cache.** A probe's answer is kept for `ttl_seconds` (a day) and a miss
+  for `miss_ttl_seconds` (ten minutes), so a server that never says is not
+  asked on every run while one that was down is asked again soon. Concurrent
+  `resolve` calls for one model share one probe. A probe that raises is
+  logged and counts as a miss.
+- **Refusals.** `observe_failure` has the shape of the adapter's `on_failure`
+  observer and learns only from a refusal classified as `context_overflow`;
+  `learn_refusal(model, text)` and `remember_refusal(model, tokens)` do it by
+  hand. `stated_window(text)` reads the OpenAI/vLLM, Anthropic, llama.cpp,
+  Google and LM Studio phrasings. A larger stated window never replaces a
+  smaller one. Learned windows live as long as the resolver; `learned()` hands
+  them to a host that persists them, and `forget(model)` starts over.
+- **Without waiting.** `known(model)` answers from what was resolved or
+  learned, never asking anyone, for decisions that cannot wait for a request.
+  `rung_window` is that for a chain rung: `ListProviderChain(window_of=...)`
+  uses it in the fit check (below).
 
 ## The provider chain
 
@@ -267,6 +422,11 @@ with its reason recorded in `attempted()`, when:
 - the `resting` check names it (an account that refused for a spent quota a
   minute ago);
 - its `factory` raises (a missing key or a bad URL is a fact about that rung).
+
+With `window_of=` (for instance a resolver's `rung_window`), the fit check
+uses the smaller of the rung's configured `context_window` and the window
+found out since: either one being right makes the larger a request the server
+refuses.
 
 A rung with a `factory` is built only when the run reaches it, so a run that
 never leaves the primary opens no pool for the others. The primary is never

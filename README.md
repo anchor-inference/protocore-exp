@@ -65,6 +65,7 @@ Python ≥ 3.12. Runtime dependencies are `pydantic`, `jinja2`, and
 ```bash
 pip install "protocore[testing]==2.0.0a25"   # run the conformance suites against your adapters
 pip install "protocore[openai]==2.0.0a25"    # the reference chat-completions adapter
+pip install "protocore[mcp]==2.0.0a25"       # an MCP server's tools as core tools
 ```
 
 `testing` adds a test runner and nothing more. `protocore.conformance` is a
@@ -77,6 +78,10 @@ someone changing the core, not to someone using it.
 adapter for any server that speaks the OpenAI chat-completions API (a hosted
 vendor, a gateway, vLLM, SGLang, llama.cpp). The core never imports it; see
 [Providers](docs/providers.md).
+
+`mcp` adds `httpx` for the streamable-HTTP transport of `protocore.mcp`, which
+publishes an MCP server's tools as one deferrable tool group; its stdio
+transport needs nothing. See [MCP](docs/mcp.md).
 
 Token estimation also has an optional native implementation, published as the
 separate distribution `protocore-native`. Wheels for it are not on the index
@@ -161,6 +166,7 @@ through what each event means and what to replace next.
 | [Runtime constants](docs/runtime-constants.md) | the configuration model |
 | [Extending the core](docs/extending.md) | adapters, hooks, toggles, prompt sections |
 | [Providers](docs/providers.md) | the reference chat-completions adapter and the provider chain |
+| [MCP](docs/mcp.md) | an MCP server's tools as core tools |
 | [Testing](docs/testing.md) | running the suite and the import-boundary guard |
 | [Glossary](docs/glossary.md) | key terms |
 

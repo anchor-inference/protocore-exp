@@ -14,6 +14,7 @@ from typing import Any, Literal
 from protocore.contracts.llm import ProviderDelta, ProviderDeltaKind
 from protocore.json_utils import OutputParserException, PartialJSONParser
 from protocore.logging_utils import get_logger
+from protocore.providers.text_tool_calls import TextToolCallGrammar, TextToolCallGuard
 
 _logger = get_logger(__name__)
 
@@ -123,12 +124,20 @@ class StreamAssembler:
 
     repair_partial_arguments: bool = True
     keep_reasoning_details: bool = False
+    #: Grammars of tool calls written as reply text; see
+    #: :mod:`protocore.providers.text_tool_calls`.
+    text_tool_calls: tuple[TextToolCallGrammar, ...] = ()
     usage: dict[str, Any] | None = None
     finish_reason: str | None = None
     reasoning_details: list[dict[str, Any]] = field(default_factory=list)
     _calls: dict[int, _OpenCall] = field(default_factory=dict)
     _slot_by_index: dict[int, int] = field(default_factory=dict)
     _stream_tag: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    _guard: TextToolCallGuard | None = None
+
+    def __post_init__(self) -> None:
+        if self.text_tool_calls:
+            self._guard = TextToolCallGuard(self.text_tool_calls)
 
     def feed(self, chunk: dict[str, Any]) -> list[ProviderDelta]:
         """The deltas one parsed chunk produces; a ``progress`` delta when it said nothing.
@@ -162,7 +171,13 @@ class StreamAssembler:
                     self.reasoning_details.extend(item for item in details if isinstance(item, dict))
             content = delta.get("content")
             if isinstance(content, str) and content:
-                out.append(ProviderDelta(kind=ProviderDeltaKind.text, content=content))
+                shown = self._guard.feed(content) if self._guard is not None else content
+                if shown:
+                    out.append(ProviderDelta(kind=ProviderDeltaKind.text, content=shown))
+                else:
+                    # Held text still proves the server is alive; without a
+                    # delta a long held block would read as a stalled stream.
+                    out.append(ProviderDelta(kind=ProviderDeltaKind.progress))
                 spoke = True
             for call in delta.get("tool_calls") or ():
                 if isinstance(call, dict):
@@ -242,7 +257,7 @@ class StreamAssembler:
         the loop down its resume-the-call branch instead of dispatching half a
         call.
         """
-        out: list[ProviderDelta] = []
+        out = self._release_held_text()
         cut_by_cap = self.resolved_finish() == "length"
         for slot in sorted(self._calls):
             call = self._calls[slot]
@@ -263,6 +278,32 @@ class StreamAssembler:
             )
         self._calls.clear()
         self._slot_by_index.clear()
+        return out
+
+    def _release_held_text(self) -> list[ProviderDelta]:
+        """The text the guard held, and the calls it encoded opened as ordinary calls.
+
+        A recovered call joins the open calls, so it closes exactly like one
+        the server sent: the loop cannot tell them apart, which is the point.
+        It also turns a ``stop`` into ``tool_calls``, because the server
+        reported the turn as finished when the model had in fact asked for a
+        tool.
+        """
+        if self._guard is None:
+            return []
+        held = self._guard.finish()
+        out: list[ProviderDelta] = []
+        if held.prose:
+            out.append(ProviderDelta(kind=ProviderDeltaKind.text, content=held.prose))
+        for number, call in enumerate(held.calls):
+            slot = len(self._calls)
+            self._calls[slot] = _OpenCall(
+                call_id=f"call_{self._stream_tag}_text{number}", name=call.name, arguments=call.arguments_json
+            )
+        if held.calls:
+            _logger.info("recovered %d tool call(s) written as text", len(held.calls))
+            if self.finish_reason in (None, "stop"):
+                self.finish_reason = "tool_calls"
         return out
 
     def _parse_arguments(self, raw: str) -> tuple[dict[str, Any], bool]:

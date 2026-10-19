@@ -393,7 +393,8 @@ description, load mode and instructions, and the loop decides again on its
 next request. An explicit `tool_group` wins over a prefix; among prefixes the
 longest wins. Membership never reaches the wire and is not part of the surface
 digest. A **dynamic** group is one whose membership is not the host's own code —
-an MCP server's proxies.
+an MCP server's proxies. `protocore.mcp` declares one for each server it
+connects ([MCP](mcp.md)).
 
 `undeclare_group(name)` forgets a group, and forgetting one that was never
 declared is not an error. A host calls it when a group's tools are gone for good

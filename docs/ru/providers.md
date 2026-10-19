@@ -81,6 +81,7 @@ engine = QueryEngine(config=config, llm_provider=provider, ...)
 | `max_tokens_field` | `max_tokens` | поле тела для предела вывода (`max_completion_tokens` у новых рассуждающих моделей OpenAI) |
 | `json_schema_response` | `False` | `complete_structured` просит `json_schema`, а не `json_object` |
 | `repair_partial_arguments` | `True` | отдавать циклу починенный префикс обрезанного вызова |
+| `text_tool_calls` | `()` | разметки, которыми модель пишет вызовы инструментов текстом (ниже) |
 
 ### Диалекты размышления
 
@@ -182,6 +183,34 @@ API отвергает запрос, где у результата инстру
 включайте сторож для локального сервера, который может минутами читать длинный
 промпт до первого байта.
 
+### Вызовы инструментов, написанные текстом
+
+Некоторые модели время от времени пишут вызов инструмента своей разметкой
+прямо в ответе, а не структурированным вызовом. Сервер передаёт его как
+текст: разметку видит читатель, а ход заканчивается без вызова. Укажите
+разметку в `ProviderCapabilities(text_tool_calls=(DSML,))`, и адаптер
+пропускает текстовый поток через `TextToolCallGuard`
+(`protocore.providers.text_tool_calls`, чистый Python):
+
+- текст до маркера отдаётся сразу (ждут следующего куска только те несколько
+  символов, что могут оказаться началом маркера, разрезанного между кусками);
+- начиная с маркера текст придерживается, а вместо каждого придержанного
+  куска циклу уходит дельта `progress`, чтобы сторож простоя не оборвал поток;
+- в конце потока законченный блок становится обычными вызовами (по
+  `tool_use_start` и `tool_use_stop` на каждый, id `call_<поток>_text<n>`), а
+  завершение `stop` становится `tool_use`; текст вокруг блока отдаётся;
+- незаконченный блок отдаётся без изменений, как и придержанный текст,
+  который перерос предел (4 000 символов) и не похож на блок вызовов: модель,
+  которая лишь упоминает разметку, сохраняет свой ответ.
+
+`DSML` (`DsmlGrammar`) читает разметку DeepSeek `<｜DSML｜tool_calls>` при
+любом написании черт; параметр с `string="true"` — текст, любой другой
+читается как JSON. Другая разметка — класс с `name`, `markers`,
+`is_call_block(held)` и `parse(held) -> ParsedText | None`
+(`TextToolCallGrammar`); побеждает самый ранний маркер из перечисленных
+грамматик. Страж не привязан к этому адаптеру: любой адаптер может
+пропускать через него свои текстовые дельты.
+
 ## Сбои
 
 Каждая ошибка адаптера несёт `ProviderFailure`
@@ -230,6 +259,67 @@ available context size (N tokens)»).
   ошибку вызова. `FailureObservation` хранит только заголовки повтора, так что
   не может сохранить учётные данные, которые вернул прокси.
 
+## Бюджет расходов и цены
+
+Цикл считает токены; деньги считает хост. Адаптер даёт этому решению одно
+место (`protocore.providers.spend`, чистый Python):
+
+```python
+from protocore.providers.spend import ModelPricing, SpendRefused
+
+prices = {"model-a": ModelPricing(input=0.30, output=1.20, cached_input=0.03)}
+
+class DailyCap:
+    async def reserve(self, estimate):          # перед каждым вызовом
+        if spent_today() + (estimate.cost_usd or 0) > CAP:
+            raise SpendRefused("daily cap reached", retry_after_seconds=until_midnight())
+        return hold(estimate)                   # id резерва или None
+    async def settle(self, reservation, settlement):   # вызов сообщил расход
+        book(reservation, settlement.cost_usd, complete=settlement.complete)
+    async def release(self, reservation, *, outcome, detail):  # расхода не пришло
+        drop_or_keep(reservation, outcome)
+
+provider = OpenAICompatibleProvider(spec, admission=DailyCap(), pricing=prices.get)
+```
+
+- `reserve(SpendEstimate)` спрашивается перед каждым вызовом (поток, текст,
+  структурированный) с эндпоинтом, моделью, назначением, оценкой размера
+  промпта, потолком вывода, верхней границей цены в `cost_usd` (когда цены
+  модели известны) и контекстом наблюдаемости запроса. Исключение
+  `SpendRefused` отказывает в вызове: ничего не отправляется, а цикл видит
+  `LLMProviderError` с `ProviderFailure` причины `budget` — каждая ступень
+  цепочки упирается в тот же потолок, поэтому ничто его не повторяет и не
+  обходит. `None` означает, что вызов не нужно учитывать.
+- За резервом следует ровно один из `settle` и `release`. `settle(id,
+  SpendSettlement)` несёт нормализованный расход, сырой расход, `cost_usd`
+  (собственный `cost` сервера, иначе цену по таблице) и `complete`, равный
+  `False`, когда сервер не сообщил ни одного счётчика токенов: вызов мог быть
+  оплачен, так что хост обычно оставляет резерв потраченным. Он выполняется до
+  дельты `usage`, потому что цикл может перестать читать на `finish`.
+- `release(id, outcome=..., detail=...)` сообщает, что вызов кончился без
+  расхода: `SpendEnd.refused`, когда сервер ответил 4xx или 5xx (обычно не
+  оплачивается), `SpendEnd.interrupted`, когда запрос ушёл и не закончился —
+  оборванный поток, тайм-аут первого байта, вызывающий перестал читать (вывод
+  мог уже быть сгенерирован).
+
+Упавший `settle` или `release` пишется в лог и никогда не заменяет
+собственный результат или ошибку вызова. Переопределите
+`estimate_spend(request, body, purpose)`, чтобы оценивать промпт точно; по
+умолчанию это оценка ядра для сообщений и инструментов в том виде, в каком
+они уходят на провод, — ей достаточно ошибаться в большую сторону.
+
+`ModelPricing(input, output, cached_input=None, cache_write=None,
+reasoning=None)` хранит доллары США за миллион токенов. `cost(usage)`
+оценивает свежий ввод, чтение кэша, запись в кэш, видимый вывод и
+рассуждения каждый по своей ставке, читая ключи, которые сообщает адаптер
+(`input_tokens` — весь промпт вместе с кэшем; `output_tokens` включает
+`reasoning_tokens`). Не указанная цена кэша равна цене ввода, а не указанная
+цена рассуждений — цене вывода, так что пропущенное число никогда не делает
+токены бесплатными. `estimate(prompt_tokens=, max_output_tokens=)` — верхняя
+граница: ни одного попадания в кэш, весь потолок вывода по более дорогой
+ставке. С `pricing=` расход без цены от сервера получает `cost_usd` из
+таблицы — в дельте `usage` и в `LLMResponse.usage.response_cost_usd`.
+
 ## Точный подсчёт токенов
 
 С `EndpointSpec(tokenize=TokenizeDialect.vllm)` или
@@ -242,6 +332,72 @@ available context size (N tokens)»).
 Сервер без маршрута один раз отвечает 404, и его больше не спрашивают; тогда
 подсчёт — `None`, и ядро берёт собственную оценку, которую возвращает и
 `count_tokens`.
+
+## Как узнать окно контекста модели
+
+Окно читает всё, что задаёт размеры прогона, а число, введённое руками, —
+вопрос, на который многие операторы ответить не могут. `ContextWindowResolver`
+(`protocore.providers.context_window`, чистый Python) берёт его из первого
+источника, который знает:
+
+1. **собственный список моделей сервера** — через пробу;
+2. **каталог** в форме `api.json` models.dev — файл, который хост скачивает
+   и передаёт (`WindowCatalogue.from_file(path)`);
+3. **таблица** шаблонов семейств моделей, которую ведёт хост
+   (`WindowTable({"family-*": 128_000})` или `WindowTable.from_toml(path)`,
+   читающий раздел `[windows]`; побеждает самый конкретный шаблон, а
+   сравнивается id в нижнем регистре без префикса `vendor/` и `:tag`);
+4. **отказ**: сервер, который сказал «maximum context length is N tokens»,
+   назвал настоящий предел, и если N меньше, чем говорят источники выше, оно
+   побеждает их все.
+
+```python
+from protocore.providers.context_window import ContextWindowResolver, WindowCatalogue
+from protocore.providers.openai_compat import ListingWindowProbe
+
+resolver = ContextWindowResolver(
+    probe=ListingWindowProbe.for_endpoint(spec, props=is_llama_cpp),
+    catalogue=WindowCatalogue.from_file(Path("models.json")),
+)
+provider = OpenAICompatibleProvider(spec, on_failure=resolver.observe_failure)
+window = await resolver.resolve("model-a")      # ResolvedWindow(tokens, source, detail) или None
+chain = ListProviderChain(rungs, window_of=resolver.rung_window)
+```
+
+Ничего не поставляется в комплекте: какие модели существуют и каков их
+размер, меняется каждый месяц, и число, зашитое в библиотеку, устаревает
+задолго до того, как его кто-нибудь обновит. Когда ни один источник не знает,
+`resolve` возвращает `None`, и хост оставляет своё число.
+
+- **Проба.** `ListingWindowProbe(base_url, *, client=None, api_key="",
+  headers=None, props=False)` читает `GET {base}/models` (и `{base}/v1/models`
+  для базы без `/v1`), затем собственную запись модели `GET .../models/{id}`;
+  с `props=True` она сначала читает `GET /props` llama.cpp — длину, с которой
+  запущен сервер, а не ту, на которой обучалась модель. Окно читается из того
+  поля, которое использует сервер (`max_model_len`, `context_length`,
+  `context_window`, `max_context_length`, `loaded_context_length`,
+  `max_input_tokens`, `inputTokenLimit`, `limit.context`; `ENTRY_FIELDS`
+  перечисляет их по порядку). Любой сбой тих, а перенаправления не
+  выполняются, потому что запрос может нести ключ. Пробой служит любая
+  асинхронная функция `model -> FoundWindow | None`.
+- **Кэш.** Ответ пробы хранится `ttl_seconds` (сутки), а промах —
+  `miss_ttl_seconds` (десять минут), так что сервер, который никогда не
+  отвечает, не спрашивают на каждом прогоне, а тот, что был недоступен,
+  спросят снова скоро. Одновременные `resolve` одной модели делят одну пробу.
+  Проба, бросившая исключение, пишется в лог и считается промахом.
+- **Отказы.** `observe_failure` имеет форму наблюдателя `on_failure`
+  адаптера и учится только на отказе, классифицированном как
+  `context_overflow`; `learn_refusal(model, text)` и
+  `remember_refusal(model, tokens)` делают это вручную. `stated_window(text)`
+  читает формулировки OpenAI/vLLM, Anthropic, llama.cpp, Google и LM Studio.
+  Большее названное окно никогда не заменяет меньшее. Выученные окна живут,
+  пока жив резолвер; `learned()` отдаёт их хосту, который их сохраняет, а
+  `forget(model)` начинает заново.
+- **Без ожидания.** `known(model)` отвечает из уже найденного или
+  выученного, никого не спрашивая, — для решений, которые не могут ждать
+  запроса. `rung_window` — то же для ступени цепочки:
+  `ListProviderChain(window_of=...)` использует его в проверке вместимости
+  (ниже).
 
 ## Цепочка провайдеров
 
@@ -271,6 +427,11 @@ chain.bind_prompt_size(engine.prompt_tokens_now)
   минуту назад);
 - её `factory` бросает исключение (нет ключа или плохой URL — факт об этой
   ступени).
+
+С `window_of=` (например, `rung_window` резолвера) проверка вместимости берёт
+меньшее из настроенного `context_window` ступени и окна, найденного с тех
+пор: если право хоть одно из них, большее — это запрос, от которого сервер
+откажется.
 
 Ступень с `factory` строится только тогда, когда прогон до неё доходит, так что
 прогон, не покинувший основную, не открывает пулов для остальных. Основная
