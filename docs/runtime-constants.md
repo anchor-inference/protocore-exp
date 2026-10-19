@@ -133,6 +133,12 @@ default-**off**: `intent_settlement_enabled`, `usage_ledger_enabled`,
 `lanes_enabled`, `typed_hooks_enabled`, `telemetry_spans_enabled`,
 `compaction_manual_enabled`, `steer_follow_up_enabled`.
 
+`step_settings_event_enabled` (default `False`) puts an
+`EventType.STEP_SETTINGS` event before every request of a model step, carrying
+the settings the request was built with and the names of those that changed
+since the step before. The record itself (`QueryEngine.last_step_settings`,
+also written into the snapshot) is kept whether the flag is on or not.
+
 The snapshot carries only what the loop itself reads. Knobs that govern a
 surface the host owns — authentication policy, session storage, the transport
 to a provider — are declared by the host in its own model and reach the

@@ -142,6 +142,7 @@ from protocore.contracts.skills import (
     SkillIndexEntry,
     SkillStoreError,
 )
+from protocore.contracts.step_settings import StepSettings, settle_step_settings
 from protocore.contracts.todo import ITodoStorage, TodoStorageError
 from protocore.contracts.tool_outcome import (
     IToolOutcomeStore,
@@ -348,6 +349,7 @@ __all__ = [
     "SkillIndexEntry",
     "SkillManifest",
     "SkillStoreError",
+    "StepSettings",
     "StopReason",
     "SubagentDef",
     "SubagentHandle",
@@ -407,4 +409,5 @@ __all__ = [
     "WorkspaceWriteOutcome",
     "assert_verification_transition",
     "message_image_refs",
+    "settle_step_settings",
 ]

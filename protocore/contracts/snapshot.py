@@ -37,7 +37,7 @@ from typing import Any
 SNAPSHOT_SCHEMA_KEY = "schema_version"
 
 #: The schema version this build writes and can read after upcasting.
-SNAPSHOT_SCHEMA_VERSION = 8
+SNAPSHOT_SCHEMA_VERSION = 9
 
 #: Where the run's own state sits inside the snapshot payload: the tree's
 #: cumulative work ledger and the capacity of its concurrency budget, the two
@@ -420,6 +420,23 @@ def _v7_to_v8(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 UPCASTERS.register(7, _v7_to_v8)
+
+
+def _v8_to_v9(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Version 9 keeps the settings the run's last model step ran with.
+
+    ``last_step_settings`` is what the next step's record names its changes
+    against, so a resumed run can say that the model it now runs on is not
+    the one the step before the restart used. A version-8 run recorded no
+    step's settings, so the lift says exactly that, and the first step after
+    the resume reports nothing as changed, as a fresh run's first step does.
+    """
+    lifted = dict(snapshot)
+    lifted.setdefault("last_step_settings", None)
+    return lifted
+
+
+UPCASTERS.register(8, _v8_to_v9)
 
 
 def migrate_snapshot(

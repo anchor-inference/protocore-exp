@@ -28,6 +28,8 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from pydantic import ValidationError
+
 from protocore.contracts.background import (
     BACKGROUND_TERMINAL_STATUSES,
     IBackgroundTaskPool,
@@ -85,6 +87,7 @@ from protocore.contracts.snapshot import (
     SNAPSHOT_SCHEMA_VERSION,
     migrate_snapshot,
 )
+from protocore.contracts.step_settings import StepSettings
 from protocore.contracts.tool_outcome import IToolOutcomeStore
 from protocore.contracts.tool_registry import (
     TOOL_GROUP_LOADS,
@@ -245,6 +248,27 @@ def _parse_request_manifest_reference(
             "one addresses nothing"
         )
     return dict(reference)
+
+
+def _parse_step_settings(snapshot: dict[str, Any]) -> StepSettings | None:
+    """Read the last step's settings out of a snapshot, or refuse the snapshot.
+
+    Absent or ``None`` is a run that has not built a request yet. Anything else
+    must be the record itself: a malformed one is refused before the engine is
+    touched, like every other field the restore reads.
+    """
+    stored = snapshot.get("last_step_settings")
+    if stored is None:
+        return None
+    if not isinstance(stored, dict):
+        raise ValueError(
+            "last_step_settings must be a mapping or absent, got "
+            f"{type(stored).__name__}"
+        )
+    try:
+        return StepSettings.model_validate(stored)
+    except ValidationError as exc:
+        raise ValueError(f"last_step_settings is not a step's settings: {exc}") from exc
 
 
 def _parse_run_continuity(snapshot: dict[str, Any]) -> _RunContinuity:
@@ -973,6 +997,11 @@ class QueryEngine:
             # that dropped it would leave the next process with no way to say
             # which call the run was on when it was picked up.
             "_last_request_manifest",
+            # The settings the last model step ran with. Evidence about the
+            # run, like the manifest id beside it, and what the next step's
+            # record names its changes against — a re-arm that dropped it
+            # would report a changed model as no change at all.
+            "_last_step_settings",
         }
     )
 
@@ -1679,6 +1708,10 @@ class QueryEngine:
         # manifested, which is also what a run configured with no sink looks
         # like.
         self._last_request_manifest: dict[str, Any] | None = None
+        # The settings the last model step's request was built with; see
+        # :mod:`protocore.contracts.step_settings`. ``None`` until the run has
+        # built a request.
+        self._last_step_settings: StepSettings | None = None
 
         # Context manager — rebuild on each turn for fresh RC
         self.context_manager = ContextManager(
@@ -3297,6 +3330,13 @@ class QueryEngine:
             if self._last_request_manifest is not None
             else None
         )
+        # Small by construction — names, digests and limits — so it travels
+        # whole: a resumed run's first step names its changes against it.
+        snapshot["last_step_settings"] = (
+            self._last_step_settings.model_dump(mode="json")
+            if self._last_step_settings is not None
+            else None
+        )
         if self._verification_lifecycle != VerificationLifecycle():
             snapshot["verification"] = self._verification_lifecycle.snapshot()
         snapshot["open_intents"] = [
@@ -3527,6 +3567,7 @@ class QueryEngine:
         # host never kept, or has since aged out, is evidence this run does not
         # have rather than a run that cannot continue.
         restored_manifest_reference = _parse_request_manifest_reference(snapshot)
+        restored_step_settings = _parse_step_settings(snapshot)
         compaction = snapshot.get("compaction", {})
         restored_compaction = CompactionState(
             retry_count=int(compaction.get("retry_count", 0)),
@@ -3983,6 +4024,7 @@ class QueryEngine:
         self.spans = restored_continuity.spans
         self._resumed_skill_catalog_sha256 = restored_continuity.skill_catalog_block_sha256
         self._last_request_manifest = restored_manifest_reference
+        self._last_step_settings = restored_step_settings
         self.context_manager.restore_discovered_tools(
             restored_continuity.discovered_tools, replace=True
         )
@@ -4195,6 +4237,15 @@ class QueryEngine:
         return self.context_manager.needs_emergency_compaction(
             self.history, current_tokens=self.prompt_tokens_now()
         )
+
+    @property
+    def last_step_settings(self) -> StepSettings | None:
+        """The settings the last model step's request was built with."""
+        return self._last_step_settings
+
+    def note_step_settings(self, settings: StepSettings) -> None:
+        """Record the settings of the request now being made."""
+        self._last_step_settings = settings
 
     @property
     def last_request_manifest(self) -> dict[str, Any] | None:

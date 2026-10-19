@@ -86,6 +86,7 @@ from protocore.contracts.observability import (
     RequestManifest,
     build_request_manifest,
     constants_digest,
+    digest_of,
 )
 from protocore.contracts.outcome import RunCause
 from protocore.contracts.run_state import RunScopedState
@@ -95,6 +96,7 @@ from protocore.contracts.skills import (
     SkillIndexEntry,
     SkillNotFoundError,
 )
+from protocore.contracts.step_settings import StepSettings, settle_step_settings
 from protocore.contracts.tool_chunking import (
     CHUNKABLE_CONTENT_FIELD,
     chunkable_content_mutation_names,
@@ -106,6 +108,7 @@ from protocore.contracts.tool_registry import (
     TOOL_GROUP_RULES_GIVEN_METADATA_KEY,
     TOOL_GROUP_RULES_MARK_METADATA_KEY,
     TOOLS_LOADED_THIS_STEP_METADATA_KEY,
+    ToolVisibilityPolicy,
 )
 from protocore.contracts.tool_roles import (
     WORKSPACE_INSPECTION_ROLES,
@@ -1725,6 +1728,77 @@ async def _manifest_request(
             exc,
         )
     return manifest
+
+
+def _tool_policy_digest(policy: ToolVisibilityPolicy) -> str:
+    """One value for the visibility policy a step's calls are checked against.
+
+    Built from sorted names rather than from a dump of the model: the policy
+    holds sets, and a set's order is not a property of the policy.
+    """
+    return digest_of(
+        {
+            "visible": sorted(policy.visible),
+            "blocked": sorted(policy.blocked),
+            "pinned": sorted(policy.pinned),
+            "forced_pinned": sorted(policy.forced_pinned),
+        }
+    )
+
+
+def _record_step_settings(
+    engine: QueryEngine,
+    request: LLMRequest,
+    *,
+    tool_surface_digest: str,
+    forced_tool: str | None,
+) -> StepSettings:
+    """Write down what this step's request was built with, against the step before.
+
+    The record is kept on the engine whether or not anyone asked for the
+    event, because the next step's record names its changes against it and a
+    resumed run reads it from the snapshot.
+    """
+    chain = engine.provider_chain
+    manifest = engine.last_request_manifest
+    rc = engine.config.rc
+    thinking = request.extra.get("enable_thinking")
+    effort = request.extra.get("reasoning_effort")
+    settings = settle_step_settings(
+        {
+            "turn_id": engine.turn_id(),
+            "model": request.model,
+            "provider_model": chain.current_model_name() if chain is not None else None,
+            "provider_rung": engine._provider_chain_advances,
+            "thinking_enabled": thinking if isinstance(thinking, bool) else None,
+            "reasoning_effort": effort if isinstance(effort, str) else None,
+            "forced_tool": forced_tool,
+            "tool_surface_digest": tool_surface_digest,
+            "tool_count": len(request.tools),
+            "tool_policy_digest": _tool_policy_digest(engine.effective_tool_policy),
+            "rules_mark": engine._tool_rules_mark,
+            "execution_profile": engine.config.execution_profile,
+            "run_mode": engine.config.run_mode,
+            "max_output_tokens": request.max_tokens,
+            "context_window": rc.model_context_window,
+            "max_turns_per_run": rc.max_turns_per_run,
+            "tool_timeout_seconds": float(rc.tool_timeout_seconds),
+            "request_manifest_id": (
+                str(manifest["manifest_id"]) if manifest is not None else None
+            ),
+        },
+        previous=engine.last_step_settings,
+    )
+    engine.note_step_settings(settings)
+    if settings.changed:
+        _logger.info(
+            "DIAG query.step_settings.changed run=%s turn=%s attempt=%d changed=%s",
+            engine.config.run_id,
+            settings.turn_id,
+            settings.attempt,
+            ",".join(settings.changed),
+        )
+    return settings
 
 
 def _provider_call_category(engine: QueryEngine) -> str:
@@ -4987,6 +5061,21 @@ async def _drive_one_stream(
             len(engine.history),
         )
     await _manifest_request(engine, request, call_purpose="run")
+    # Recorded from the request itself, after the fit and the manifest, so the
+    # record is what the provider is about to be handed and not a reading of
+    # settings a live change may already have moved on from.
+    step_settings = _record_step_settings(
+        engine,
+        request,
+        tool_surface_digest=advert.digest,
+        forced_tool=forced_tool_choice,
+    )
+    if rc.step_settings_event_enabled:
+        yield TurnEvent(
+            type=EventType.STEP_SETTINGS,
+            run_id=engine.config.run_id,
+            payload=step_settings.model_dump(mode="json"),
+        )
 
     # Capture the post-fit value that is actually handed to the provider. If
     # this call is rejected for context length, its retry ceiling must be

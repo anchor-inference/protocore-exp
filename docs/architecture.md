@@ -826,6 +826,19 @@ result ids reserved, so a run that dies mid-flight can be told apart from one
 that never started — see
 [Intent, usage ledger, …](#intent-usage-ledger-session-tree-lanes-typed-hooks-telemetry-live-control-run-work-budget).
 
+**Settings per step.** A setting changed while a run is going — a live model
+or effort switch, a provider chain falling back, a tool group's rules given, a
+widened surface — takes effect at the next request, never inside the one in
+flight. Every request the loop builds for a model step therefore leaves a
+`StepSettings` record (`contracts/step_settings.py`) built from the request
+itself, after the fit and the manifest: what it named, its digest, and the
+fields that changed since the step before. It is kept as
+`QueryEngine.last_step_settings` and in the snapshot, so the first step of a
+resumed run names its changes against the step before the restart; with
+`step_settings_event_enabled` it is also a `step_settings` event just before
+the request is handed to the provider. A host labels a finished step with the
+record rather than with whatever the settings say afterwards.
+
 **Durable outcome before placement.** The calls of one model message can run
 together (a read fan-out, a delegation group), and their results are placed in
 history in the order the model asked for them, so placement waits for the

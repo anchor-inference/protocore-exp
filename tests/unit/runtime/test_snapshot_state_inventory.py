@@ -318,7 +318,7 @@ async def test_a_version_one_payload_is_lifted_and_resumes_empty(engine_factory)
     source = engine_factory(run_id="run-1", tenant_id="scope-1", session_id="session-1")
     source.turn_count = 5
     payload = source.snapshot()
-    assert payload["schema_version"] == SNAPSHOT_SCHEMA_VERSION == 8
+    assert payload["schema_version"] == SNAPSHOT_SCHEMA_VERSION == 9
     # A version-1 payload named the run's two allowances at the top level.
     run_state_payload = payload.pop(RUN_SCOPED_STATE_SNAPSHOT_KEY)
     payload["run_work_ledger"] = run_state_payload["run_work_ledger"]
@@ -334,6 +334,7 @@ async def test_a_version_one_payload_is_lifted_and_resumes_empty(engine_factory)
         "deferred_tool_groups",
         "tool_group_rules_given",
         "skill_catalog_block_sha256",
+        "last_step_settings",
     ):
         del payload[key]
     payload["schema_version"] = 1
@@ -345,6 +346,7 @@ async def test_a_version_one_payload_is_lifted_and_resumes_empty(engine_factory)
     assert resumed.compact_checkpoint is None
     assert resumed.active_rule_paths == []
     assert resumed.context_manager.discovered_tool_names() == ()
+    assert resumed.last_step_settings is None
 
 
 # ── the mirror axis: what travels out has to come back in ───────────────────

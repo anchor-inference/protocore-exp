@@ -369,6 +369,18 @@ Three distinct run shapes — do not conflate them (see
   its concurrency budget. Live objects (an `asyncio.Event`, a semaphore, a
   lock) are per-process by nature and are rebuilt by whoever wires the resumed
   run, never restored from a payload.
+- **`StepSettings`** (`contracts/step_settings.py`) — what one request of one
+  model step was built with: the model, the provider chain's rung, thinking and
+  effort, the forced tool, the digests of the advertised tool surface and of the
+  visibility policy, the tool-group rules mark, the profile and mode, and the
+  limits (output tokens, context window, step ceiling, tool timeout). `digest`
+  is one value over those fields; `changed` names the ones that differ from the
+  step before; `attempt` counts the requests of one wire round (a reactive
+  retry or a fallback rung is a second attempt). Built with
+  `settle_step_settings`, kept as `QueryEngine.last_step_settings` and in the
+  snapshot (schema version 9), and emitted as a `step_settings` event when
+  `step_settings_event_enabled` is on. Holds no prompt, credential or tool
+  argument.
 - **`SNAPSHOT_SCHEMA_VERSION`** / **`SnapshotUpcaster`** /
   **`SnapshotSchemaError`** (`contracts/snapshot.py`) — the snapshot states its
   own schema version, and a reader that cannot recognise it refuses the payload

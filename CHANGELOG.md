@@ -8,6 +8,18 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- **Every model step records the settings its request was built with.**
+  `StepSettings` (`protocore.contracts.step_settings`) holds the model, the
+  provider chain's rung, thinking and effort, the forced tool, the digests of
+  the tool surface and the visibility policy, the rules mark, the profile and
+  mode and the relevant limits, with a digest over them and `changed`, the
+  fields that differ from the step before. A change made mid-run shows up on
+  the next step's record, which is where it took effect. The record is kept
+  as `QueryEngine.last_step_settings` and in the snapshot; with the new
+  `LoopConstants.step_settings_event_enabled` (default `False`) it is also a
+  `step_settings` event before each request. Leaving the flag off keeps the
+  event stream as it was. The snapshot schema moves to version 9; a version 8
+  payload is lifted with no step recorded.
 - **`IToolOutcomeStore` makes each tool call's outcome durable the moment it
   exists, ahead of its place in history.** Pass one as
   `QueryEngine(tool_outcome_store=...)`. A call whose repeat is not harmless is
@@ -114,6 +126,9 @@ All notable changes to this project are recorded here. The format follows
 
 ### Changed
 
+- **The snapshot schema is version 9.** It adds `last_step_settings`; a
+  version 8 payload is lifted with `None` there, and a build at version 8
+  refuses a version 9 payload, as it refuses any newer one.
 - **`ToolPermissionGate(policies=[])` installs no policy.** An empty list read
   as "use the defaults", so a host that passed one to turn the shell deny list
   off still had it. Only `None` means the defaults now.
