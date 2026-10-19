@@ -88,6 +88,7 @@ from protocore.contracts.observability import (
     constants_digest,
 )
 from protocore.contracts.outcome import RunCause
+from protocore.contracts.recovery import RecoveryKind
 from protocore.contracts.run_state import RunScopedState
 from protocore.contracts.skills import (
     ISkillStore,
@@ -485,7 +486,18 @@ def _empty_rounds_spent(engine: QueryEngine) -> int:
 
 
 def _charge_empty_round(engine: QueryEngine) -> int:
+    """Count one empty round, and draw the re-ask it earns from the recovery budget.
+
+    A refused draw reports the round as past the bound, so the policy goes to
+    its wind-down or terminal instead of re-asking: the re-ask is a recovery
+    like any other, and the budget is what keeps the layers from multiplying.
+    """
     engine._consecutive_empty_responses += 1
+    if not engine.recovery_budget.draw(RecoveryKind.empty_response):
+        return max(
+            engine._consecutive_empty_responses,
+            engine.config.rc.max_consecutive_empty_responses + 1,
+        )
     return engine._consecutive_empty_responses
 
 
@@ -576,6 +588,11 @@ def _model_changed_event(
             "failure": None if failure is None else failure.model_dump(mode="json"),
         },
     )
+
+
+def _draw_transient_retry(engine: QueryEngine) -> bool:
+    """Draw one in-place retry from the run's recovery budget."""
+    return engine.recovery_budget.draw(RecoveryKind.transient_retry)
 
 
 def _current_chain_rung(engine: QueryEngine) -> str:
@@ -791,13 +808,24 @@ def _log_output_token_budget_exhausted(
 
 
 def _empty_completion_redrives_spent(engine: QueryEngine) -> int:
-    """How many re-drives this run has already spent on an empty finish."""
+    """How many re-drives this run has already spent on an empty finish.
+
+    Reported as all of them when the run's recovery budget refuses another
+    draw, so the guard closes the run instead of re-asking on an allowance the
+    other layers already spent.
+    """
+    if not engine.recovery_budget.permits():
+        return max(
+            engine._empty_completion_redrive_count,
+            engine.config.rc.empty_completion_guard_max_redrives,
+        )
     return engine._empty_completion_redrive_count
 
 
 def _charge_empty_completion_redrive(engine: QueryEngine) -> None:
-    """Spend one of them."""
+    """Spend one of them, and one draw of the run's recovery budget."""
     engine._empty_completion_redrive_count += 1
+    engine.recovery_budget.draw(RecoveryKind.empty_response)
 
 
 def _log_answer_floor_repair(
@@ -3015,8 +3043,14 @@ async def _advance_provider_chain(
         return ""
     if engine._provider_chain_advances >= engine.config.rc.llm_provider_chain_max_advances:
         return ""
+    # Checked before the step and drawn after it: a chain with no rung left
+    # recovered nothing, and charging it would spend the allowance of the
+    # retry the caller falls through to.
+    if not engine.recovery_budget.permits():
+        return ""
     if not await chain.advance(reason=kind):
         return ""
+    engine.recovery_budget.draw(RecoveryKind.chain_advance)
     engine._provider_chain_advances += 1
     engine.llm = chain.current()
     engine.config = replace(engine.config, model_name=chain.current_model_name())
@@ -3622,6 +3656,11 @@ async def _stream_one_assistant_message(
             if _turn.outcome.tool_calls is not None:
                 pending_tool_calls = list(_turn.outcome.tool_calls)
             stream_result.tool_calls = history_tool_calls
+            if text_buffer.strip() or pending_tool_calls:
+                # The provider answered with something to act on, which ends
+                # the recovery stretch. A round of reasoning alone does not:
+                # re-asking after it is itself a recovery.
+                engine.recovery_budget.settle()
             break
 
         # The inner loop has stopped re-streaming, so this assistant message
@@ -5674,7 +5713,10 @@ async def _handle_context_window_exceeded(
     if (
         engine._reactive_compaction_attempted_for_current_turn
         and (attempts_exhausted or not retry_strictly_shrinks)
-    ):
+    ) or not engine.recovery_budget.draw(RecoveryKind.context_overflow):
+        # The second operand runs only when a recovery is still on the table:
+        # shrinking the request is a draw like a retry, and a run whose budget
+        # is spent ends on the overflow rather than compacting on credit.
         async for evt in _emit_llm_terminal(
             engine, exc, kind="llm_context_window_exceeded"
         ):
@@ -13346,6 +13388,7 @@ _CORE_TURN_POLICIES: Final[TurnPolicyRegistry] = TurnPolicyRegistry(
             log_failure=_policy_log_stream_failure,
             model_changed_event=_model_changed_event,
             current_rung=_current_chain_rung,
+            draw_retry=_draw_transient_retry,
         ),
         TruncatedToolCallRecoveryPolicy(
             recoveries=RunCounter(

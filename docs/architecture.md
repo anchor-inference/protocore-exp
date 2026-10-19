@@ -787,8 +787,9 @@ instead of an untyped dictionary threaded through `ToolContext.metadata` under
 an agreed string. A field that moves is a type error at the reader; a host
 wiring its own slots keeps them in `RunScopedState.host`, one opaque
 compartment, so core never has to know what a host puts there.
-`RunScopedState.to_snapshot()` states exactly the two durable allowances and
-`apply_snapshot()` puts them back — live objects (an `asyncio.Event`, a
+`RunScopedState.to_snapshot()` states exactly the durable allowances (the
+tree's work ledger and concurrency capacity, and since version 9 the run's
+`recovery_budget`) and `apply_snapshot()` puts them back — live objects (an `asyncio.Event`, a
 semaphore, a lock) are per-process by nature and are rebuilt by whoever wires
 the resumed run. `ToolContext` was narrowed to match: `tenant_id`, `run_id`,
 `session_id`, `work_scope`, optional `evidence`, optional `run_state`, and

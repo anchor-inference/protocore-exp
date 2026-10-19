@@ -31,6 +31,7 @@ from pydantic import GetCoreSchemaHandler
 from pydantic_core import CoreSchema, core_schema
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from protocore.contracts.recovery import RecoveryBudget
     from protocore.runtime.run_work_budget import RunWorkLedger
     from protocore.runtime.subagent_budget import SubagentTreeBudget, SubagentTreePermit
 
@@ -103,6 +104,11 @@ class RunScopedState:
 
     #: The tree's CUMULATIVE work budget — child runs started, tokens charged.
     run_work_ledger: RunWorkLedger | None = None
+
+    #: The one allowance every recovery layer draws from: in-place retries,
+    #: chain advances, empty-round re-asks, overflow shrinking, and a host's
+    #: re-drives. Per run, not per tree: a subagent's outage is its own.
+    recovery_budget: RecoveryBudget | None = None
 
     #: The tree's INSTANTANEOUS concurrency budget, minted at the first
     #: parallel fan-out and shared by reference with every descendant.
@@ -177,6 +183,14 @@ class RunScopedState:
 
             self.run_work_ledger = mint_run_work_ledger(rc)
         return self.run_work_ledger
+
+    def ensure_recovery_budget(self, rc: Any) -> RecoveryBudget:
+        """Return the run's recovery budget, minting one with ``rc``'s bounds if it has none."""
+        if self.recovery_budget is None:
+            from protocore.contracts.recovery import mint_recovery_budget
+
+            self.recovery_budget = mint_recovery_budget(rc)
+        return self.recovery_budget
 
     def ensure_subagent_tree_budget(self, cap: int) -> SubagentTreeBudget:
         """Return the tree's concurrency budget, minting it at first fan-out.
@@ -270,6 +284,12 @@ class RunScopedState:
                 if budget is not None
                 else None
             ),
+            # What the run has spent recovering in the current stretch. A run
+            # resumed without it would retry an outage from a full allowance,
+            # the multiplication the budget exists to stop.
+            "recovery_budget": (
+                self.recovery_budget.to_dict() if self.recovery_budget is not None else None
+            ),
         }
 
     def apply_snapshot(self, payload: Any) -> None:
@@ -296,6 +316,12 @@ class RunScopedState:
         ledger_payload = payload.get("run_work_ledger")
         if isinstance(ledger_payload, dict):
             self.run_work_ledger = _Ledger.from_snapshot(ledger_payload)
+
+        from protocore.contracts.recovery import RecoveryBudget as _Recovery
+
+        restored_recovery = _Recovery.from_dict(payload.get("recovery_budget"))
+        if restored_recovery is not None:
+            self.recovery_budget = restored_recovery
 
         budget_payload = payload.get("subagent_tree_budget")
         if isinstance(budget_payload, dict):

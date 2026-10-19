@@ -8,6 +8,26 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- **One recovery budget across the retry layers, and `recoverable_after` on
+  the terminal stop.** `RecoveryBudget` (`protocore.contracts.recovery`) sits
+  in `RunScopedState.recovery_budget`, is read through
+  `QueryEngine.recovery_budget`, and is drawn from by in-place retries,
+  provider-chain advances, re-asks after an empty round and shrinking a
+  request the window refused; a host draws its own re-drives from it
+  (`RecoveryKind.redrive`, `overflow_redrive`) and hands it on with
+  `rearm(recovery_budget=...)` or the new run's state. A provider round with
+  words or tool calls settles it. New constants
+  `recovery_budget_max_attempts` and `recovery_budget_max_seconds` bound it;
+  both default to `None`, which only counts, so every layer recovers exactly
+  as before until a host sets one. Every terminal `message_stop` carries
+  `recoverable_after`: the seconds to wait before re-driving a failed run, or
+  `None`. An overflow is recoverable at once up to
+  `recovery_overflow_redrive_max_attempts` (2) times in a row; an outage after
+  `recovery_redrive_backoff_base_seconds` (30) doubling per re-drive up to
+  `recovery_redrive_backoff_max_seconds` (600), never sooner than the
+  provider's `retry_after_seconds`; a permanent refusal, a spend cap, a crash
+  or a spent budget never. The snapshot becomes version 9, with an upcaster
+  from 8 that records no budget.
 - **The core emits `model_changed` when the model answering a run changes.**
   Every provider-chain advance emits it before the restarted turn's first
   delta, with `from`, `to` (rungs named as the chain names them),

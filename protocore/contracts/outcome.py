@@ -37,6 +37,13 @@ RUN_CAUSE_FIELD: Final[str] = "cause"
 #: to add.
 LEFTOVER_QUEUED_FIELD: Final[str] = "leftover_queued"
 
+#: The terminal ``message_stop`` payload key holding the seconds a host should
+#: wait before re-driving the run as a new run, or ``None`` when a re-drive is
+#: not worth trying: the run did not fail, failed on something waiting will not
+#: change, or spent its recovery budget. See
+#: :func:`protocore.contracts.recovery.recoverable_after`.
+RECOVERABLE_AFTER_FIELD: Final[str] = "recoverable_after"
+
 
 class RunOutcome(StrEnum):
     """Whether the run did what it was asked, in one word."""
@@ -77,6 +84,7 @@ class RunCause(BaseModel):
 
 __all__ = [
     "LEFTOVER_QUEUED_FIELD",
+    "RECOVERABLE_AFTER_FIELD",
     "RUN_CAUSE_FIELD",
     "RUN_OUTCOME_FIELD",
     "RunCause",

@@ -37,7 +37,7 @@ from typing import Any
 SNAPSHOT_SCHEMA_KEY = "schema_version"
 
 #: The schema version this build writes and can read after upcasting.
-SNAPSHOT_SCHEMA_VERSION = 8
+SNAPSHOT_SCHEMA_VERSION = 9
 
 #: Where the run's own state sits inside the snapshot payload: the tree's
 #: cumulative work ledger and the capacity of its concurrency budget, the two
@@ -420,6 +420,27 @@ def _v7_to_v8(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 UPCASTERS.register(7, _v7_to_v8)
+
+
+def _v8_to_v9(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Version 9 keeps what the run has spent recovering from provider failures.
+
+    Version 9 adds ``recovery_budget`` to the run's own state: the attempts
+    and wall clock the current recovery stretch has drawn across every retry
+    layer. A version 8 run recorded no such budget, so the lift says exactly
+    that, and the resumed run mints a fresh one from its constants, which is
+    what every run did before the budget existed.
+    """
+    lifted = dict(snapshot)
+    run_state = lifted.get(RUN_SCOPED_STATE_SNAPSHOT_KEY)
+    if isinstance(run_state, dict):
+        run_state = dict(run_state)
+        run_state.setdefault("recovery_budget", None)
+        lifted[RUN_SCOPED_STATE_SNAPSHOT_KEY] = run_state
+    return lifted
+
+
+UPCASTERS.register(8, _v8_to_v9)
 
 
 def migrate_snapshot(

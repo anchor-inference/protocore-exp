@@ -319,6 +319,37 @@ Three distinct run shapes — do not conflate them (see
   and `RunCause.model_validate(payload["cause"])`. The same stop lists, under
   `leftover_queued` (`LEFTOVER_QUEUED_FIELD`), the ids of the queued steer and
   follow-up items the engine still held and never placed.
+- **`RecoveryBudget`** / **`RecoveryKind`** (`contracts/recovery.py`) — the
+  one allowance every recovery layer of a run draws from: an in-place retry
+  (`transient_retry`), a provider-chain advance (`chain_advance`), a re-ask
+  after a round with nothing usable (`empty_response`), shrinking a request the
+  window refused (`context_overflow`), and a host's own re-drive after an
+  outage (`redrive`) or an overflow (`overflow_redrive`). Each layer keeps its
+  own bound as well; the shared one stops them multiplying (two retries on each
+  of three rungs, re-driven five times, was thirty requests for one outage).
+  `recovery_budget_max_attempts` and `recovery_budget_max_seconds` bound a
+  stretch; both default to `None`, which counts the draws without bounding
+  anything, so recovery is unchanged until a host sets one. A provider round
+  that comes back with words or tool calls ends the stretch (`settle()`). The
+  budget lives in `RunScopedState.recovery_budget`, is read through
+  `QueryEngine.recovery_budget`, starts afresh at `rearm()` unless the caller
+  passes `rearm(recovery_budget=...)`, and travels in the snapshot.
+- **`recoverable_after`** — every terminal `message_stop` carries it
+  (`RECOVERABLE_AFTER_FIELD`): the seconds a host should wait before re-driving
+  the run as a new run, or `None` when that is not worth it. Only a `failed`
+  run qualifies. An overflow is recoverable at once (`0.0`: compact and
+  re-drive) while fewer than `recovery_overflow_redrive_max_attempts`
+  `overflow_redrive` draws were made in the stretch. An outage (a retryable
+  verdict of `rate_limit`, `overloaded`, `server_error`, `timeout` or
+  `connection`, or a rate limit, timeout or stall that carried no verdict) is
+  recoverable after `recovery_redrive_backoff_base_seconds`, doubled per
+  `redrive` already drawn, capped at `recovery_redrive_backoff_max_seconds`,
+  and never sooner than the provider's `retry_after_seconds`. A permanent
+  refusal, a spend cap (`budget`) or a crash is never recoverable, and nothing
+  is once the budget refuses another draw. The host keeps the re-drive: it
+  draws one `redrive` or `overflow_redrive` from `engine.recovery_budget` and
+  hands the budget to the run it starts. `recoverable_after(outcome, cause,
+  budget, rc)` is the function behind the field.
 
 ### Ingress, blobs, compaction
 
@@ -363,9 +394,9 @@ Three distinct run shapes — do not conflate them (see
   and `abandon`; a map naming a wait that is not open, answering a kind that
   does not take that decision, or leaving an interrupt undecided is refused
   unless the caller says outright that it means to leave the rest parked.
-- **`RunScopedState.to_snapshot()`** — the two allowances a resumed run must
-  not be handed twice: the tree's cumulative work ledger and the capacity of
-  its concurrency budget. Live objects (an `asyncio.Event`, a semaphore, a
+- **`RunScopedState.to_snapshot()`** — the allowances a resumed run must
+  not be handed twice: the tree's cumulative work ledger, the capacity of
+  its concurrency budget, and the run's recovery budget (schema version 9). Live objects (an `asyncio.Event`, a semaphore, a
   lock) are per-process by nature and are rebuilt by whoever wires the resumed
   run, never restored from a payload.
 - **`SNAPSHOT_SCHEMA_VERSION`** / **`SnapshotUpcaster`** /

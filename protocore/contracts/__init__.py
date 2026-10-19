@@ -109,6 +109,7 @@ from protocore.contracts.prompts import (
     PromptTemplateRenderError,
     PromptTemplateValidationError,
 )
+from protocore.contracts.recovery import RecoveryBudget, RecoveryKind
 from protocore.contracts.resilience import (
     RETRYABLE_ERROR_CLASSES,
     TRANSPORT_DOWN_ERROR_CLASSES,
@@ -315,6 +316,8 @@ __all__ = [
     "ProviderDeltaKind",
     "ProviderFailure",
     "ProviderFailureReason",
+    "RecoveryBudget",
+    "RecoveryKind",
     "RegistrationKind",
     "ReleaseDecision",
     "RequirementsManifest",

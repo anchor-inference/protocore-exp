@@ -2009,6 +2009,55 @@ class LoopConstants(BaseModel):
         ),
     )
 
+ # ----- One recovery budget across the retry layers -----
+    recovery_budget_max_attempts: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "How many recoveries one stretch without a provider answer may "
+            "draw, across every layer: in-place retries, provider-chain "
+            "advances, re-asks after an empty round, shrinking a request the "
+            "window refused, and a host's own re-drives. Each layer keeps its "
+            "own bound too; this one stops them multiplying. A round that "
+            "comes back with words or tool calls ends the stretch. None (the "
+            "default) counts the draws without bounding them."
+        ),
+    )
+    recovery_budget_max_seconds: float | None = Field(
+        default=None,
+        ge=0.0,
+        description=(
+            "How long, in seconds from its first draw, one recovery stretch may "
+            "last before every layer stops drawing. Wall clock, so it holds "
+            "across a snapshot. None (the default) is no bound."
+        ),
+    )
+    recovery_redrive_backoff_base_seconds: float = Field(
+        default=30.0,
+        ge=0.0,
+        description=(
+            "The first wait the terminal stop's ``recoverable_after`` advises "
+            "before a host re-drives a run that failed on an outage; it doubles "
+            "with each re-drive already drawn in the stretch, and is never "
+            "shorter than the provider's own Retry-After."
+        ),
+    )
+    recovery_redrive_backoff_max_seconds: float = Field(
+        default=600.0,
+        ge=0.0,
+        description="The longest wait ``recoverable_after`` advises before an outage re-drive.",
+    )
+    recovery_overflow_redrive_max_attempts: int = Field(
+        default=2,
+        ge=0,
+        description=(
+            "How many times in a row a host may compact and re-drive a run the "
+            "context window refused, as ``recoverable_after`` advises it. An "
+            "overflow that survives compaction this often is a history too "
+            "large for the window, which another attempt will not change."
+        ),
+    )
+
  # ----- LLM stream liveness -----
     llm_stream_idle_timeout_seconds: float = Field(
         default=90.0,

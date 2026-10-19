@@ -70,12 +70,14 @@ from protocore.contracts.observability import (
 )
 from protocore.contracts.outcome import (
     LEFTOVER_QUEUED_FIELD,
+    RECOVERABLE_AFTER_FIELD,
     RUN_CAUSE_FIELD,
     RUN_OUTCOME_FIELD,
     RunCause,
     RunOutcome,
 )
 from protocore.contracts.prompts import IPromptTemplateProvider
+from protocore.contracts.recovery import RecoveryBudget, recoverable_after
 from protocore.contracts.resilience import IResilienceClassifier
 from protocore.contracts.run_state import RunScopedState
 from protocore.contracts.runtime_constants import LoopConstants
@@ -2155,6 +2157,9 @@ class QueryEngine:
         from protocore.runtime.live_control import leftover_queued_ids
 
         payload[LEFTOVER_QUEUED_FIELD] = leftover_queued_ids(self)
+        payload[RECOVERABLE_AFTER_FIELD] = recoverable_after(
+            outcome, cause, self.recovery_budget, self.config.rc
+        )
         return event.model_copy(update={"payload": payload})
 
     def _run_outcome(
@@ -2430,7 +2435,20 @@ class QueryEngine:
         # the call itself, because the two used to be free to disagree.
         return narrow_tool_capabilities(allowed, roles=self.config.tool_roles)
 
-    def rearm(self) -> None:
+    @property
+    def recovery_budget(self) -> RecoveryBudget:
+        """The one allowance every recovery layer of this run draws from.
+
+        Minted from ``recovery_budget_max_attempts`` and
+        ``recovery_budget_max_seconds`` on first use. A host that re-drives a
+        failed run draws one :attr:`~protocore.contracts.recovery.RecoveryKind.redrive`
+        (or ``overflow_redrive``) from it and hands it to the run it starts,
+        through :meth:`rearm` or the new engine's
+        :attr:`~protocore.contracts.run_state.RunScopedState.recovery_budget`.
+        """
+        return self.run_state.ensure_recovery_budget(self.config.rc)
+
+    def rearm(self, *, recovery_budget: RecoveryBudget | None = None) -> None:
         """Return a settled engine to PENDING so it can take another turn.
 
         A conversational run settles once: it answers, and the engine is
@@ -2470,6 +2488,11 @@ class QueryEngine:
         *continuation* rather than a new run; the injected collaborators are not
         run state at all; and every per-run allowance, latch, streak and
         recovery budget starts over, because each was sized for one question.
+
+        The recovery budget is one of those allowances, unless the caller
+        passes ``recovery_budget``: a host re-driving a run that failed on an
+        outage or an overflow hands the next turn the budget it drew the
+        re-drive from, so the turn cannot start the recovery over.
 
         Raises :class:`~protocore.runtime.loop_state.InvalidStateTransitionError`
         when the engine is not terminal — that is a caller re-arming a turn
@@ -2511,6 +2534,7 @@ class QueryEngine:
         # subagents that may still be drawing on it — but the per-run streaks
         # and one-shot signals inside it are allowances like any other.
         self.run_state.clear_run_scoped_streaks()
+        self.run_state.recovery_budget = recovery_budget
         # A turn boundary is one of the places the prompt prefix starts over,
         # so it is where loaded tools over the cap are unloaded.
         self.context_manager.evict_discovered_tools()
