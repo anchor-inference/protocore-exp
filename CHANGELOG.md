@@ -96,6 +96,14 @@ All notable changes to this project are recorded here. The format follows
   source's session to keep its source's mark. `tool_rules_scope(tenant_id,
   session_id=None)` in `protocore.runtime.tool_deferral` is the scope the mark
   is derived from. Left unset, the mark is the tenant's, as before.
+- **`QueryEngineConfig.cache_key` and `LLMObservabilityContext.cache_key`
+  name the key a provider routes a conversation's prompt cache by.** Every
+  request the run makes carries the configured key; an adapter reads
+  `observability.routing_key()`, which is the key, else the session, else the
+  run, and never a fixed value. A fork names its source's session so its first
+  request, which carries the source's bytes, reaches the machine holding the
+  source's cache. Left unset, the request's context is unchanged and routing
+  follows the session, so recorded manifests keep their identity.
 
 ### Changed
 

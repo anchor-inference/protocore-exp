@@ -652,6 +652,18 @@ class QueryEngineConfig:
     keep that mark and the prompt's bytes with it.
     """
 
+    cache_key: str | None = None
+    """The key the provider routes this run's prompt cache by, instead of the session.
+
+    Stamped on every request as
+    :attr:`~protocore.contracts.llm.LLMObservabilityContext.cache_key`; an
+    adapter reads it through ``routing_key()``. Left ``None``, requests route
+    by :attr:`session_id`, which is right for an ordinary conversation. A fork
+    that starts with its source's history names the source's session here: its
+    first request carries the source's bytes, and only the machine that holds
+    the source's cache can serve them without paying for the prefix again.
+    """
+
     trimmed_tool_result_ids: tuple[str, ...] = ()
     """Tool results an earlier run of the same session cut to their head in its requests.
 
@@ -727,6 +739,12 @@ class QueryEngineConfig:
         """
         if not self.run_id or self.run_id.strip() != self.run_id:
             raise ValueError("run_id must be a non-padded, non-empty identifier")
+        if self.cache_key is not None and (
+            not self.cache_key or self.cache_key.strip() != self.cache_key
+        ):
+            # A blank key would read as "set" and route every such run to one
+            # machine; ``None`` is how a run says it has no key of its own.
+            raise ValueError("cache_key must be None or a non-padded, non-empty identifier")
         if not self.root_run_id:
             if self.parent_run_id is not None or self.subagent_id is not None:
                 raise ValueError("child run config requires root_run_id")
