@@ -118,6 +118,11 @@ from protocore.contracts.tools import (
     SUBAGENT_TREE_PERMIT_METADATA_KEY,
     ToolContext,
 )
+from protocore.contracts.turn_context import (
+    TURN_CONTEXT_METADATA_KEY,
+    VOLATILE_SUFFIX_MESSAGES_EXTRA_KEY,
+    TurnContextRequest,
+)
 from protocore.contracts.turn_policy import (
     TurnContext,
     TurnCoordinate,
@@ -1613,6 +1618,7 @@ def build_llm_request(
     tool_choice_required: bool = False,
     response_format: Mapping[str, Any] | None = None,
     cache_breakpoints: Sequence[CacheBreakpoint] | None = None,
+    volatile_suffix_messages: int = 0,
     observability: LLMObservabilityContext | None = None,
 ) -> LLMRequest:
     """Assemble the one :class:`LLMRequest` every provider call is made of.
@@ -1647,6 +1653,11 @@ def build_llm_request(
     error. Omitting both is how a path (the plan fallback) ships only the knobs
     every provider accepts.
 
+    ``volatile_suffix_messages`` counts the trailing messages that change on
+    every request (the host's turn context); it lands in
+    ``extra["volatile_suffix_messages"]`` so an adapter placing its own cache
+    markers, and a reader of manifests, can keep them out of the prefix.
+
     Keys land in ``extra`` only when the caller supplies them: an adapter that
     does not recognise a key ignores it, but an absent key and a key holding a
     default are different requests, and the manifest of a call has to be able
@@ -1669,6 +1680,8 @@ def build_llm_request(
         extra["tool_choice_required"] = True
     if response_format is not None:
         extra["response_format"] = dict(response_format)
+    if volatile_suffix_messages > 0:
+        extra[VOLATILE_SUFFIX_MESSAGES_EXTRA_KEY] = volatile_suffix_messages
     return LLMRequest(
         model=model,
         messages=list(messages),
@@ -1678,6 +1691,47 @@ def build_llm_request(
         extra=extra,
         observability=observability,
     )
+
+
+async def _with_turn_context(
+    engine: QueryEngine, messages: list[Message]
+) -> tuple[list[Message], int]:
+    """``messages`` with the host's turn context appended, and how many messages that added.
+
+    The block is asked for per request and exists in that request only: it is
+    never written to ``engine.history``, so the next request carries the next
+    one in its place and the prefix in front of it stays byte-identical. A
+    provider that raises costs the request its turn context, not the request.
+    """
+    provider = engine.config.turn_context_provider
+    if provider is None:
+        return messages, 0
+    try:
+        text = await provider.turn_context(
+            TurnContextRequest(
+                tenant_id=engine.config.tenant_id,
+                run_id=engine.config.run_id,
+                session_id=engine.config.session_id,
+                turn_id=engine.turn_id(),
+                model=engine.effective_model_name,
+            )
+        )
+    except Exception as exc:
+        _logger.warning(
+            "turn context provider failed for run=%s (err=%s); the request goes "
+            "without it",
+            engine.config.run_id,
+            exc,
+        )
+        return messages, 0
+    if not text or not text.strip():
+        return messages, 0
+    block = Message(
+        role=MessageRole.user,
+        content_blocks=[TextBlock(text=text)],
+        metadata={TURN_CONTEXT_METADATA_KEY: True},
+    )
+    return [*messages, block], 1
 
 
 async def _manifest_request(
@@ -4726,6 +4780,10 @@ async def _drive_one_stream(
     # ``cache_control`` block per its detected
     # :class:`CachePolicy`.
     cache_breakpoints = apply_system_and_3(list(full_messages))
+    # After the breakpoints, which are placed on the stable messages only: the
+    # turn context is the one part of the request that differs every time, and
+    # a cache marker on it would write a prefix no later request can match.
+    full_messages, volatile_suffix = await _with_turn_context(engine, full_messages)
     # The forced-tool slot. ``build_llm_request`` places it on
     # ``extra["forced_tool_choice"]``; the native-thinking axis it threads
     # alongside (``enable_thinking`` + ``reasoning_effort``, always as a pair
@@ -4921,6 +4979,7 @@ async def _drive_one_stream(
         forced_tool_choice=forced_tool_choice,
         tool_choice_required=tool_choice_required,
         cache_breakpoints=cache_breakpoints,
+        volatile_suffix_messages=volatile_suffix,
         observability=_observability_context(
             engine,
             call_purpose="run",

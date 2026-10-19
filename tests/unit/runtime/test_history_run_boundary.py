@@ -557,6 +557,14 @@ _WHOLE_HISTORY_BY_DESIGN: dict[str, _Declaration] = {
         reason="records the messages one tier is taking out of the window",
         claim=_Claim.NOT_THE_TRANSCRIPT,
     ),
+    "protocore/runtime/query.py::_with_turn_context": _Declaration(
+        reason=(
+            "appends the host's turn context to the message list of one "
+            "outbound request; the list is a request being assembled, and the "
+            "transcript itself is never handed in"
+        ),
+        claim=_Claim.NOT_THE_TRANSCRIPT,
+    ),
     # --- building the seed, from messages the caller supplies ---------------
     "protocore/runtime/context/session_memory.py::_serialize_turns": _whole(
         "renders the turns it is handed; it reaches no engine"

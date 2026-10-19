@@ -96,6 +96,7 @@ from protocore.contracts.tool_roles import (
     ToolRoleMap,
     narrow_tool_capabilities,
 )
+from protocore.contracts.turn_context import ITurnContextProvider
 from protocore.contracts.types import (
     Message,
     MessageRole,
@@ -473,6 +474,15 @@ class QueryEngineConfig:
 
     Where the manifest is kept, and for how long, is the host's decision. The
     core stores nothing, deletes nothing, and never reads a manifest back.
+    """
+    turn_context_provider: ITurnContextProvider | None = None
+    """Optional source of the volatile block appended to every request.
+
+    Asked before each request of the action stream; what it returns rides as
+    the last message of that request only — after the system prompt, the tool
+    catalogue and the history, never in the history, a snapshot or a cache
+    breakpoint. See :mod:`protocore.contracts.turn_context`. Unset, requests
+    are built as before.
     """
     pre_terminal_self_verify_trigger: (
         Callable[[QueryEngine], str | None] | None

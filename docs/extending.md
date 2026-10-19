@@ -396,6 +396,31 @@ two terminal-verify trigger callables (`pre_terminal_self_verify_trigger`,
 machinery behind each is inert until the host injects one — and, for the
 RC-gated ones, flips the matching field too.
 
+### Append a volatile turn context
+
+**Use when** the model should know something that changes between requests —
+the clock, the state of a board, the jobs still running, a mode the user
+switched a minute ago. In the system prompt it would change the first bytes of
+every request and cost the provider's cache of the whole history behind them;
+in a stored message it would stay in the history for good and be quoted by a
+compaction summary.
+
+Implement `ITurnContextProvider` (`contracts/turn_context.py`) and pass it as
+`QueryEngineConfig.turn_context_provider`. Before each request of the action
+stream the core calls `turn_context(TurnContextRequest(...))` (tenant, run,
+session, turn id, model) and appends the returned text verbatim as one user
+message after the system prompt, the tool catalogue and the history. The
+message carries `TURN_CONTEXT_METADATA_KEY` in its metadata and exists in that
+request only: it never enters `engine.history`, a snapshot or a compaction, no
+cache breakpoint is placed on it, and the next request carries the next one in
+its place, so the prefix in front of it stays byte-identical.
+`extra["volatile_suffix_messages"]` on the request (and so in its manifest)
+says how many trailing messages are volatile. `None` or an empty string
+appends nothing; a provider that raises is logged and the request goes
+without. The call sits on the hot path, so a provider that gathers from slow
+sources caches per turn (key on `turn_id`). The planner call and the
+summariser are not given it.
+
 ---
 
 ### Substitute a turn policy

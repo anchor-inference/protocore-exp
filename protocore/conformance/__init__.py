@@ -64,6 +64,7 @@ from protocore.conformance.suites import (
     ToolRegistryConformance,
     ToolRetrieverConformance,
     ToolTransportConformance,
+    TurnContextProviderConformance,
     WorkPoolConformance,
     WorkspaceConformance,
 )
@@ -101,6 +102,7 @@ __all__ = [
     "ToolRegistryConformance",
     "ToolRetrieverConformance",
     "ToolTransportConformance",
+    "TurnContextProviderConformance",
     "WorkPoolConformance",
     "WorkspaceConformance",
     "assert_adapter_failure",

@@ -42,6 +42,7 @@ from protocore.contracts.skills import ISkillStore
 from protocore.contracts.todo import ITodoStorage
 from protocore.contracts.tool_registry import IToolRegistry
 from protocore.contracts.tool_retrieval import IToolRetriever
+from protocore.contracts.turn_context import ITurnContextProvider
 from protocore.contracts.workspace import IWorkspace
 
 
@@ -225,6 +226,12 @@ class ToolRetrieverConformance(ContractSuite):
     protocol = IToolRetriever
 
 
+class TurnContextProviderConformance(ContractSuite):
+    """The source of the volatile block appended to every request."""
+
+    protocol = ITurnContextProvider
+
+
 class WorkspaceConformance(ContractSuite):
     """The agent's file surface."""
 
@@ -267,5 +274,6 @@ SUITES: tuple[type[ContractSuite], ...] = (
     TodoStorageConformance,
     ToolRegistryConformance,
     ToolRetrieverConformance,
+    TurnContextProviderConformance,
     WorkspaceConformance,
 )

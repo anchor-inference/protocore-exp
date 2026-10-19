@@ -134,6 +134,17 @@ All notable changes to this project are recorded here. The format follows
   tool's own text. `cap_fresh_result` takes `reserve_tokens` for that room.
   Helpers live in `protocore.runtime.untrusted_output`. A tool that sets
   nothing is untouched.
+- **A volatile turn context after the cache-stable prefix.**
+  `QueryEngineConfig.turn_context_provider` takes an `ITurnContextProvider`
+  (`protocore.contracts.turn_context`), asked before every request of the
+  action stream with a `TurnContextRequest`. Its text rides as the last user
+  message of that request only (marked `TURN_CONTEXT_METADATA_KEY`): never in
+  the history, a snapshot, a compaction or a cache breakpoint, so the system
+  prompt, the catalogue and the history in front of it stay byte-identical
+  while the clock or a board changes behind them.
+  `extra["volatile_suffix_messages"]` says how many trailing messages are
+  volatile, and `build_llm_request` takes `volatile_suffix_messages`. Unset,
+  requests are unchanged.
 
 ### Changed
 
