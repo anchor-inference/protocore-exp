@@ -6,7 +6,14 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from protocore.contracts.runtime_constants import LoopConstants
-from protocore.contracts.types import Message, MessageRole, TextBlock
+from protocore.contracts.types import (
+    IMAGE_REFS_METADATA_KEY,
+    QUEUED_ITEMS_METADATA_KEY,
+    ImageRefBlock,
+    Message,
+    MessageRole,
+    TextBlock,
+)
 
 QueueKind = Literal["steer", "follow_up"]
 QueueMode = Literal["one-at-a-time", "all"]
@@ -81,16 +88,58 @@ def place_items(
     return [queue[0]], list(queue[1:])
 
 
-def placed_as_user_message(items: SequenceLike) -> Message | None:
-    """Join placed items into one user message."""
-    texts = [item.text.strip() for item in items if item.text.strip()]
-    if not texts:
+def _image_ref(attachment: dict[str, Any]) -> ImageRefBlock | None:
+    """The image an attachment names, or ``None`` when it is not one.
+
+    An attachment is an image when it names a blob (``blob_ref``) and its
+    ``mime_type`` is an image type, the two fields of :class:`ImageRefBlock`.
+    A blob of any other type, a PDF or a log, is not sent to the model as an
+    image; it stays in the placed message's queued-items record for the host.
+    """
+    blob_ref = attachment.get("blob_ref")
+    mime_type = attachment.get("mime_type")
+    if not isinstance(blob_ref, str) or not blob_ref:
         return None
-    body = "\n\n".join(texts)
-    return Message(
-        role=MessageRole.user,
-        content_blocks=[TextBlock(text=body)],
-    )
+    if not isinstance(mime_type, str) or not mime_type.startswith("image/"):
+        return None
+    return ImageRefBlock(blob_ref=blob_ref, mime_type=mime_type)
+
+
+def placed_as_user_message(items: SequenceLike) -> Message | None:
+    """Join placed items into one user message, their files included.
+
+    The texts are joined in queue order. Every item's image attachments ride on
+    the message under :data:`IMAGE_REFS_METADATA_KEY`, in order, so a
+    screenshot sent while the run was busy reaches the model with its caption;
+    joining only the texts used to leave the files behind. Each item's id, kind
+    and attachments as queued are recorded under
+    :data:`QUEUED_ITEMS_METADATA_KEY`. An image with no words is still placed.
+    Items with neither words nor an image give ``None``: the core has no way to
+    show the model any other kind of file, so a host that wants one read names
+    it in the item's text.
+    """
+    texts = [item.text.strip() for item in items if item.text.strip()]
+    images = [
+        image
+        for item in items
+        for attachment in item.attachments
+        if isinstance(attachment, dict) and (image := _image_ref(attachment)) is not None
+    ]
+    if not texts and not images:
+        return None
+    metadata: dict[str, Any] = {
+        QUEUED_ITEMS_METADATA_KEY: [
+            {"id": item.id, "kind": item.kind, "attachments": list(item.attachments)}
+            for item in items
+        ],
+    }
+    if images:
+        metadata[IMAGE_REFS_METADATA_KEY] = [image.model_dump(mode="json") for image in images]
+    # No empty text block for a message of files alone: several providers
+    # refuse an empty text part, and the adapter builds the turn from the
+    # images in that case.
+    blocks = [TextBlock(text="\n\n".join(texts))] if texts else []
+    return Message(role=MessageRole.user, content_blocks=blocks, metadata=metadata)
 
 
 def validate_thinking_for_mode(run_mode: str, thinking_enabled: bool) -> None:

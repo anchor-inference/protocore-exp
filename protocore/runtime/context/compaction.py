@@ -71,6 +71,7 @@ from protocore.contracts.types import (
     ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
+    message_image_refs,
 )
 from protocore.logging_utils import get_logger
 from protocore.prompts import bundled_prompt_provider
@@ -321,10 +322,11 @@ def _estimate_message_tokens_uncached(message: Message, rc: LoopConstants) -> in
     partition depend on a value that does not change the partition. See
     :func:`_token_estimate_signature`.
     """
-    total = 0
+    # Images in blocks and the ones a user turn carries in metadata (it holds
+    # one block, its text) reach the model alike, so they cost alike.
+    total = len(message_image_refs(message)) * rc.token_count_image_tokens
     for block in message.content_blocks:
         if isinstance(block, ImageRefBlock):
-            total += rc.token_count_image_tokens
             continue
         total += estimate_tokens(_block_text_for_estimation(block), rc)
     if message.reasoning_content:
@@ -492,7 +494,9 @@ def estimate_message_tokens(message: Message, rc: LoopConstants) -> int:
  extracted text (tool_use args no longer count as 0);
  * :class:`ImageRefBlock` via the flat
  :attr:`LoopConstants.token_count_image_tokens` constant — image blocks
- carry only a blob ref, so a size-derived estimate is impossible ;
+ carry only a blob ref, so a size-derived estimate is impossible ; the
+ images a user turn carries under ``IMAGE_REFS_METADATA_KEY`` are priced the
+ same way;
  * :attr:`Message.reasoning_content` via ``estimate_tokens`` .
 
     Answers from a process-wide :class:`TokenEstimator`, for callers that hold

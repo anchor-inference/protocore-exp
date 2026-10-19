@@ -151,7 +151,9 @@ from protocore.contracts.tools import (
 from protocore.contracts.types import (
     COMPACTION_LEDGER_METADATA_KEY,
     COMPACTION_SUMMARY_METADATA_KEY,
+    IMAGE_REFS_METADATA_KEY,
     PARTIAL_ASSISTANT_ATTEMPT_METADATA_KEY,
+    QUEUED_ITEMS_METADATA_KEY,
     AgentEnvelope,
     BlobMetadata,
     CompactionSourceRef,
@@ -187,6 +189,7 @@ from protocore.contracts.types import (
     ToolResult,
     ToolResultBlock,
     ToolUseBlock,
+    message_image_refs,
 )
 from protocore.contracts.workspace import (
     DEFAULT_WORKSPACE_LIFECYCLE,
@@ -211,8 +214,10 @@ __all__ = [
     "COMPACTION_SUMMARY_METADATA_KEY",
     "DEFAULT_RECALL_SCOPES",
     "DEFAULT_WORKSPACE_LIFECYCLE",
+    "IMAGE_REFS_METADATA_KEY",
     "MEMORY_KINDS",
     "PARTIAL_ASSISTANT_ATTEMPT_METADATA_KEY",
+    "QUEUED_ITEMS_METADATA_KEY",
     "RETRYABLE_ERROR_CLASSES",
     "TRANSPORT_DOWN_ERROR_CLASSES",
     "AgentDispatchError",
@@ -384,4 +389,5 @@ __all__ = [
     "WorkspaceWriteDecision",
     "WorkspaceWriteOutcome",
     "assert_verification_transition",
+    "message_image_refs",
 ]

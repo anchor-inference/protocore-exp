@@ -337,6 +337,35 @@ and never summarises a marked turn by itself. Its values:
     answer; a host that settles a call with the operator's words sets it too.
 """
 
+IMAGE_REFS_METADATA_KEY = "protocore.image_refs"
+"""``Message.metadata`` key: the images a user-role message carries.
+
+A user turn holds at most one content block, and that block is its text, so an
+image sent with the words cannot sit beside them as an
+:class:`ImageRefBlock`. It rides here instead, as a list of
+``ImageRefBlock.model_dump(mode="json")`` entries in the order the images were
+given. The core writes it on the message it places from queued steer /
+follow-up items; a host may write it on any user turn it builds.
+
+The core never sends anything itself, so whether the model sees an image is
+the provider adapter's decision, made exactly as for an ``ImageRefBlock``: an
+adapter for a model that takes images loads the blob and sends it, and one for
+a text-only model sends a marker or nothing. :func:`message_image_refs` is the
+one reader, blocks first and then this list. The prompt estimate prices every
+entry at :attr:`LoopConstants.token_count_image_tokens`, as it prices a block.
+"""
+
+QUEUED_ITEMS_METADATA_KEY = "protocore.queued_items"
+"""``Message.metadata`` key on a message the core placed from queued items.
+
+A list with one entry per steer / follow-up item that went into the message,
+in queue order: ``{"id": ..., "kind": "steer" | "follow_up", "attachments":
+[...]}``, the attachments exactly as the host queued them. Several items
+placed together become one message, so this is how a host tells which of its
+queued items have now reached the model, without reloading its queue, and
+finds the files of an item that are not images.
+"""
+
 COMPACTION_SUMMARY_METADATA_KEY = "protocore.compaction_summary"
 """``Message.metadata`` flag marking a turn as a Tier-2 compaction summary.
 
@@ -955,6 +984,27 @@ class Message(BaseModel):
     def text(self) -> str:
         """Concatenate visible text blocks (skip thinking & tool blocks)."""
         return "".join(b.text for b in self.content_blocks if isinstance(b, TextBlock))
+
+
+def message_image_refs(message: Message) -> tuple[ImageRefBlock, ...]:
+    """Every image ``message`` carries, in order: its blocks, then its metadata.
+
+    An entry under :data:`IMAGE_REFS_METADATA_KEY` that does not validate as an
+    :class:`ImageRefBlock` is skipped rather than raised on: the metadata is
+    the host's to write and survives storage as plain JSON, and one bad entry
+    must not cost the model the other images or fail the request.
+    """
+    images = [block for block in message.content_blocks if isinstance(block, ImageRefBlock)]
+    raw = message.metadata.get(IMAGE_REFS_METADATA_KEY)
+    if isinstance(raw, list):
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                images.append(ImageRefBlock.model_validate(entry))
+            except ValueError:
+                continue
+    return tuple(images)
 
 
 # ---------------------------------------------------------------------------
@@ -1686,6 +1736,8 @@ class SubagentTask(BaseModel):
 __all__ = [
     "COMPACTION_LEDGER_METADATA_KEY",
     "COMPACTION_SUMMARY_METADATA_KEY",
+    "IMAGE_REFS_METADATA_KEY",
+    "QUEUED_ITEMS_METADATA_KEY",
     "TERMINAL_REFUSAL_NEEDS_WORK_METADATA_KEY",
     "TERMINAL_TOOL_METADATA_KEY",
     "TERMINAL_TOOL_STATUS_COMPLETED",
@@ -1728,4 +1780,5 @@ __all__ = [
     "ToolResult",
     "ToolResultBlock",
     "ToolUseBlock",
+    "message_image_refs",
 ]
