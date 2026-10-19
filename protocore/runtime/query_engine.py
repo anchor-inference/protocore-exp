@@ -85,6 +85,7 @@ from protocore.contracts.snapshot import (
     SNAPSHOT_SCHEMA_VERSION,
     migrate_snapshot,
 )
+from protocore.contracts.tool_outcome import IToolOutcomeStore
 from protocore.contracts.tool_registry import (
     TOOL_GROUP_LOADS,
     IToolRegistry,
@@ -856,6 +857,9 @@ class QueryEngine:
             "skills",
             "blobs",
             "lifecycle_hooks",
+            # A store the host owns: its records belong to the run, and the
+            # next turn is where the ones history has answered are dropped.
+            "tool_outcome_store",
             # The set of turn policies this run is driven by. A host that
             # installed its own for the run means it for the whole run, not
             # for the first turn of it.
@@ -1012,6 +1016,7 @@ class QueryEngine:
         background_pool: IBackgroundTaskPool | None = None,
         lifecycle_hooks: ILifecycleRegistry | None = None,
         tool_safety_policies: Sequence[IToolSafetyPolicy] | None = None,
+        tool_outcome_store: IToolOutcomeStore | None = None,
     ) -> None:
         self.config = config
         self.llm: ILLMProvider = llm_provider
@@ -1040,6 +1045,12 @@ class QueryEngine:
         )
         self.skills = skill_store
         self.blobs = blob_store
+        # Where each tool call's outcome is made durable the moment it exists,
+        # ahead of its place in history. ``None`` keeps the snapshot as the
+        # only record: a call that finished while an earlier sibling was still
+        # running is then lost with the process. See
+        # :mod:`protocore.contracts.tool_outcome`.
+        self.tool_outcome_store: IToolOutcomeStore | None = tool_outcome_store
 
         # The turn policies this run is driven by. ``None`` means the core's
         # own set, built by the turn driver; a host or a test that installs its

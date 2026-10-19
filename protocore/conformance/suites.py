@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from protocore.conformance.request_manifest import RequestManifestSinkConformance
 from protocore.conformance.suite import ContractSuite
+from protocore.conformance.tool_outcome import ToolOutcomeStoreConformance
 from protocore.contracts.agent_dispatch import IAgentDispatch, IDelegationTool
 from protocore.contracts.background import (
     BackgroundTaskView,
@@ -232,8 +233,9 @@ class WorkspaceConformance(ContractSuite):
 
 
 #: Every suite this package publishes, one per contract the core declares.
-#: One of them lives in its own module — see
-#: :mod:`protocore.conformance.request_manifest` for why — and is listed here
+#: Two of them live in their own modules — see
+#: :mod:`protocore.conformance.request_manifest` and
+#: :mod:`protocore.conformance.tool_outcome` for why — and are listed here
 #: like the rest, because the catalogue is what the exhaustiveness check reads.
 SUITES: tuple[type[ContractSuite], ...] = (
     AgentDispatchConformance,
@@ -265,6 +267,7 @@ SUITES: tuple[type[ContractSuite], ...] = (
     SessionStoreConformance,
     SkillStoreConformance,
     TodoStorageConformance,
+    ToolOutcomeStoreConformance,
     ToolRegistryConformance,
     ToolRetrieverConformance,
     WorkspaceConformance,

@@ -102,6 +102,10 @@ _PROCESS_LOCAL: dict[str, str] = {
     "skills": "the skill store is injected by the host.",
     "blobs": "the blob store is injected by the host.",
     "lifecycle_hooks": "the lifecycle registry is injected by the host.",
+    "tool_outcome_store": (
+        "the outcome store is injected by the host; its records live in the "
+        "store, not in the snapshot, which is what lets them outlive it."
+    ),
     "turn_policies": (
         "a policy set is objects, and objects are constructed, not restored. "
         "What the policies DID to the run — the counters they charged, the "

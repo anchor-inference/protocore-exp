@@ -67,6 +67,7 @@ from protocore.conformance.suites import (
     WorkPoolConformance,
     WorkspaceConformance,
 )
+from protocore.conformance.tool_outcome import ToolOutcomeStoreConformance
 
 __all__ = [
     "SUITES",
@@ -98,6 +99,7 @@ __all__ = [
     "SessionStoreConformance",
     "SkillStoreConformance",
     "TodoStorageConformance",
+    "ToolOutcomeStoreConformance",
     "ToolRegistryConformance",
     "ToolRetrieverConformance",
     "ToolTransportConformance",

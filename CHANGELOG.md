@@ -8,6 +8,21 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- **`IToolOutcomeStore` makes each tool call's outcome durable the moment it
+  exists, ahead of its place in history.** Pass one as
+  `QueryEngine(tool_outcome_store=...)`. A call whose repeat is not harmless is
+  recorded as `started` before its tool runs, and every call that returns is
+  recorded as `finished` with its result block, in completion order, so a
+  process that dies while the first call of a batch is still running keeps
+  the results of the calls that already finished. A resumed run places those
+  results (a `tool_result` event with `replayed: true`) instead of running
+  the calls again, and reports a call that started and never finished as
+  having an unknown outcome. A record answers only the unanswered call with
+  its id and argument digest, and records are discarded once history answers
+  them. `InMemoryToolOutcomeStore` (`protocore.runtime.tool_outcomes`) is the
+  reference store and `ToolOutcomeStoreConformance` the suite a host binds to
+  its own, with behavioural cases. Passing no store (the default) keeps the
+  earlier behaviour. See `docs/architecture.md`.
 - **`OPERATOR_WORDS_METADATA_KEY` (`"protocore.operator_words"`) says who
   wrote a message.** `True` on `Message.metadata` makes the message the
   operator's, `False` makes a user-role message a runtime note, and a list of

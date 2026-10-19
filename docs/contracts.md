@@ -34,6 +34,7 @@ protocore/contracts/
   blob.py         # IBlobStore
   search.py       # ISearchIndex
   todo.py         # ITodoStorage
+  tool_outcome.py # IToolOutcomeStore + ToolInvocationRecord
   tool_registry.py# IToolRegistry + ToolVisibilityPolicy
   tools.py        # Tool (ABC) + ToolContext + tool errors
   run_state.py    # RunScopedState — the run's live state, incl. the host compartment
@@ -126,6 +127,7 @@ concrete adapter. Each is one line: the contract and what a host supplies.
 | `IBlobStore` | `contracts/blob.py` | Content-addressed blob storage used by Tier-1 compaction. |
 | `ISearchIndex` | `contracts/search.py` | A generic lexical search index. |
 | `ITodoStorage` | `contracts/todo.py` | Per-session todo persistence. |
+| `IToolOutcomeStore` | `contracts/tool_outcome.py` | Optional: each tool call's outcome made durable the moment it exists, ahead of its place in history. `record_started` (before a call whose repeat is not harmless), `record_finished` (conditional: the first outcome wins, a late one returns `False`), `list_run`, `discard`. Passed as `QueryEngine(tool_outcome_store=...)`; `None` (the default) keeps the snapshot as the only record. `InMemoryToolOutcomeStore` (`runtime/tool_outcomes.py`) is the reference behaviour. |
 | `IAgentDispatch` | `contracts/agent_dispatch.py` | Subagent dispatch / lookup. `dispatch` answers with a `SubagentHandle` — the child run is addressable from the moment it is launched, not only when it is over. A caller that wants the old blocking shape writes the wait itself: `await (await dispatch(task)).wait()`. |
 | `IBackgroundTaskPool` | `contracts/background.py` | The session's background commands, as the loop reads them: `list`, `get`, `refresh`, `drain_wakes`, and the attachment declaration (`mark_session_attached` / `ensure_session_attached`) a resumed run checks before it trusts an empty wake list. |
 | `IWorkPool` | `contracts/background.py` | Everything above, plus the handles that make a unit of work drivable: `launch(spec, start)` (the id is minted BEFORE the work starts and handed to `start`), `handle`, `stop`, `stop_session(scope, grace)` and `subscribe(on_terminal)`. A delegated child run is a record of `kind="agent"` in this same pool, so waiting on one and waiting on a background command are the same question asked of the same collaborator. |
@@ -139,13 +141,14 @@ concrete adapter. Each is one line: the contract and what a host supplies.
 | `IMemoryContentScanner` | `contracts/memory.py` | Injection-scanning of memory content on the way in. |
 | `ITurnPolicy` | `contracts/turn_policy.py` | One product decision about a turn. Not an adapter the host must supply: the core ships its own set, and a host substitutes a policy into it **by name**. |
 
-The **32 `Protocol`s** in `contracts/` are not one flat list of adapters: some
+The **33 `Protocol`s** in `contracts/` are not one flat list of adapters: some
 are stores the host must supply (`ILLMProvider`, `IRunStore`, `ISessionStore`,
 `IBlobStore`, `ISearchIndex`, `ITodoStorage`, `IToolRegistry`, `ISkillStore`,
 `IAgentDispatch`, `IEventStream`, `IHookManager`, `IMemory`, `IWorkspace`,
 `IWorkPool`), some are optional seams that stay inert when nothing is bound
 (`IToolTransport`, `IResilienceClassifier`, `CacheObserverProtocol`,
-`IRequestManifestSink`, `IProviderChain`, `ILifecycleRegistry`), and some are
+`IRequestManifestSink`, `IProviderChain`, `ILifecycleRegistry`,
+`IToolOutcomeStore`), and some are
 shapes the core hands *back* rather than asks for (`WorkHandle`,
 `BackgroundTaskView`, `ITurnState`, `ClassifiedLike`).
 `IToolSafetyPolicy` (`runtime/tool_permission.py`) is a runtime-registered

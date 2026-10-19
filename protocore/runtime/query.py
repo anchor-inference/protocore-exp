@@ -100,6 +100,7 @@ from protocore.contracts.tool_chunking import (
     chunkable_content_mutation_names,
     is_chunkable_content_mutation,
 )
+from protocore.contracts.tool_outcome import ToolInvocationRecord
 from protocore.contracts.tool_registry import (
     ADVERTISED_TOOLS_METADATA_KEY,
     TOOL_GROUP_RULES_GIVEN_METADATA_KEY,
@@ -264,6 +265,10 @@ from protocore.runtime.tool_dispatch import (
     _append_soft_cap_warning_to_content,
     _merge_soft_cap_warning_metadata,
     _record_tool_call_soft_cap_warning,
+)
+from protocore.runtime.tool_outcomes import (
+    place_result_in_source_order,
+    unanswered_tool_uses,
 )
 from protocore.runtime.tool_permission import ToolPermissionGate
 from protocore.runtime.tool_result_entry_cap import cap_fresh_result as _cap_fresh_result
@@ -2148,7 +2153,11 @@ async def _drive_turn(engine: QueryEngine) -> AsyncIterator[TurnEvent]:
         # a run resumed with stop already requested may carry a
         # dangling tool_use from the interrupted turn in its rehydrated
         # history; pair it before the cancel terminal so the persisted
-        # snapshot stays pairing-valid.
+        # snapshot stays pairing-valid. A call the outcome store recorded is
+        # paired with its real result first: the stop cancels what was still
+        # to come, not what had already finished.
+        async for replayed_evt in _replay_recorded_tool_outcomes(engine):
+            yield replayed_evt
         _synthesize_missing_tool_results(
             engine.history,
             error_content=engine.prompt_text("tool_result_interrupted"),
@@ -2204,10 +2213,15 @@ async def _drive_turn(engine: QueryEngine) -> AsyncIterator[TurnEvent]:
     # Before this turn drives anything, close out any call this run was in the
     # middle of when it last stopped. A run rehydrated on another pod has to
     # say something about a tool call it left in flight, and the only true
-    # thing it can say is that the outcome was never recorded.
+    # thing it can say is that the outcome was never recorded. A call whose
+    # outcome the store did record is placed first, so it is answered by what
+    # it actually returned and never reaches that sweep.
+    async for replayed_evt in _replay_recorded_tool_outcomes(engine):
+        yield replayed_evt
     if engine.open_intents:
         async for intent_evt in _settle_interrupted_tool_intents(engine):
             yield intent_evt
+    await _discard_answered_tool_outcomes(engine)
 
     from protocore.runtime.correctness_bind import fire_lifecycle
 
@@ -3259,6 +3273,9 @@ async def _stream_one_assistant_message(
 
     while True:
         await _reload_live_control(engine)
+        # The previous step's results are in history and in the snapshot by
+        # now, so their records in the outcome store have nothing left to say.
+        await _discard_answered_tool_outcomes(engine)
         async for _bg_evt in _background_wake_events(engine):
             yield _bg_evt
         # Every bound this run can reach is read here, before the message
@@ -6580,15 +6597,22 @@ async def _drain_dispatch_tool_deferred(
         )
         engine.open_intents.append(intent)
 
-    async def _mark_in_flight(_call: ToolCall) -> None:
+    async def _mark_in_flight(call: ToolCall) -> None:
         """Move this call's record past every gate that could still stop it.
 
-        In memory only. The batch was made durable before the gather; writing
-        a snapshot here would place an await ahead of the invoke and decide
-        which sibling reaches its tool first, which is the ordering the batch
-        write exists to avoid.
+        In memory as far as the snapshot goes. The batch was made durable
+        before the gather; writing a whole snapshot here would place an await
+        ahead of the invoke and decide which sibling reaches its tool first,
+        which is the ordering the batch write exists to avoid.
+
+        The outcome store, when one is wired, is written here all the same. Its
+        record is this call's alone, so whichever sibling reaches its tool
+        first, no record says anything about another — and without it a crash
+        while this call runs leaves only the batch's "reserved", which a resume
+        cannot tell from a call that never got past its gate.
         """
         mark_dispatched(intent)
+        await _record_outcome_started(engine, call, intent)
 
     async for item in dispatcher.dispatch(
         tool_call=tool_call,
@@ -6630,6 +6654,9 @@ async def _drain_dispatch_tool_deferred(
             tenant_id=engine.config.tenant_id,
         )
     if outcome is not None and not outcome.approval_required:
+        # Durable now, in completion order, while an earlier sibling may still
+        # be running: placement waits for the whole batch, the record does not.
+        await _record_outcome_finished(engine, tool_call, intent, outcome)
         settle_intent(intent, result=str(outcome.content or "")[:200])
         _forget_intent(engine, intent)
     return events, outcome
@@ -10782,8 +10809,9 @@ def _durable_dispatch_start(
     if intent.repeat_is_safe:
         return None
 
-    async def _start(_call: ToolCall) -> None:
+    async def _start(call: ToolCall) -> None:
         mark_dispatched(intent)
+        await _record_outcome_started(engine, call, intent)
         await engine._persist_snapshot()
 
     return _start
@@ -10872,6 +10900,179 @@ async def _settle_interrupted_tool_intents(
 
         persist_correctness(engine)
     await engine._persist_snapshot()
+
+
+def _invocation_record(
+    engine: QueryEngine,
+    tool_call: ToolCall,
+    intent: IntentRecord,
+    *,
+    outcome: DispatchOutcome | None = None,
+) -> ToolInvocationRecord:
+    """The outcome store's record of one call, keyed by its durable intent.
+
+    The intent's operation id is the invocation id, so the record written at
+    the tool's door and the one written when it returns are the same record,
+    and neither depends on the provider's call id being unique in the run.
+    """
+    return ToolInvocationRecord(
+        invocation_id=intent.operation_id,
+        tenant_id=engine.config.tenant_id,
+        run_id=engine.config.run_id,
+        tool_call_id=tool_call.id,
+        tool_name=tool_call.name,
+        arguments_digest=_intent_fingerprint(tool_call.name, tool_call.arguments),
+        step=engine.turn_count,
+        repeat_safe=intent.repeat_is_safe,
+        state="started" if outcome is None else "finished",
+        outcome=(
+            None
+            if outcome is None
+            else _result_block_from_outcome(tool_call.id, outcome).model_dump(mode="json")
+        ),
+    )
+
+
+async def _record_outcome_started(
+    engine: QueryEngine,
+    tool_call: ToolCall,
+    intent: IntentRecord,
+) -> None:
+    """Put a call on record as handed to its tool, when a store is wired.
+
+    Only for a call whose repeat is not harmless: the record is what lets a
+    resumed run say "outcome unknown" instead of "never ran", and a call that
+    only reads state loses nothing by being described either way.
+    """
+    store = engine.tool_outcome_store
+    if store is None or intent.repeat_is_safe:
+        return
+    await store.record_started(_invocation_record(engine, tool_call, intent))
+
+
+async def _record_outcome_finished(
+    engine: QueryEngine,
+    tool_call: ToolCall,
+    intent: IntentRecord,
+    outcome: DispatchOutcome,
+) -> None:
+    """Make a returned call's result durable before it waits for its place.
+
+    Called in completion order. A call parked at a gate or waiting on a
+    question has no outcome yet, so nothing is recorded for it here.
+    """
+    store = engine.tool_outcome_store
+    if store is None or outcome.approval_required or outcome.ask_user_required:
+        return
+    await store.record_finished(
+        _invocation_record(engine, tool_call, intent, outcome=outcome)
+    )
+
+
+async def _replay_recorded_tool_outcomes(
+    engine: QueryEngine,
+) -> AsyncIterator[TurnEvent]:
+    """Place the outcomes the store holds for calls history has not answered.
+
+    Runs at the top of a turn, before the interrupted-intent sweep. A record
+    only answers the unanswered ``tool_use`` with its call id AND its
+    arguments: a provider may reuse an id in a later step, and a record left
+    behind by a crash must not answer a different call that happens to share
+    it.
+
+    A finished record is placed as the result, behind the results of the calls
+    the model asked for before it. A started record with no outcome moves the
+    call's intent to in flight, so the sweep that follows reports its outcome
+    as unknown — the same thing a serial call that died at its tool is told —
+    and never runs it again. The snapshot is written before the store forgets
+    anything, so there is no moment at which neither holds the result.
+    """
+    store = engine.tool_outcome_store
+    if store is None:
+        return
+    records = await store.list_run(engine.config.tenant_id, engine.config.run_id)
+    if not records:
+        return
+    unanswered = unanswered_tool_uses(engine.history)
+    placed = False
+    for record in records:
+        use = unanswered.get(record.tool_call_id)
+        if use is None:
+            continue
+        digest = _intent_fingerprint(use.name, _parsed_arguments(use.arguments_json))
+        if digest != record.arguments_digest:
+            continue
+        intent = find_intent(engine.open_intents, record.tool_call_id)
+        if record.state == "finished" and record.outcome is not None:
+            block = ToolResultBlock.model_validate(record.outcome)
+            if not place_result_in_source_order(engine.history, block):
+                continue
+            placed = True
+            if intent is not None:
+                settle_intent(intent, result=block.content[:200])
+                _forget_intent(engine, intent)
+            engine.forget_tool_name(record.tool_call_id)
+            _logger.warning(
+                "DIAG query.tool_outcome.replayed run=%s tool=%s call_id=%s",
+                engine.config.run_id,
+                record.tool_name,
+                record.tool_call_id,
+            )
+            yield TurnEvent(
+                type=EventType.TOOL_RESULT,
+                run_id=engine.config.run_id,
+                payload={
+                    "tool_call_id": record.tool_call_id,
+                    "content": block.content,
+                    "is_error": block.is_error,
+                    "replayed": True,
+                },
+            )
+            continue
+        if intent is None:
+            intent = commit_intent(
+                tool_name=record.tool_name,
+                tool_call_id=record.tool_call_id,
+                rc=engine.config.rc,
+                arguments=_parsed_arguments(use.arguments_json),
+                roles=engine.config.tool_roles,
+            )
+            intent.repeat_safe = record.repeat_safe
+            engine.open_intents.append(intent)
+        elif intent.state == RESERVED:
+            # The batch snapshot recorded the call before its gate; the store
+            # says it got past it. A parked or questioning call is left alone:
+            # its state already says what a resume must do with it.
+            mark_dispatched(intent)
+    if placed:
+        await engine._persist_snapshot()
+
+
+async def _discard_answered_tool_outcomes(engine: QueryEngine) -> None:
+    """Forget every record whose call history now answers, or never held.
+
+    Run after the interrupted-intent sweep, so a call the sweep has just
+    reported is answered by then. What remains is a call still parked at a
+    gate or waiting on a question, which keeps its record until it moves.
+    Bounds the store to the step a run is in.
+    """
+    store = engine.tool_outcome_store
+    if store is None:
+        return
+    records = await store.list_run(engine.config.tenant_id, engine.config.run_id)
+    if not records:
+        return
+    unanswered = unanswered_tool_uses(engine.history)
+
+    def _still_open(record: ToolInvocationRecord) -> bool:
+        use = unanswered.get(record.tool_call_id)
+        return use is not None and record.arguments_digest == _intent_fingerprint(
+            use.name, _parsed_arguments(use.arguments_json)
+        )
+
+    done = [record.invocation_id for record in records if not _still_open(record)]
+    if done:
+        await store.discard(engine.config.tenant_id, engine.config.run_id, done)
 
 
 def _insert_tool_result_after_use(
@@ -11749,6 +11950,9 @@ async def _dispatch_tool(
         await engine._persist_snapshot()
         return
     elif outcome is not None:
+        # The result is durable from here even though history only takes it at
+        # the end of this dispatch, after the hooks and the accounting.
+        await _record_outcome_finished(engine, tool_call, intent, outcome)
         settle_intent(intent, result=str(outcome.content or "")[:200])
         from protocore.runtime.correctness_bind import (
             commit_usage,
@@ -11849,6 +12053,7 @@ async def _dispatch_tool(
                 blob_store=engine.blobs,
                 tenant_id=engine.config.tenant_id,
             )
+            await _record_outcome_finished(engine, tool_call, intent, outcome)
         if dispatch_tree_permit is not None:
             await dispatch_tree_permit.reacquire()
         if outcome is None:

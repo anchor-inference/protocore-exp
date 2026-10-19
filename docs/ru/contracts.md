@@ -35,6 +35,7 @@ protocore/contracts/
   blob.py         # IBlobStore
   search.py       # ISearchIndex
   todo.py         # ITodoStorage
+  tool_outcome.py # IToolOutcomeStore + ToolInvocationRecord
   tool_registry.py# IToolRegistry + ToolVisibilityPolicy
   tools.py        # Tool (ABC) + ToolContext + tool errors
   run_state.py    # RunScopedState — the run's live state, incl. the host compartment
@@ -129,6 +130,7 @@ protocore/contracts/
 | `IBlobStore` | `contracts/blob.py` | Content-addressed хранилище блобов, используемое компакцией Tier-1. |
 | `ISearchIndex` | `contracts/search.py` | Универсальный лексический поисковый индекс. |
 | `ITodoStorage` | `contracts/todo.py` | Посессионное хранение todo. |
+| `IToolOutcomeStore` | `contracts/tool_outcome.py` | Опционально: исход каждого вызова инструмента становится долговечным в момент, когда он появился, раньше своего места в истории. `record_started` (перед вызовом, повтор которого не безвреден), `record_finished` (условная запись: побеждает первый исход, поздний возвращает `False`), `list_run`, `discard`. Передаётся как `QueryEngine(tool_outcome_store=...)`; `None` (по умолчанию) оставляет snapshot единственной записью. `InMemoryToolOutcomeStore` (`runtime/tool_outcomes.py`) — эталонное поведение. |
 | `IAgentDispatch` | `contracts/agent_dispatch.py` | Диспетчеризация / поиск субагентов. `dispatch` отвечает `SubagentHandle`: дочерний прогон адресуем с момента запуска, а не только когда он закончился. Кому нужна прежняя блокирующая форма — пишет ожидание сам: `await (await dispatch(task)).wait()`. |
 | `IBackgroundTaskPool` | `contracts/background.py` | Фоновые команды сессии в том виде, в каком их читает цикл: `list`, `get`, `refresh`, `drain_wakes` и объявление привязки (`mark_session_attached` / `ensure_session_attached`), которое возобновлённый прогон проверяет, прежде чем поверить пустому списку пробуждений. |
 | `IWorkPool` | `contracts/background.py` | Всё перечисленное плюс ручки, делающие единицу работы управляемой: `launch(spec, start)` (id выдаётся ДО старта и передаётся в `start`), `handle`, `stop`, `stop_session(scope, grace)` и `subscribe(on_terminal)`. Дочерний прогон — запись `kind="agent"` в том же пуле, поэтому ожидание ребёнка и ожидание фоновой команды — один и тот же вопрос к одному и тому же коллаборатору. |
@@ -142,14 +144,14 @@ protocore/contracts/
 | `IMemoryContentScanner` | `contracts/memory.py` | Сканирование содержимого памяти на инъекции при записи. |
 | `ITurnPolicy` | `contracts/turn_policy.py` | Одно продуктовое решение о ходе. Не адаптер, который обязан поставить хост: ядро везёт собственный набор, а хост подставляет политику в него **по имени**. |
 
-**32 `Protocol`-а** в `contracts/` — это не один плоский список адаптеров: часть
+**33 `Protocol`-а** в `contracts/` — это не один плоский список адаптеров: часть
 из них — хранилища, которые хост обязан поставить (`ILLMProvider`, `IRunStore`,
 `ISessionStore`, `IBlobStore`, `ISearchIndex`, `ITodoStorage`, `IToolRegistry`,
 `ISkillStore`, `IAgentDispatch`, `IEventStream`, `IHookManager`, `IMemory`,
 `IWorkspace`, `IWorkPool`); часть — опциональные швы, остающиеся инертными,
 пока ничего не привязано (`IToolTransport`, `IResilienceClassifier`,
 `CacheObserverProtocol`, `IRequestManifestSink`, `IProviderChain`,
-`ILifecycleRegistry`); а часть — формы, которые ядро отдаёт *обратно*, а не
+`ILifecycleRegistry`, `IToolOutcomeStore`); а часть — формы, которые ядро отдаёт *обратно*, а не
 просит (`WorkHandle`, `BackgroundTaskView`, `ITurnState`, `ClassifiedLike`).
 `IToolSafetyPolicy` (`runtime/tool_permission.py`) — регистрируемая в рантайме
 политика разрешений, а не контракт, а `Tool` — это ABC, а не `Protocol`: хост
