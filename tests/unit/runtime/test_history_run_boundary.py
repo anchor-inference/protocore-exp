@@ -281,6 +281,23 @@ _WHOLE_HISTORY_BY_DESIGN: dict[str, _Declaration] = {
         "never recorded, and a result that landed before the tail is still a "
         "result"
     ),
+    "protocore/runtime/query.py::_replay_recorded_tool_outcomes": _whole(
+        "places a recorded outcome after the call it answers: the call may sit "
+        "anywhere in the transcript a resumed run was seeded with, and a result "
+        "already present for it anywhere means it is answered"
+    ),
+    "protocore/runtime/query.py::_discard_answered_tool_outcomes": _whole(
+        "forgets the store's records of calls the transcript answers; an answer "
+        "anywhere in the sequence is an answer, the same reading as the replay"
+    ),
+    "protocore/runtime/tool_outcomes.py::unanswered_tool_uses": _whole(
+        "pairs calls with results across whatever sequence it is handed — the "
+        "pairing concern of the repairs above"
+    ),
+    "protocore/runtime/tool_outcomes.py::place_result_in_source_order": _whole(
+        "places a result directly after the call it answers, anywhere in the "
+        "sequence it is handed — a pairing concern, like the repairs"
+    ),
     "protocore/runtime/query.py::_abandon_pending_approval": _whole(
         "closes a call that was parked at an approval gate: the result has to "
         "go directly after the call it answers, wherever in the transcript "

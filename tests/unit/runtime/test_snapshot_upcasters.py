@@ -179,3 +179,13 @@ def test_a_version_six_pin_list_becomes_discovered_tools_in_the_same_order() -> 
     ]
     assert upgraded["deferred_tool_groups"] == []
     assert "context_manager_pinned_tools" not in upgraded
+
+
+def test_a_version_nine_payload_says_no_step_settings_were_recorded() -> None:
+    """Version 10 keeps the settings the run's last model step ran with. A
+    version-9 run recorded none, so the lift says exactly that: the first step
+    after the resume then reports nothing as changed, as a fresh run's would."""
+    upgraded = migrate_snapshot({SNAPSHOT_SCHEMA_KEY: 9, "run_id": "run-1"})
+
+    assert upgraded[SNAPSHOT_SCHEMA_KEY] == SNAPSHOT_SCHEMA_VERSION
+    assert upgraded["last_step_settings"] is None

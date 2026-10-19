@@ -35,6 +35,7 @@ protocore/contracts/
   blob.py         # IBlobStore
   search.py       # ISearchIndex
   todo.py         # ITodoStorage
+  tool_outcome.py # IToolOutcomeStore + ToolInvocationRecord
   tool_registry.py# IToolRegistry + ToolVisibilityPolicy
   tools.py        # Tool (ABC) + ToolContext + tool errors
   run_state.py    # RunScopedState — the run's live state, incl. the host compartment
@@ -129,6 +130,7 @@ protocore/contracts/
 | `IBlobStore` | `contracts/blob.py` | Content-addressed хранилище блобов, используемое компакцией Tier-1. |
 | `ISearchIndex` | `contracts/search.py` | Универсальный лексический поисковый индекс. |
 | `ITodoStorage` | `contracts/todo.py` | Посессионное хранение todo. |
+| `IToolOutcomeStore` | `contracts/tool_outcome.py` | Опционально: исход каждого вызова инструмента становится долговечным в момент, когда он появился, раньше своего места в истории. `record_started` (перед вызовом, повтор которого не безвреден), `record_finished` (условная запись: побеждает первый исход, поздний возвращает `False`), `list_run`, `discard`. Передаётся как `QueryEngine(tool_outcome_store=...)`; `None` (по умолчанию) оставляет snapshot единственной записью. `InMemoryToolOutcomeStore` (`runtime/tool_outcomes.py`) — эталонное поведение. |
 | `IAgentDispatch` | `contracts/agent_dispatch.py` | Диспетчеризация / поиск субагентов. `dispatch` отвечает `SubagentHandle`: дочерний прогон адресуем с момента запуска, а не только когда он закончился. Кому нужна прежняя блокирующая форма — пишет ожидание сам: `await (await dispatch(task)).wait()`. |
 | `IBackgroundTaskPool` | `contracts/background.py` | Фоновые команды сессии в том виде, в каком их читает цикл: `list`, `get`, `refresh`, `drain_wakes` и объявление привязки (`mark_session_attached` / `ensure_session_attached`), которое возобновлённый прогон проверяет, прежде чем поверить пустому списку пробуждений. |
 | `IWorkPool` | `contracts/background.py` | Всё перечисленное плюс ручки, делающие единицу работы управляемой: `launch(spec, start)` (id выдаётся ДО старта и передаётся в `start`), `handle`, `stop`, `stop_session(scope, grace)` и `subscribe(on_terminal)`. Дочерний прогон — запись `kind="agent"` в том же пуле, поэтому ожидание ребёнка и ожидание фоновой команды — один и тот же вопрос к одному и тому же коллаборатору. |
@@ -144,14 +146,15 @@ protocore/contracts/
 | `IMemoryWritePolicy` | `contracts/memory.py` | Слово хоста о записи в память до того, как она ляжет: `async review(MemoryWriteRequest) -> MemoryWriteVerdict` классифицирует (kind, metadata, source refs, salience) или отказывает с сообщением, которое прочтёт модель. Необязательна; `None` пишет как раньше. |
 | `ITurnPolicy` | `contracts/turn_policy.py` | Одно продуктовое решение о ходе. Не адаптер, который обязан поставить хост: ядро везёт собственный набор, а хост подставляет политику в него **по имени**. |
 
-**34 `Protocol`-а** в `contracts/` — это не один плоский список адаптеров: часть
+**37 `Protocol`-ов** в `contracts/` — это не один плоский список адаптеров: часть
 из них — хранилища, которые хост обязан поставить (`ILLMProvider`, `IRunStore`,
 `ISessionStore`, `IBlobStore`, `ISearchIndex`, `ITodoStorage`, `IToolRegistry`,
 `ISkillStore`, `IAgentDispatch`, `IEventStream`, `IHookManager`, `IMemory`,
 `IWorkspace`, `IWorkPool`); часть — опциональные швы, остающиеся инертными,
 пока ничего не привязано (`IToolTransport`, `IResilienceClassifier`,
 `CacheObserverProtocol`, `IRequestManifestSink`, `IProviderChain`,
-`ILifecycleRegistry`, `IProvenanceMemory`, `IMemoryWritePolicy`); а часть — формы, которые ядро отдаёт *обратно*, а не
+`ILifecycleRegistry`, `IProvenanceMemory`, `IMemoryWritePolicy`, `IToolOutcomeStore`,
+`ITurnContextProvider`, `IReasoningEffortClassifier`); а часть — формы, которые ядро отдаёт *обратно*, а не
 просит (`WorkHandle`, `BackgroundTaskView`, `ITurnState`, `ClassifiedLike`).
 `IToolSafetyPolicy` (`runtime/tool_permission.py`) — регистрируемая в рантайме
 политика разрешений, а не контракт, а `Tool` — это ABC, а не `Protocol`: хост
@@ -481,6 +484,18 @@ await persister.flush()   # в терминальном состоянии, до
   его бюджета параллелизма и бюджет восстановления прогона (версия схемы 9). Живые объекты (`asyncio.Event`, семафор, лок) по
   природе процесс-локальны и пересобираются тем, кто подключает поднятый
   прогон, а не восстанавливаются из payload.
+- **`StepSettings`** (`contracts/step_settings.py`) — с чем был собран один
+  запрос одного шага модели: модель, ступень цепочки провайдеров, thinking и
+  effort, принудительный инструмент, дайджесты объявленной поверхности
+  инструментов и политики видимости, отметка правил групп инструментов, профиль
+  и режим, а также лимиты (выходные токены, окно контекста, потолок шагов,
+  таймаут инструмента). `digest` — одно значение по этим полям; `changed` —
+  имена тех, что отличаются от предыдущего шага; `attempt` считает запросы
+  одного wire-раунда (реактивный повтор или запасная ступень — вторая попытка).
+  Строится через `settle_step_settings`, хранится как
+  `QueryEngine.last_step_settings` и в snapshot (версия схемы 10) и выпускается
+  событием `step_settings`, когда включён `step_settings_event_enabled`. Не
+  содержит ни промпта, ни учётных данных, ни аргументов инструментов.
 - **`SNAPSHOT_SCHEMA_VERSION`** / **`SnapshotUpcaster`** /
   **`SnapshotSchemaError`** (`contracts/snapshot.py`) — снимок объявляет
   собственную версию схемы, и читатель, который её не узнаёт, отвергает payload

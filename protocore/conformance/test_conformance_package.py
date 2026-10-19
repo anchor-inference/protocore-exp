@@ -29,6 +29,7 @@ from protocore.conformance.suite import _protocol_member, declared_members
 from protocore.contracts.events import IEventStream
 from protocore.contracts.session import ISessionStore
 from protocore.contracts.tool_registry import IToolRegistry
+from protocore.runtime.tool_outcomes import InMemoryToolOutcomeStore
 from protocore.tests_support.adapters import (
     InMemoryAgentDispatch,
     InMemoryBlobStore,
@@ -166,6 +167,7 @@ _BOUND: tuple[tuple[str, type], ...] = (
     ("ISessionStore", InMemorySessionStore),
     ("ISkillStore", InMemorySkillStore),
     ("ITodoStorage", InMemoryTodoStorage),
+    ("IToolOutcomeStore", InMemoryToolOutcomeStore),
     ("IToolRegistry", InMemoryToolRegistry),
     ("IWorkspace", InMemoryWorkspace),
 )

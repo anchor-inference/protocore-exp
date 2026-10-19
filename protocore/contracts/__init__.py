@@ -144,7 +144,14 @@ from protocore.contracts.skills import (
     SkillIndexEntry,
     SkillStoreError,
 )
+from protocore.contracts.step_settings import StepSettings, settle_step_settings
 from protocore.contracts.todo import ITodoStorage, TodoStorageError
+from protocore.contracts.tool_outcome import (
+    IToolOutcomeStore,
+    ToolInvocationRecord,
+    ToolInvocationState,
+    ToolOutcomeStoreError,
+)
 from protocore.contracts.tool_registry import IToolRegistry, ToolVisibilityPolicy
 from protocore.contracts.tools import (
     Tool,
@@ -275,6 +282,7 @@ __all__ = [
     "ISessionStore",
     "ISkillStore",
     "ITodoStorage",
+    "IToolOutcomeStore",
     "IToolRegistry",
     "IToolTransport",
     "IWorkPool",
@@ -349,6 +357,7 @@ __all__ = [
     "SkillIndexEntry",
     "SkillManifest",
     "SkillStoreError",
+    "StepSettings",
     "StopReason",
     "SubagentDef",
     "SubagentHandle",
@@ -368,6 +377,9 @@ __all__ = [
     "ToolDefinition",
     "ToolError",
     "ToolInvocationError",
+    "ToolInvocationRecord",
+    "ToolInvocationState",
+    "ToolOutcomeStoreError",
     "ToolParameterSchema",
     "ToolPolicyDenied",
     "ToolPrecondition",
@@ -405,5 +417,6 @@ __all__ = [
     "WorkspaceWriteOutcome",
     "assert_verification_transition",
     "message_image_refs",
+    "settle_step_settings",
     "synthetic_recovery_origin",
 ]

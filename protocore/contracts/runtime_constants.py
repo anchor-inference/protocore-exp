@@ -3589,6 +3589,20 @@ class LoopConstants(BaseModel):
         ),
     )
 
+    step_settings_event_enabled: bool = Field(
+        default=False,
+        description=(
+            "When true, every request the loop builds for a model step is "
+            "preceded by a step_settings event carrying the settings it was "
+            "built with (model, provider rung, thinking and effort, tool "
+            "surface and policy digests, rules mark, limits) and the names of "
+            "those that changed since the step before. The record is kept on "
+            "the engine and in the snapshot either way; this only puts it on "
+            "the event stream. Off by default, so a reader that does not know "
+            "the event is never sent one."
+        ),
+    )
+
     # ----- Intent, ledger, session tree, lanes (all default off) -----
     intent_settlement_enabled: bool = Field(
         default=False,

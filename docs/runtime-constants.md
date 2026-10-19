@@ -141,6 +141,11 @@ what a long run wants instead without moving the defaults under everyone:
 of a couple of hundred turns legitimately re-runs the same test command and
 re-reads the same file many times, which the default limits of three and one
 mistake for a loop. Overrides win over the preset.
+`step_settings_event_enabled` (default `False`) puts an
+`EventType.STEP_SETTINGS` event before every request of a model step, carrying
+the settings the request was built with and the names of those that changed
+since the step before. The record itself (`QueryEngine.last_step_settings`,
+also written into the snapshot) is kept whether the flag is on or not.
 
 The snapshot carries only what the loop itself reads. Knobs that govern a
 surface the host owns — authentication policy, session storage, the transport

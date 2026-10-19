@@ -61,6 +61,33 @@ All notable changes to this project are recorded here. The format follows
   `message_stop` lists the ids the engine still held unplaced as
   `leftover_queued`. Nothing changes for a host that keeps writing the lists;
   the payload field is new and may be ignored.
+- **Every model step records the settings its request was built with.**
+  `StepSettings` (`protocore.contracts.step_settings`) holds the model, the
+  provider chain's rung, thinking and effort, the forced tool, the digests of
+  the tool surface and the visibility policy, the rules mark, the profile and
+  mode and the relevant limits, with a digest over them and `changed`, the
+  fields that differ from the step before. A change made mid-run shows up on
+  the next step's record, which is where it took effect. The record is kept
+  as `QueryEngine.last_step_settings` and in the snapshot; with the new
+  `LoopConstants.step_settings_event_enabled` (default `False`) it is also a
+  `step_settings` event before each request. Leaving the flag off keeps the
+  event stream as it was. The snapshot schema moves to version 10; a version 9
+  payload is lifted with no step recorded.
+- **`IToolOutcomeStore` makes each tool call's outcome durable the moment it
+  exists, ahead of its place in history.** Pass one as
+  `QueryEngine(tool_outcome_store=...)`. A call whose repeat is not harmless is
+  recorded as `started` before its tool runs, and every call that returns is
+  recorded as `finished` with its result block, in completion order, so a
+  process that dies while the first call of a batch is still running keeps
+  the results of the calls that already finished. A resumed run places those
+  results (a `tool_result` event with `replayed: true`) instead of running
+  the calls again, and reports a call that started and never finished as
+  having an unknown outcome. A record answers only the unanswered call with
+  its id and argument digest, and records are discarded once history answers
+  them. `InMemoryToolOutcomeStore` (`protocore.runtime.tool_outcomes`) is the
+  reference store and `ToolOutcomeStoreConformance` the suite a host binds to
+  its own, with behavioural cases. Passing no store (the default) keeps the
+  earlier behaviour. See `docs/architecture.md`.
 - **`OPERATOR_WORDS_METADATA_KEY` (`"protocore.operator_words"`) says who
   wrote a message.** `True` on `Message.metadata` makes the message the
   operator's, `False` makes a user-role message a runtime note, and a list of
@@ -447,6 +474,10 @@ All notable changes to this project are recorded here. The format follows
 
 ### Changed
 
+- **The snapshot schema is version 10.** Version 9 adds `recovery_budget` to
+  the run's own state and version 10 adds `last_step_settings`; older payloads
+  are lifted with `None` in each, and a build at an older version refuses a
+  newer payload, as it refuses any newer one.
 - **`ToolPermissionGate(policies=[])` installs no policy.** An empty list read
   as "use the defaults", so a host that passed one to turn the shell deny list
   off still had it. Only `None` means the defaults now.

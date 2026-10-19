@@ -463,6 +463,7 @@ def scenario() -> ScenarioFactory:
         turn_policies: TurnPolicyRegistry | None = None,
         event_stream: Any | None = None,
         tool_safety_policies: Any | None = None,
+        tool_outcome_store: Any | None = None,
         **config_overrides: Any,
     ) -> Scenario:
         llm = InMemoryLLMProvider()
@@ -493,6 +494,7 @@ def scenario() -> ScenarioFactory:
             background_pool=background_pool,
             lifecycle_hooks=lifecycle_hooks,
             tool_safety_policies=tool_safety_policies,
+            tool_outcome_store=tool_outcome_store,
         )
         # A run driven by a policy set of the caller's choosing. Passing none
         # keeps the core's own set, which is what every other scenario asserts

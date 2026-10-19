@@ -118,6 +118,13 @@ and the parameters the core passes by name — because behaviour is the host's
 own suite's job, and a core asserting it would be dictating storage semantics
 it has no business knowing.
 
+Two suites add behavioural cases because their contract's promise cannot be
+read off a signature: `RequestManifestSinkConformance` (the handoff must return
+promptly) and `ToolOutcomeStoreConformance` (the first recorded outcome wins, a
+late start never unsettles a finished call, records are kept apart by run and
+tenant, `discard` forgets only what it names). Their cases keep to run ids of
+their own, so they pass against a store that every case shares.
+
 `SUITES` is every suite the package publishes, one per contract, and the
 package's own test module fails if a contract is declared without one — so the
 catalogue cannot drift behind `contracts/`.

@@ -856,6 +856,42 @@ result ids reserved, so a run that dies mid-flight can be told apart from one
 that never started — see
 [Intent, usage ledger, …](#intent-usage-ledger-session-tree-lanes-typed-hooks-telemetry-live-control-run-work-budget).
 
+**Settings per step.** A setting changed while a run is going — a live model
+or effort switch, a provider chain falling back, a tool group's rules given, a
+widened surface — takes effect at the next request, never inside the one in
+flight. Every request the loop builds for a model step therefore leaves a
+`StepSettings` record (`contracts/step_settings.py`) built from the request
+itself, after the fit and the manifest: what it named, its digest, and the
+fields that changed since the step before. It is kept as
+`QueryEngine.last_step_settings` and in the snapshot, so the first step of a
+resumed run names its changes against the step before the restart; with
+`step_settings_event_enabled` it is also a `step_settings` event just before
+the request is handed to the provider. A host labels a finished step with the
+record rather than with whatever the settings say afterwards.
+
+**Durable outcome before placement.** The calls of one model message can run
+together (a read fan-out, a delegation group), and their results are placed in
+history in the order the model asked for them, so placement waits for the
+slowest call. With an `IToolOutcomeStore` passed as
+`QueryEngine(tool_outcome_store=...)`, a call whose repeat is not harmless is
+put on record as `started` directly before its tool is invoked, and every call
+that returns is recorded as `finished` with its result block, in completion
+order, while an earlier sibling may still be running. At the top of every turn
+— which is where a resumed run first acts — the recorded outcomes of calls
+history has not answered are placed, behind their earlier siblings, with a
+`tool_result` event carrying `replayed: true`; a record answers only the
+unanswered `tool_use` with its call id **and** its argument digest, so a call
+id a provider reuses later is never answered by a stale record. A `started`
+record with no outcome moves the call's intent to in flight, and the
+interrupted-intent sweep then reports its outcome as unknown: the core never
+runs a call again on resume. The snapshot is written before the store forgets
+anything, and every model step discards the records history now answers, so
+the store holds at most the current step. A replayed result is the tool's own
+result block: the per-run adjustments the live path makes at placement (the
+error-streak rewrite, evidence admission) are not repeated. Without a store
+(the default) nothing changes: a call that finished while an earlier sibling
+was running is lost with the process.
+
 **Pairing repair (`runtime/query.py`).** Providers reject a request whose
 assistant `tool_use` has no matching `tool_result` — or that carries an
 orphaned result, or duplicate ids — with a 400. Pairing is therefore

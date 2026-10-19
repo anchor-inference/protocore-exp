@@ -176,6 +176,16 @@ to install its policies. `HttpDnsAllowlistPolicy` and `WorkspacePathPolicy` are
 provided this way too; they are **not** in the default stack. A gate built by
 hand still takes `register_policy(...)`.
 
+**Make tool outcomes survive a restart.** Pass an `IToolOutcomeStore` as
+`QueryEngine(tool_outcome_store=...)` and every call's result is durable the
+moment the tool returns, not when the batch it belongs to is placed. One row
+per invocation keyed by `(tenant_id, run_id, invocation_id)` is enough; the
+outcome is a JSON column; `record_finished` must be a conditional write, so a
+late result never replaces the one already recorded. Bind
+`ToolOutcomeStoreConformance` to the adapter: unlike most suites it asks
+behaviour, because a store with the right shape can still break the rules a
+resume relies on. A host that passes no store keeps the earlier behaviour.
+
 **Rule of thumb:** if your code has a database driver, an HTTP client, a wire
 format, or any I/O, it belongs in an adapter behind a `Protocol` — not in
 `protocore/`.

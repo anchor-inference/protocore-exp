@@ -103,6 +103,10 @@ class EventType(StrEnum):
     SESSION_FORKED = "session_forked"
     LANE_LOCKED = "lane_locked"
     RECOVERY_MARKED = "recovery_marked"
+    # The settings a model step's request was built with, emitted once per
+    # request just before it is handed to the provider, when
+    # ``step_settings_event_enabled`` is on. Payload: a ``StepSettings``.
+    STEP_SETTINGS = "step_settings"
 
     # ----- Candidate verification lifecycle -----
     # These events describe stage progress only. Projection of content to a
