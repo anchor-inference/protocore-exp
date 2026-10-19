@@ -744,6 +744,15 @@ already has — and two rules keep the last of them honest.
   `outcome="failed"` on its terminal `message_stop`, with the verdict in
   `cause.failure`, even when the closing turn wrote prose (see
   [`contracts.md`](contracts.md#provider-failures-and-the-runs-outcome)).
+- **A change of model is announced.** Every chain advance emits
+  `model_changed` with `from` and `to` (the rungs, named as the chain names
+  them), `reason="provider_chain_advance"`, `error_class` (the failure class
+  that moved it) and `failure` (the `ProviderFailure` in JSON form, or `None`),
+  before the restarted turn's first delta: a fallback reopens the stream inside
+  the same assistant message, so no second `message_start` marks the switch.
+  A restore that re-seats the run on a later rung than the chain stood on
+  emits nothing itself; the first drive after it emits `model_changed` with
+  `reason="snapshot_restore"`, once.
 
 ### The run snapshot: schema version and upcasters
 
@@ -964,7 +973,8 @@ owner, a scope, and a disposer, or by implementing `IHookManager` in the host.
   `usage_committed`, `session_forked`, `lane_locked`, `recovery_marked`,
   `compact_checkpoint`, steer/follow-up/queue events (`steer_queued`,
   `follow_up_queued`, `queue_update`), live-control
-  `model_changed`/`thinking_changed`, and candidate-verification events
+  `model_changed`/`thinking_changed` (`model_changed` is emitted on a provider
+  chain advance and after a restore onto a later rung), and candidate-verification events
   (`candidate_ready`, `verification_started`, `verification_reported`,
   `repair_requested`, `release_decided`, `candidate_released`), and
   `interrupt_parked` — emitted whenever the run records something it is waiting

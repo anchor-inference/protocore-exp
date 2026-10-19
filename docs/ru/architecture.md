@@ -745,6 +745,15 @@ tool_result*); (3) выход по `max_turns`
   `outcome="failed"` в своём терминальном `message_stop`, с вердиктом в
   `cause.failure`, даже если закрывающий ход написал текст (см.
   [`contracts.md`](contracts.md#сбои-провайдера-и-исход-прогона)).
+- **Смена модели объявляется.** Каждый сдвиг цепочки выдаёт `model_changed` с
+  `from` и `to` (ступени, названные так, как их называет цепочка),
+  `reason="provider_chain_advance"`, `error_class` (класс сбоя, который её
+  сдвинул) и `failure` (`ProviderFailure` в JSON-форме или `None`) до первой
+  дельты перезапущенного хода: фолбэк заново открывает поток внутри того же
+  сообщения ассистента, так что второй `message_start` переключение не
+  отмечает. Восстановление, которое сажает прогон на более позднюю ступень,
+  чем та, на которой стояла цепочка, само ничего не выдаёт; первый драйв после
+  него выдаёт `model_changed` с `reason="snapshot_restore"`, один раз.
 
 ### Снимок прогона: версия схемы и upcaster-ы
 
@@ -964,7 +973,8 @@ Layer-3, с потолком `max_skills_per_run` (по умолчанию 4). �
   `usage_committed`, `session_forked`, `lane_locked`, `recovery_marked`,
   `compact_checkpoint`, события steer/follow-up/очередей (`steer_queued`,
   `follow_up_queued`, `queue_update`), live-control
-  `model_changed`/`thinking_changed` и события верификации кандидата
+  `model_changed`/`thinking_changed` (`model_changed` выдаётся при сдвиге
+  цепочки провайдеров и после восстановления на более позднюю ступень) и события верификации кандидата
   (`candidate_ready`, `verification_started`, `verification_reported`,
   `repair_requested`, `release_decided`, `candidate_released`) и
   `interrupt_parked` — оно выдаётся всякий раз, когда прогон записывает то, чего

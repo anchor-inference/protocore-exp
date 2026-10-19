@@ -8,6 +8,16 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- **The core emits `model_changed` when the model answering a run changes.**
+  Every provider-chain advance emits it before the restarted turn's first
+  delta, with `from`, `to` (rungs named as the chain names them),
+  `reason="provider_chain_advance"`, `error_class` and `failure` (the
+  `ProviderFailure` verdict in JSON form, or `None`). A restore that re-seats a
+  run on a later rung emits it once, on the next drive, with
+  `reason="snapshot_restore"`. The event type existed and nothing emitted it;
+  a host that rebuilt the switch from `state_changed(model_fallback_triggered)`
+  and `message_start` may keep doing so, and the existing `state_changed`
+  event is unchanged.
 - **`QueryEngine.answer_pending(tool_call_id, content, *, is_error=False,
   operator_words=True)`** (and `protocore.runtime.answer_pending`) answers the
   question a run parked on and leaves it ready for `run(None)`: the answer is

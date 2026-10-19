@@ -97,6 +97,11 @@ _PROCESS_LOCAL: dict[str, str] = {
         "loads them. A resume is not a seed: the snapshot's loaded tools say "
         "which groups are loaded, so it empties this."
     ),
+    "_restored_model_change": (
+        "derived on the way in: the restore that re-seats the run on a later "
+        "rung sets it, from the provider_chain_advances and "
+        "provider_chain_model_name the snapshot does carry."
+    ),
     "_queue_sync": (
         "what the queues owe one process's reads of a host's store. A resumed "
         "run reloads the queues from that store before its first model call, "

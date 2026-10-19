@@ -549,6 +549,45 @@ def _policy_fallback_event(
     )
 
 
+def _model_changed_event(
+    engine: QueryEngine,
+    from_model: str,
+    to_model: str,
+    *,
+    reason: str,
+    exc: BaseException | None = None,
+    error_class: str | None = None,
+) -> TurnEvent:
+    """``model_changed``: the model that answers from here on, the one it replaces, and why.
+
+    ``failure`` is the provider's verdict on the error that moved the chain,
+    when it carried one, so a host can show "moved off X: rate limited" without
+    reading the error text.
+    """
+    failure = provider_failure_of(exc) if exc is not None else None
+    return TurnEvent(
+        type=EventType.MODEL_CHANGED,
+        run_id=engine.config.run_id,
+        payload={
+            "from": from_model,
+            "to": to_model,
+            "reason": reason,
+            "error_class": error_class,
+            "failure": None if failure is None else failure.model_dump(mode="json"),
+        },
+    )
+
+
+def _current_chain_rung(engine: QueryEngine) -> str:
+    """The rung the run is on, named as the chain names it.
+
+    The chain's name and not the configured model name, which can be a pin
+    the chain never mentions; the rung a change moves to is named the same way.
+    """
+    chain = engine.provider_chain
+    return chain.current_model_name() if chain is not None else engine.config.model_name
+
+
 def _policy_transient_retry_event(
     engine: QueryEngine,
     kind: str,
@@ -2194,6 +2233,16 @@ async def _drive_turn(engine: QueryEngine) -> AsyncIterator[TurnEvent]:
             type=EventType.STATE_CHANGED,
             run_id=engine.config.run_id,
             payload={"from": LoopState.PENDING.value, "to": LoopState.RUNNING.value},
+        )
+
+    # A restore that re-seated the run on a later rung of its chain could not
+    # say so itself (a restore emits nothing); the first drive after it does,
+    # before anything the restored model writes.
+    restored_rung = engine._restored_model_change
+    if restored_rung is not None:
+        engine._restored_model_change = None
+        yield _model_changed_event(
+            engine, restored_rung[0], restored_rung[1], reason="snapshot_restore"
         )
 
     # Per-turn block index reset
@@ -13295,6 +13344,8 @@ _CORE_TURN_POLICIES: Final[TurnPolicyRegistry] = TurnPolicyRegistry(
             ),
             log_crash=_policy_log_stream_crash,
             log_failure=_policy_log_stream_failure,
+            model_changed_event=_model_changed_event,
+            current_rung=_current_chain_rung,
         ),
         TruncatedToolCallRecoveryPolicy(
             recoveries=RunCounter(

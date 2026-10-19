@@ -925,6 +925,9 @@ class QueryEngine:
             # surface build to replay it. A resumed run is re-armed before its
             # first turn, so dropping it here would drop it every time.
             "_restored_deferred_groups",
+            # The model change a restore owes the wire, for the same reason:
+            # the re-arm before the resumed run's first turn would drop it.
+            "_restored_model_change",
             # The rules the run was given stay given: the result or catalogue
             # that gave them is still in the conversation.
             "_tool_group_rules_given",
@@ -1263,6 +1266,9 @@ class QueryEngine:
         # failed at message three has not been shown to be healthy again by
         # message four and re-testing it costs the same failed turn twice.
         self._provider_chain_advances: int = 0
+        # The rung a restore left and the rung it re-seated the run on, held
+        # until the next drive announces it as ``model_changed``.
+        self._restored_model_change: tuple[str, str] | None = None
         # Continue-prompt fallback: count of
         # consecutive assistant turns that returned empty content + populated
         # reasoning_content. Bound by ``rc.max_consecutive_empty_responses``;
@@ -3411,6 +3417,7 @@ class QueryEngine:
         persisted_rung = snapshot.get("provider_chain_model_name")
         if not isinstance(persisted_rung, str) or not persisted_rung:
             raise ValueError("snapshot is missing provider_chain_model_name")
+        seated_on = chain.current_model_name()
         for _ in range(advances - walked):
             if not await chain.advance(reason="snapshot_restore"):
                 raise ValueError(
@@ -3425,6 +3432,10 @@ class QueryEngine:
         self.llm = chain.current()
         self.config = replace(self.config, model_name=persisted_model_name)
         self._provider_chain_advances = advances
+        if seated_on != persisted_rung:
+            # Announced by the next drive: a run put back on a later rung
+            # otherwise changes model with nothing on the wire to say so.
+            self._restored_model_change = (seated_on, persisted_rung)
 
     async def resume_from_snapshot(self, snapshot: dict[str, Any]) -> None:
         """Rehydrate this engine from a snapshot, or refuse it and change nothing.
