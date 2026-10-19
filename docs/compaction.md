@@ -282,6 +282,37 @@ of the run, so work done before a pass still counts as the run's output.
 *Why.* The ledger was stored by a host as the user's own message, drawn as a
 user bubble, and seeded into the next run as an operator turn.
 
+## Between runs
+
+The tiers above run inside a run. A host that keeps a session alive across
+runs also rewrites the history between them — a compaction after a run, a
+revert of the last turn, a clear, an import — and those rewrites go through the
+engine, not around it.
+
+### Replacing the history
+
+`await engine.replace_history(messages, reason=...)` puts `messages` in place
+of the history and retires what was derived from the old one: the compaction
+checkpoint, the compaction state and its back-offs, the store's persist marker
+(the next hand-over is a rewrite, so a revert to a prefix does not leave the
+dropped rows in the store) and the prompt measurement. It emits
+`history_replaced` (`reason`, `messages_before`, `messages_after`,
+`prompt_tokens_before`, `prompt_tokens_after`) on the engine's event stream and
+returns it. It raises while a turn is driving.
+
+The prompt is re-sized without a call: the provider's last count, less the
+fixed part, is scaled by how much of the history survived, and never exceeds
+the count. The estimator's calibration cancels out of the ratio, so the answer
+errs only low — the next compaction comes a turn late at most — and messages
+added afterwards are estimated on top of it, as after any count. With no count
+to scale, the estimate stays the authority. The scaled anchor rides the
+snapshot (`prompt_anchor`), so a run resumed on another engine sizes its prompt
+the same way.
+
+*Why.* A host assigned the history and forgot the measurement; the trigger read
+the size of the history it had just shrunk, and nearly half the compactions of
+a long session re-summarised a tail the previous one had already made small.
+
 ## Budget arithmetic
 
 With `O = min(W × llm_output_max_tokens_ratio, llm_output_min_tokens)` when the

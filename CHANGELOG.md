@@ -108,6 +108,17 @@ All notable changes to this project are recorded here. The format follows
   now lives in `protocore.contracts.types` beside the other kinds and is still
   importable from `protocore.runtime.soft_stop`.
 
+- **`QueryEngine.replace_history(messages, *, reason)` rewrites the history
+  from outside the loop** — a compaction between runs, a revert, a clear, an
+  import — and retires what the old history left behind: the compaction
+  checkpoint, the compaction state and its back-offs, the persist marker (the
+  next hand-over is a rewrite) and the prompt measurement, which it re-sizes by
+  scaling the provider's last count by the share of history that survived. It
+  emits the new `EventType.HISTORY_REPLACED` and returns it, and raises while a
+  turn is driving. A host that assigned `engine.history` and reset the fields by
+  hand missed the measurement, and the next turn re-compacted a history the
+  last pass had already shrunk.
+
 ### Changed
 
 - **`ToolPermissionGate(policies=[])` installs no policy.** An empty list read
@@ -180,6 +191,15 @@ All notable changes to this project are recorded here. The format follows
   wants them keeps everything but `MessageOrigin.compaction`, which reads as
   before. A snapshot's
   serialised `"origin"` changes the same way and is still ignored on load.
+
+- **The snapshot carries `prompt_anchor`** (`model`, `prompt_tokens`,
+  `prefix_length`: the provider's last count and how much of the history it
+  covered), and a resumed run sizes its prompt from it instead of from the
+  estimate while that prefix is still the start of the history. Optional on the
+  way in and read leniently, so the schema stays at version 8: a payload
+  without it, or with one that does not fit the history, resumes on the
+  estimate as before. A consumer that wants the old reading drops the key from
+  the payload before resuming.
 
 ### Fixed
 

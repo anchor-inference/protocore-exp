@@ -697,6 +697,12 @@ _WHOLE_HISTORY_BY_DESIGN: dict[str, _Declaration] = {
     "protocore/runtime/query_engine.py::QueryEngine.prompt_tokens_now": _whole(
         "token accounting over the whole transcript, anchored on the provider's count of its prefix"
     ),
+    "protocore/runtime/query_engine.py::QueryEngine._live_prompt_anchor": _whole(
+        "compares the counted prefix with the start of the whole transcript, by identity"
+    ),
+    "protocore/runtime/query_engine.py::QueryEngine.replace_history": _whole(
+        "replaces the whole session transcript and re-sizes the prompt from both of them"
+    ),
     "protocore/runtime/query.py::_calibrate_near_compaction_trigger": _whole(
         "sizes the same whole transcript the compaction gate measures, so the "
         "gate reads the provider's count of what it decides on"

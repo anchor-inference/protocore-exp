@@ -1187,6 +1187,9 @@ the matching RC field says otherwise.
   attaches `persist_history_delta` is handed the delta and promises, by
   returning, that the write landed — the marker advances only after the call
   returns, and `QueryEngine.forget_persisted_history()` takes the promise back.
+  `QueryEngine.replace_history()` is the door for a rewrite made outside the
+  loop: it forgets the marker together with every other piece of state derived
+  from the old history (see [compaction](compaction.md#between-runs)).
   `QueryEngine.note_session_state_changed()` covers a session that changed in a
   way its messages do not show, such as a compaction checkpoint. Not in the
   snapshot: a run picked up on another process cannot know what the store took

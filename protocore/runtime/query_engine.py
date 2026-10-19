@@ -196,6 +196,32 @@ class PromptAnchor:
     prefix: tuple[weakref.ReferenceType[Message], ...]
 
 
+def _parse_prompt_anchor(raw: object) -> tuple[str, int, int] | None:
+    """The snapshot's prompt anchor as ``(model, prompt_tokens, prefix_length)``, or ``None``.
+
+    Read leniently, unlike the continuity block: the anchor only makes the
+    prompt's size more exact, and the estimate it falls back to is what every
+    resume used before the field existed, so an unreadable one is dropped
+    rather than refusing the run.
+    """
+    if not isinstance(raw, dict):
+        return None
+    model = raw.get("model")
+    prompt_tokens = raw.get("prompt_tokens")
+    prefix_length = raw.get("prefix_length")
+    if (
+        not isinstance(model, str)
+        or isinstance(prompt_tokens, bool)
+        or not isinstance(prompt_tokens, int)
+        or isinstance(prefix_length, bool)
+        or not isinstance(prefix_length, int)
+        or prompt_tokens <= 0
+        or prefix_length < 0
+    ):
+        return None
+    return model, prompt_tokens, prefix_length
+
+
 @dataclass(frozen=True)
 class _RunContinuity:
     """The parsed continuity block, built before the engine is touched."""
@@ -2991,6 +3017,11 @@ class QueryEngine:
             "usage": self.total_usage.to_dict(),
             "last_observed_prompt_tokens": self.last_observed_prompt_tokens,
             "request_overhead_tokens_raw": self._request_overhead_tokens_raw,
+            # The provider's count and how much of the history it covered, so a
+            # resumed run sizes its prompt from the count and not from the
+            # estimate. Optional on the way in: a payload without it resumes on
+            # the estimate, which is how every run resumed before it existed.
+            "prompt_anchor": self._prompt_anchor_record(),
             "token_estimate_calibration": self.config.rc.token_estimate_calibration,
             "token_estimate_calibration_model": (
                 self._token_estimate_calibration_model
@@ -3500,6 +3531,7 @@ class QueryEngine:
         restored_observed_prompt_tokens = int(
             snapshot.get("last_observed_prompt_tokens", 0)
         )
+        restored_prompt_anchor = _parse_prompt_anchor(snapshot.get("prompt_anchor"))
         restored_calibration = snapshot.get("token_estimate_calibration")
         restored_calibration_model = snapshot.get(
             "token_estimate_calibration_model"
@@ -3561,6 +3593,18 @@ class QueryEngine:
         )
         self.total_usage = restored_total_usage
         self.last_observed_prompt_tokens = restored_observed_prompt_tokens
+        self._dispatched_history = None
+        self._prompt_anchor = None
+        if restored_prompt_anchor is not None:
+            model, prompt_tokens, prefix_length = restored_prompt_anchor
+            # An anchor that names more messages than the history holds was
+            # written against another history; the estimate is the safe answer.
+            if prefix_length <= len(restored_history):
+                self._prompt_anchor = PromptAnchor(
+                    model=model,
+                    prompt_tokens=prompt_tokens,
+                    prefix=tuple(weakref.ref(message) for message in restored_history[:prefix_length]),
+                )
         # A snapshot written before the field existed resumes with 0, which is
         # the history-only gate the run would have had until its next request.
         self._request_overhead_tokens_raw = max(
@@ -4167,12 +4211,110 @@ class QueryEngine:
         session (277k against 191k), and the compaction it triggered threw away a third of a
         window that was still free; a count is exact for everything but the newest round.
         """
-        anchor = self._prompt_anchor
-        if anchor is not None and anchor.model == self.effective_model_name:
-            count = len(anchor.prefix)
-            if count <= len(self.history) and all(ref() is message for ref, message in zip(anchor.prefix, self.history, strict=False)):
-                return anchor.prompt_tokens + self.context_manager.current_prompt_tokens(self.history[count:])
+        anchor = self._live_prompt_anchor()
+        if anchor is not None:
+            return anchor.prompt_tokens + self.context_manager.current_prompt_tokens(self.history[len(anchor.prefix) :])
         return self.context_manager.current_prompt_tokens(self.history) + self.request_overhead_tokens()
+
+    def _live_prompt_anchor(self) -> PromptAnchor | None:
+        """The anchor, while the history it counted is still the start of the history, on the same model."""
+        anchor = self._prompt_anchor
+        if anchor is None or anchor.model != self.effective_model_name:
+            return None
+        count = len(anchor.prefix)
+        if count > len(self.history):
+            return None
+        if not all(ref() is message for ref, message in zip(anchor.prefix, self.history, strict=False)):
+            return None
+        return anchor
+
+    def _prompt_anchor_record(self) -> dict[str, Any] | None:
+        anchor = self._live_prompt_anchor()
+        if anchor is None:
+            return None
+        return {"model": anchor.model, "prompt_tokens": anchor.prompt_tokens, "prefix_length": len(anchor.prefix)}
+
+    async def replace_history(self, messages: Sequence[Message], *, reason: str) -> TurnEvent:
+        """Put ``messages`` in place of the history, and retire everything derived from the old one.
+
+        For a rewrite made outside the loop: a compaction between runs, a
+        revert, a clear, an import. Assigning ``history`` alone leaves behind
+        the compaction checkpoint, the compaction state and its back-offs, and
+        the measurement of the prompt — and the trigger then read the size of
+        the history that no longer exists, so the next turn compacted a tail
+        the last pass had already made small. Nearly half the compactions of
+        one session were that.
+
+        The prompt is re-sized without a provider call: the last count is
+        scaled by how much of the history survived, the fixed part (system
+        prompt and tools) left whole, and never above the count. Scaling makes
+        the estimator's calibration cancel out of the ratio, so the answer errs
+        only low, which delays the next compaction by a turn at most; erring
+        high would pay for a pass that compacts nothing. With no count to
+        scale, the estimate stays the authority.
+
+        The store's marker is forgotten, so the next hand-over is a rewrite:
+        a revert to a prefix of the old history would otherwise look like
+        nothing changed and leave the dropped rows in place. Emits
+        :attr:`~protocore.runtime.events.EventType.HISTORY_REPLACED` on the
+        engine's event stream and returns it for the caller's own listeners.
+
+        Raises :class:`RuntimeError` while a turn is driving: the loop holds the
+        history then and would write its next round onto the old one.
+        """
+        if not reason.strip():
+            raise ValueError("replace_history needs a reason")
+        if self._current_turn_task is not None:
+            raise RuntimeError("replace_history is not allowed while a turn is driving; stop the run first")
+        replacement = list(messages)
+        old_history = self.history
+        prompt_before = self.prompt_tokens_now()
+        anchor = self._live_prompt_anchor()
+        prompt_after = 0
+        if anchor is not None:
+            estimate = self.context_manager.token_estimator
+            rc = self.config.rc
+            before = estimate.estimate_history(list(old_history), rc)
+            after = estimate.estimate_history(replacement, rc)
+            fixed = min(prompt_before, self.request_overhead_tokens())
+            scaled = fixed + (round((prompt_before - fixed) * after / before) if before else 0)
+            prompt_after = min(prompt_before, scaled)
+        self.history = replacement
+        self.compact_checkpoint = None
+        self.compaction_state = CompactionState()
+        self.compaction_backoff_left = 0
+        self.compaction_backoff_prompt_tokens = 0
+        self._proactive_suspension_gates_left = 0
+        self._proactive_suspension_prompt_tokens = 0
+        self._idle_compaction_probe = None
+        self.last_observed_prompt_tokens = 0
+        self._dispatched_history = None
+        self._prompt_anchor = (
+            PromptAnchor(
+                model=self.effective_model_name,
+                prompt_tokens=prompt_after,
+                prefix=tuple(weakref.ref(message) for message in replacement),
+            )
+            if anchor is not None and prompt_after > 0
+            else None
+        )
+        self.forget_persisted_history()
+        if anchor is None or prompt_after <= 0:
+            prompt_after = self.prompt_tokens_now()
+        event = TurnEvent(
+            type=EventType.HISTORY_REPLACED,
+            run_id=self.config.run_id,
+            payload={
+                "tenant_id": self.config.tenant_id,
+                "reason": reason,
+                "messages_before": len(old_history),
+                "messages_after": len(replacement),
+                "prompt_tokens_before": prompt_before,
+                "prompt_tokens_after": prompt_after,
+            },
+        )
+        await self.events.emit(event.to_event())
+        return event
 
     def needs_compaction(self) -> bool:
         return self.context_manager.needs_compaction(
