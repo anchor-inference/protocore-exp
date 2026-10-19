@@ -21,6 +21,8 @@ from enum import StrEnum
 from typing import Any
 from urllib.parse import urlsplit
 
+from protocore.providers.text_tool_calls import TextToolCallGrammar
+
 
 class ThinkingDialect(StrEnum):
     """How a request says "think" and "do not think".
@@ -169,6 +171,13 @@ class ProviderCapabilities:
     #: by the output cap) into the object they began, flagged as partial. Off
     #: hands the loop an empty object for them instead.
     repair_partial_arguments: bool = True
+    #: The markups in which this endpoint's models sometimes write a tool call
+    #: as reply text (:data:`~protocore.providers.text_tool_calls.DSML` for
+    #: DeepSeek models). Text from a marker on is held back from the reply and
+    #: a complete block becomes a structured call; empty, the default, passes
+    #: text through untouched, since holding text costs a little latency on
+    #: every reply that happens to contain a marker's first character.
+    text_tool_calls: tuple[TextToolCallGrammar, ...] = ()
 
     def effort_name(self, effort: str) -> str:
         """The endpoint's word for the core's ``effort``."""

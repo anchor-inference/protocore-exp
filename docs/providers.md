@@ -80,6 +80,7 @@ at most some efficiency.
 | `max_tokens_field` | `max_tokens` | the body field of the output cap (`max_completion_tokens` for newer OpenAI reasoning models) |
 | `json_schema_response` | `False` | `complete_structured` asks for `json_schema` rather than `json_object` |
 | `repair_partial_arguments` | `True` | hand the loop the repaired prefix of a cut tool call |
+| `text_tool_calls` | `()` | markups in which a model writes tool calls as text (below) |
 
 ### Thinking dialects
 
@@ -180,6 +181,35 @@ windows are not added together by the idle watchdog. After
 (`timeout`, retryable), which moves the chain first. A refusal is an answer
 and is never resent. Leave it off for a local server that may spend minutes
 reading a long prompt before its first byte.
+
+### Tool calls written as text
+
+Some models now and then write a tool call in their own markup inside the
+reply instead of as a structured call. The server passes it on as text: the
+markup is shown to the reader and the turn ends without the call. List the
+markup in `ProviderCapabilities(text_tool_calls=(DSML,))` and the adapter
+guards the text stream with a `TextToolCallGuard`
+(`protocore.providers.text_tool_calls`, pure Python):
+
+- text before a marker is released as it comes (only the few characters that
+  might be the start of a marker split across chunks wait for the next one);
+- from the marker on, text is held back, and a `progress` delta goes to the
+  loop in place of each held piece so the idle watchdog does not cut the
+  stream;
+- at the end of the stream a complete block becomes ordinary tool calls (a
+  `tool_use_start` and a `tool_use_stop` each, ids `call_<stream>_text<n>`)
+  and a `stop` finish becomes `tool_use`; prose around the block is released;
+- an incomplete block is released unchanged, and so is held text that passes
+  the hold limit (4 000 characters) without looking like a call block — a
+  model that merely mentions the markup keeps its reply.
+
+`DSML` (`DsmlGrammar`) reads DeepSeek's `<｜DSML｜tool_calls>` markup in every
+spelling of the bars; a parameter marked `string="true"` is text, any other is
+read as JSON. Another markup is a class with `name`, `markers`,
+`is_call_block(held)` and `parse(held) -> ParsedText | None`
+(`TextToolCallGrammar`); the earliest marker of any listed grammar wins. The
+guard is not tied to this adapter: any adapter can feed its own text deltas
+through it.
 
 ## Failures
 

@@ -193,6 +193,7 @@ class OpenAICompatibleProvider(ILLMProvider):
         assembler = StreamAssembler(
             repair_partial_arguments=caps.repair_partial_arguments,
             keep_reasoning_details=caps.replay_reasoning_details,
+            text_tool_calls=caps.text_tool_calls,
         )
         try:
             silent = 0

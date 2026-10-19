@@ -151,6 +151,18 @@ All notable changes to this project are recorded here. The format follows
   template, tools and thinking switch included. A server without the route
   answers 404 once and is not asked again; the core then uses its estimate,
   which is also what `count_tokens` returns.
+- **Tool calls a model writes as text are recovered while the reply
+  streams.** `protocore.providers.text_tool_calls.TextToolCallGuard` holds
+  reply text back from the first marker of a known markup, and at the end of
+  the stream turns a complete block into tool calls, releasing the prose
+  around it, or releases what it held unchanged (an unfinished block, or a
+  marker merely mentioned in prose past a 4 000-character hold limit).
+  Markups are pluggable (`TextToolCallGrammar`); the first is `DSML`, the
+  markup DeepSeek models emit. The reference adapter applies it when an
+  endpoint lists grammars in the new `ProviderCapabilities.text_tool_calls`,
+  sending a `progress` delta for each held piece and reporting the turn as
+  `tool_use`. The default is empty, which passes text through exactly as
+  before. See `docs/providers.md`.
 
 ### Changed
 
