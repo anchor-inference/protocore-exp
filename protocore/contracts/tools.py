@@ -9,7 +9,7 @@ host-side adapters.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -95,6 +95,17 @@ CORE_STAMPED_TOOL_CONTEXT_METADATA_KEYS: Final[frozenset[str]] = frozenset(
 )
 
 
+ToolOutputTrust = Literal["trusted", "untrusted"]
+"""What a tool says about the text it returns. ``"trusted"`` is the default."""
+
+#: Metadata key on a result whose text came from outside the run. The
+#: dispatcher sets it on every result of a tool whose ``output_trust`` is
+#: ``"untrusted"``; a tool may set it itself on a single result. Such a result
+#: reaches the model fenced as data (:mod:`protocore.runtime.untrusted_output`),
+#: and the key stays on the result so a host can show where its text came from.
+TOOL_OUTPUT_UNTRUSTED_METADATA_KEY: Final[str] = "protocore.tool_output_untrusted"
+
+
 class ToolError(Exception):
     """Base class for tool-domain errors."""
 
@@ -162,7 +173,15 @@ class Tool(ABC):
         - :attr:`name`: stable identifier surfaced to LLM
         - :attr:`definition`: full :class:`ToolDefinition` for surface
         - :meth:`invoke`: actual side-effect
+
+    ``output_trust`` is ``"untrusted"`` on a tool whose results carry text from
+    outside the run — a fetched page, a search hit, a remote server's reply.
+    The core then hands every result of it to the model fenced as data, never
+    as instructions. A class attribute, so a tool built per remote server can
+    also set it on the instance.
     """
+
+    output_trust: ToolOutputTrust = "trusted"
 
     @property
     def evidence_producer(self) -> EvidenceProducerBinding | None:
@@ -198,6 +217,15 @@ class Tool(ABC):
             - On error: raise :class:`ToolInvocationError`; never swallow.
             - On policy denial: raise :class:`ToolPolicyDenied`.
         """
+
+
+def is_untrusted_tool(tool: object) -> bool:
+    """Whether ``tool`` says its output comes from outside the run.
+
+    Read through ``getattr`` so a tool object that does not derive from
+    :class:`Tool`, and so has no attribute, stays trusted.
+    """
+    return getattr(tool, "output_trust", "trusted") == "untrusted"
 
 
 def read_metadata(context: ToolContext, key: str, default: Any = None) -> Any:
@@ -250,12 +278,15 @@ __all__ = [
     "SUBAGENT_DISPATCH_GROUP_METADATA_KEY",
     "SUBAGENT_DISPATCH_ORDER_METADATA_KEY",
     "SUBAGENT_TREE_PERMIT_METADATA_KEY",
+    "TOOL_OUTPUT_UNTRUSTED_METADATA_KEY",
     "Tool",
     "ToolContext",
     "ToolError",
     "ToolInvocationError",
+    "ToolOutputTrust",
     "ToolPolicyDenied",
     "copy_metadata",
     "has_metadata",
+    "is_untrusted_tool",
     "read_metadata",
 ]

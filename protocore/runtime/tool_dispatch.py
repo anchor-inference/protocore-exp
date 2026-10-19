@@ -93,10 +93,12 @@ from protocore.contracts.tool_registry import (
 )
 from protocore.contracts.tool_roles import EMPTY_TOOL_ROLE_MAP, ToolRole, ToolRoleMap
 from protocore.contracts.tools import (
+    TOOL_OUTPUT_UNTRUSTED_METADATA_KEY,
     Tool,
     ToolContext,
     ToolPolicyDenied,
     copy_metadata,
+    is_untrusted_tool,
     read_metadata,
 )
 from protocore.contracts.types import (
@@ -2176,6 +2178,14 @@ class ToolDispatcher:
             ui_payload = None
 
         outcome_metadata: dict[str, Any] | None = result_metadata or None
+        if is_untrusted_tool(tool):
+            # Stamped here, on the one path that carries the tool's own text,
+            # so the failures the dispatcher writes itself are never fenced as
+            # outside data; the fence goes on where the result enters the run.
+            outcome_metadata = {
+                **(outcome_metadata or {}),
+                TOOL_OUTPUT_UNTRUSTED_METADATA_KEY: True,
+            }
         outcome_replay_message: str | None = None
         if not success:
             replay_extra = (

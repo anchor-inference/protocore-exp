@@ -91,6 +91,7 @@ async def cap_fresh_result(
     rc: LoopConstants,
     blob_store: IBlobStore,
     tenant_id: str,
+    reserve_tokens: int = 0,
 ) -> DispatchOutcome:
     """``outcome`` with its text cut to the per-result limit, or unchanged.
 
@@ -98,10 +99,14 @@ async def cap_fresh_result(
     user are returned as they are. Otherwise the whole value is stored (unless
     the tool already names where it lives) and the text becomes its head plus a
     pointer, together no larger than the limit.
+
+    ``reserve_tokens`` is room kept back from the limit for what the caller
+    wraps around the text afterwards (the fence of an untrusted result), so
+    the wrapped result still fits.
     """
     if outcome.approval_required or outcome.ask_user_required or not outcome.content:
         return outcome
-    limit = derive_budgets(rc).tool_result_truncation_threshold
+    limit = max(1, derive_budgets(rc).tool_result_truncation_threshold - max(0, reserve_tokens))
     original_tokens = estimate_tokens(outcome.content, rc)
     if original_tokens <= limit:
         return outcome

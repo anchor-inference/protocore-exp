@@ -122,6 +122,18 @@ All notable changes to this project are recorded here. The format follows
   failures of one tool (`LONG_RUN_LOOP_GUARD`), every other field at its
   default and the overrides winning. The defaults (guard off, 3 / 1 / 3) are
   unchanged.
+- **Untrusted tool output is fenced as data.** `Tool.output_trust`
+  (`"trusted"` by default, `ToolOutputTrust`), `@tool(output_trust=...)` and
+  `TOOL_OUTPUT_UNTRUSTED_METADATA_KEY` on a single result say a tool's text
+  comes from outside the run. Such a result enters the run wrapped in a fence
+  from the new `untrusted_tool_output` prompt template: an opening tag naming
+  the tool, a line saying the text is data and not instructions, the text and
+  a closing tag whose id is a digest of the text, so the text cannot close the
+  fence itself and the same text is fenced identically on every request. The
+  per-result cut keeps room for the fence; `canonical_content` keeps the
+  tool's own text. `cap_fresh_result` takes `reserve_tokens` for that room.
+  Helpers live in `protocore.runtime.untrusted_output`. A tool that sets
+  nothing is untouched.
 
 ### Changed
 

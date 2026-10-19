@@ -12,7 +12,7 @@ from typing import Any, ParamSpec, TypeVar, cast
 
 from pydantic import TypeAdapter
 
-from protocore.contracts.tools import Tool, ToolContext
+from protocore.contracts.tools import Tool, ToolContext, ToolOutputTrust
 from protocore.contracts.types import ToolDefinition, ToolParameterSchema, ToolResult
 
 P = ParamSpec("P")
@@ -57,6 +57,7 @@ def tool(
     *,
     name: str,
     description: str,
+    output_trust: ToolOutputTrust = "trusted",
 ) -> Callable[[ToolFunc], type[Tool]]:
     """Decorate an async function to build a :class:`Tool` subclass.
 
@@ -67,6 +68,8 @@ def tool(
             return ToolResult(tool_call_id="...", content=text)
 
     The decorated callable is replaced with a :class:`Tool` subclass.
+    ``output_trust="untrusted"`` marks a tool whose results carry text from
+    outside the run, which the core then fences as data.
     """
 
     def _wrap(func: ToolFunc) -> type[Tool]:
@@ -80,7 +83,11 @@ def tool(
             parameters=schema,
         )
 
+        trust = output_trust
+
         class _DecoratedTool(Tool):
+            output_trust = trust
+
             @property
             def name(self) -> str:
                 return definition.name

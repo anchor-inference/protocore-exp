@@ -237,6 +237,7 @@ from protocore.runtime.skill_index import (
     render_skills_catalog,
 )
 from protocore.runtime.subagent_budget import SubagentTreeBudget, SubagentTreePermit
+from protocore.runtime.token_counting import estimate_tokens as _estimate_tokens
 from protocore.runtime.tool_arguments import argument_names, string_argument
 from protocore.runtime.tool_deferral import (
     build_tool_surface,
@@ -306,6 +307,15 @@ from protocore.runtime.turn_policies.terminal_tool_finish import (
 )
 from protocore.runtime.turn_policies.truncated_tool_call import (
     TruncatedToolCallRecoveryPolicy,
+)
+from protocore.runtime.untrusted_output import (
+    TOOL_OUTPUT_UNTRUSTED_METADATA_KEY as _TOOL_OUTPUT_UNTRUSTED_METADATA_KEY,
+)
+from protocore.runtime.untrusted_output import (
+    fence_overhead_text as _fence_overhead_text,
+)
+from protocore.runtime.untrusted_output import (
+    fence_untrusted_result as _fence_untrusted_result,
 )
 
 if TYPE_CHECKING:
@@ -6631,16 +6641,38 @@ async def _drain_dispatch_tool_deferred(
             break
         events.append(item)
     if outcome is not None:
-        outcome = await _cap_fresh_result(
-            outcome,
-            rc=engine.config.rc,
-            blob_store=engine.blobs,
-            tenant_id=engine.config.tenant_id,
-        )
+        outcome = await _admit_fresh_result(engine, outcome)
     if outcome is not None and not outcome.approval_required:
         settle_intent(intent, result=str(outcome.content or "")[:200])
         _forget_intent(engine, intent)
     return events, outcome
+
+
+async def _admit_fresh_result(
+    engine: QueryEngine, outcome: DispatchOutcome
+) -> DispatchOutcome:
+    """A fresh result as it enters the run: cut to the per-result limit, then fenced if untrusted.
+
+    In that order, with the fence's room kept back from the cut, so the
+    closing line of an untrusted result is never what the cut removes and the
+    fenced result still fits the limit.
+    """
+    reserve = 0
+    if (outcome.metadata or {}).get(_TOOL_OUTPUT_UNTRUSTED_METADATA_KEY) is True:
+        reserve = _estimate_tokens(
+            _fence_overhead_text(
+                tool_name=outcome.tool_call.name, render=engine.prompt_text
+            ),
+            engine.config.rc,
+        )
+    outcome = await _cap_fresh_result(
+        outcome,
+        rc=engine.config.rc,
+        blob_store=engine.blobs,
+        tenant_id=engine.config.tenant_id,
+        reserve_tokens=reserve,
+    )
+    return _fence_untrusted_result(outcome, render=engine.prompt_text)
 
 
 def _synthesize_delegation_error_result(
@@ -11719,12 +11751,7 @@ async def _dispatch_tool(
             break
         buffered.append(item)
     if outcome is not None:
-        outcome = await _cap_fresh_result(
-            outcome,
-            rc=engine.config.rc,
-            blob_store=engine.blobs,
-            tenant_id=engine.config.tenant_id,
-        )
+        outcome = await _admit_fresh_result(engine, outcome)
     if outcome is not None and outcome.approval_required:
         # The gate parked the call before the tool was reached. The record must
         # say so, or a resumed run reads "dispatched" and tells the model the
@@ -11851,12 +11878,7 @@ async def _dispatch_tool(
                 break
             buffered.append(item)
         if outcome is not None:
-            outcome = await _cap_fresh_result(
-                outcome,
-                rc=engine.config.rc,
-                blob_store=engine.blobs,
-                tenant_id=engine.config.tenant_id,
-            )
+            outcome = await _admit_fresh_result(engine, outcome)
         if dispatch_tree_permit is not None:
             await dispatch_tree_permit.reacquire()
         if outcome is None:

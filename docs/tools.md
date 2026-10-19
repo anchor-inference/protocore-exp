@@ -949,6 +949,25 @@ hook's text then becomes the value, and the original is dropped with the
 `canonical_ref` and the `ui_payload`, which the hook never saw (see
 [the hook payload](#the-post_tool_use-payload)).
 
+**Outside text, fenced.** A tool whose results carry text from outside the
+run — a fetched page, a search hit, a remote server's reply — sets
+`output_trust = "untrusted"` (a class or instance attribute; `@tool(...,
+output_trust="untrusted")` for a decorated one), or marks a single result with
+`TOOL_OUTPUT_UNTRUSTED_METADATA_KEY` in its metadata. The dispatcher stamps the
+key on every result of such a tool, and where the result enters the run, after
+the per-result cut, the core wraps its text in a fence rendered from the
+`untrusted_tool_output` prompt template: an opening tag naming the tool, a line
+saying the text is data and not instructions, the text, and a closing tag. The
+tag's id is the head of the text's SHA-256 digest, so the text cannot write its
+own closing tag and speak outside the fence, and the same text is fenced the
+same way on every request, which keeps the prompt cache. The cut keeps room for
+the fence, so the closing tag is never what it removes. `canonical_content`
+keeps the tool's own text; the result event carries the fenced transcript text
+and the key, as it carries a cut result's pointer. Nothing is detected or
+refused: a host that scans for injected instructions does so in its tool or in
+a `post_tool_use` hook, which runs first. A tool that says nothing is trusted,
+and its results are untouched (`runtime/untrusted_output.py`).
+
 **A record before the call.** Every dispatched call commits an `IntentRecord`
 (`runtime/intent.py`) before the tool is touched, with its result ids reserved
 and an explicit lifecycle — `RESERVED`, `PENDING_APPROVAL`, `DISPATCHED`,

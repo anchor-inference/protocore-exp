@@ -71,3 +71,16 @@ def test_decorator_rejects_unannotated_param() -> None:
             context: ToolContext, text: str, extra
         ) -> ToolResult:
             return ToolResult(tool_call_id="t", content="")
+
+
+def test_decorator_states_the_tool_s_output_trust() -> None:
+    @tool(name="fetch", description="Fetch a page.", output_trust="untrusted")
+    async def _fetch(context: ToolContext, url: str) -> ToolResult:
+        return ToolResult(tool_call_id="t1", content=url)
+
+    @tool(name="note", description="Write a note.")
+    async def _note(context: ToolContext, text: str) -> ToolResult:
+        return ToolResult(tool_call_id="t1", content=text)
+
+    assert _fetch().output_trust == "untrusted"
+    assert _note().output_trust == "trusted"
