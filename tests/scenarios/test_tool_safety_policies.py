@@ -1,13 +1,17 @@
-"""A host's own tool safety policies, passed to the engine.
+"""A host's own tool safety policies, and a rules mark scoped to a session.
 
-They used to be reachable only by writing an engine's private attribute after
-construction. A host that replaced the tool dispatcher to install its policies
-built it without the run's error counter, the tool roles and the resilience
-classifier, so every one of them went missing from its runs without a test
-failing. These scenarios state what the constructor gives instead.
+Both used to be reachable only by writing an engine's private attributes
+after construction. A host that replaced the tool dispatcher to install its
+policies built it without the run's error counter, the tool roles and the
+resilience classifier, so every one of them went missing from its runs without
+a test failing; a host that kept one tenant overwrote the rules mark of every
+session to tell them apart. These scenarios state what the constructor and the
+config now give instead.
 """
 from __future__ import annotations
 
+import subprocess
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -16,6 +20,7 @@ import pytest
 
 from protocore.contracts.resilience import ResilienceErrorClass
 from protocore.contracts.tools import Tool, ToolContext
+from protocore.runtime.tool_deferral import tool_rules_mark, tool_rules_scope
 from protocore.runtime.tool_permission import (
     PermissionStage,
     ToolPermissionDecision,
@@ -163,3 +168,61 @@ async def test_a_rearmed_engine_keeps_the_hosts_policies(scenario: ScenarioFacto
 
     assert policy.seen == ["Note"]
     assert note.invocations == []
+
+
+def _session_mark_in_a_fresh_process(tenant_id: str, session_id: str, key: str) -> str:
+    code = (
+        "import sys;"
+        "from protocore.runtime.tool_deferral import tool_rules_mark, tool_rules_scope;"
+        "print(tool_rules_mark(tool_rules_scope(sys.argv[1], sys.argv[2]), key=sys.argv[3]))"
+    )
+    return subprocess.run(
+        [sys.executable, "-c", code, tenant_id, session_id, key],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def test_a_session_scoped_mark_differs_between_sessions_of_one_tenant(
+    scenario: ScenarioFactory,
+) -> None:
+    first = scenario(session_id="s-1", tool_rules_session_id="s-1", tool_rules_mark_key="secret")
+    second = scenario(session_id="s-2", tool_rules_session_id="s-2", tool_rules_mark_key="secret")
+    again = scenario(session_id="s-1", tool_rules_session_id="s-1", tool_rules_mark_key="secret")
+    assert first.engine._tool_rules_mark != second.engine._tool_rules_mark
+    assert first.engine._tool_rules_mark == again.engine._tool_rules_mark
+    # Another tenant's session of the same id is another scope, and so is a
+    # tenant whose id happens to be the session's.
+    assert tool_rules_scope("tenant-a", "s-1") != tool_rules_scope("tenant-b", "s-1")
+    assert tool_rules_scope("tenant-a", "s-1") not in {"s-1", "tenant-a"}
+
+
+def test_a_session_scoped_mark_is_the_same_in_every_process_with_the_same_key(
+    scenario: ScenarioFactory,
+) -> None:
+    run = scenario(session_id="s-1", tool_rules_session_id="s-1", tool_rules_mark_key="secret")
+    tenant_id = run.engine.config.tenant_id
+    assert _session_mark_in_a_fresh_process(tenant_id, "s-1", "secret") == run.engine._tool_rules_mark
+    assert run.engine._tool_rules_mark == tool_rules_mark(
+        tool_rules_scope(tenant_id, "s-1"), key="secret"
+    )
+
+
+def test_a_fork_takes_its_source_s_mark_by_naming_the_source_session(
+    scenario: ScenarioFactory,
+) -> None:
+    """A fork carries rules given under its source's mark, and the source's
+    mark keeps the head of the prompt the same bytes as the source's."""
+    source = scenario(session_id="source", tool_rules_session_id="source", tool_rules_mark_key="k")
+    fork = scenario(session_id="fork", tool_rules_session_id="source", tool_rules_mark_key="k")
+    assert fork.engine._tool_rules_mark == source.engine._tool_rules_mark
+
+
+def test_without_a_session_the_mark_stays_the_tenant_s(scenario: ScenarioFactory) -> None:
+    run = scenario(tool_rules_mark_key="secret")
+    tenant_id = run.engine.config.tenant_id
+    assert run.engine._tool_rules_mark == tool_rules_mark(tenant_id, key="secret")
+    assert tool_rules_scope(tenant_id) == tenant_id
+    scoped = scenario(tool_rules_session_id=run.engine.config.session_id, tool_rules_mark_key="secret")
+    assert scoped.engine._tool_rules_mark != run.engine._tool_rules_mark

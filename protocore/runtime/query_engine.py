@@ -115,7 +115,7 @@ from protocore.runtime.loop_state import (
     is_terminal,
 )
 from protocore.runtime.request_budget import ExactTokenCountCache
-from protocore.runtime.tool_deferral import ToolDeferral, tool_rules_mark
+from protocore.runtime.tool_deferral import ToolDeferral, tool_rules_mark, tool_rules_scope
 from protocore.runtime.usage import TokenUsage
 
 _logger = logging.getLogger(__name__)
@@ -630,6 +630,19 @@ class QueryEngineConfig:
     instead — unguessable, but different on every worker and after every
     restart. Resumed runs keep the mark their snapshot carries. Left out of
     the config's ``repr`` so a logged config does not print it.
+    """
+
+    tool_rules_session_id: str | None = None
+    """The session the run's rules mark is scoped to, instead of the tenant.
+
+    Left ``None``, every session of a tenant shares one mark, and so the head
+    of the cached prompt. A host that runs everything under one tenant and
+    still wants each session's mark its own names the session here; derived
+    under :attr:`tool_rules_mark_key` like the tenant's, it is the same in
+    every process that holds the key. It need not be this run's own
+    :attr:`session_id`: a fork that carries its source's history also carries
+    rules given under its source's mark, and names the source's session to
+    keep that mark and the prompt's bytes with it.
     """
 
     trimmed_tool_result_ids: tuple[str, ...] = ()
@@ -1675,8 +1688,12 @@ class QueryEngine:
         self._tool_group_rules_given: set[str] = set()
         # The mark genuine rules carry in their heading, named in the
         # catalogue, so rules a web page imitates can be told apart. Scoped to
-        # the tenant, so its sessions share the head of the cached prompt.
-        self._tool_rules_mark = tool_rules_mark(config.tenant_id, key=config.tool_rules_mark_key)
+        # the tenant, so its sessions share the head of the cached prompt,
+        # unless the host scopes it to a session.
+        self._tool_rules_mark = tool_rules_mark(
+            tool_rules_scope(config.tenant_id, config.tool_rules_session_id),
+            key=config.tool_rules_mark_key,
+        )
         # Set where the cached prefix starts over, so the next decision writes
         # the loaded tools' rules into the catalogue again.
         self._catalogue_takes_loaded_rules = False

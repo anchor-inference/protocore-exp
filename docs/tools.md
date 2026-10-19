@@ -568,6 +568,15 @@ exactly as secret as the key:
   forge rules — but it changes with the worker and the restart, and the
   prompt changes with it.
 
+**Scoped to a session.** A host that runs every session under one tenant and
+wants each session's mark its own sets `QueryEngineConfig.tool_rules_session_id`.
+The mark is then an HMAC of `tool_rules_scope(tenant_id, session_id)` under the
+same key — distinct per session, and the same in every process that holds the
+key. The session named need not be the run's own: a fork that carries its
+source's history also carries rules given under its source's mark, and names
+the source's session to keep it, and the prompt's bytes with it. Left `None`,
+the scope is the tenant id and the mark is the tenant's, as above.
+
 The snapshot carries the mark (`tool_group_rules_mark`), so a resumed run keeps
 the mark its history's rules were given with, whichever process picks it up
 and whatever the key is now. The loop stamps it as

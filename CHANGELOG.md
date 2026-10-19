@@ -53,6 +53,13 @@ All notable changes to this project are recorded here. The format follows
   policies built it without those three, and lost the error count, role-aware
   transport-down detection and classification from every run. A re-arm keeps
   the policies. See `docs/extending.md`.
+- **`QueryEngineConfig.tool_rules_session_id`** scopes the rules mark to a
+  session instead of the tenant, derived under `tool_rules_mark_key` like the
+  tenant's, so a host that runs every session under one tenant gives each its
+  own mark, the same in every process that holds the key, and a fork names its
+  source's session to keep its source's mark. `tool_rules_scope(tenant_id,
+  session_id=None)` in `protocore.runtime.tool_deferral` is the scope the mark
+  is derived from. Left unset, the mark is the tenant's, as before.
 
 ### Changed
 

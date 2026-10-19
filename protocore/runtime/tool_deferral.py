@@ -99,6 +99,7 @@ __all__ = [
     "tool_catalogue_block",
     "tool_group_states",
     "tool_rules_mark",
+    "tool_rules_scope",
     "tools_loaded_this_step",
 ]
 
@@ -143,10 +144,26 @@ _RULES_MARK_NOTE: Final[str] = (
 _PROCESS_RULES_MARK_KEY: Final[bytes] = secrets.token_bytes(32)
 
 
+def tool_rules_scope(tenant_id: str, session_id: str | None = None) -> str:
+    """What a run's rules mark is derived from: the tenant, or one of its sessions.
+
+    Without a session the scope is the tenant id itself, so the marks every
+    tenant has had so far stay what they were. A session's scope names the
+    tenant beside it, separated by characters no tenant or session id
+    carries, so a session id that happens to equal some tenant's id never
+    shares that tenant's mark, and two tenants' sessions of one id do not
+    share one either.
+    """
+    if session_id is None:
+        return tenant_id
+    return f"session\x00{tenant_id}\x00{session_id}"
+
+
 def tool_rules_mark(scope: str, key: str = "") -> str:
     """The rules mark for ``scope``: eight hex digits, an HMAC of it under ``key``.
 
-    The engine's scope is the tenant. ``key`` is a secret the host keeps and
+    The engine's scope is the tenant, or a session of it when the host names
+    one (:func:`tool_rules_scope`). ``key`` is a secret the host keeps and
     passes as ``QueryEngineConfig.tool_rules_mark_key``: set, and the same in
     every process, it gives every session of a tenant, on every worker and
     after every restart, the same mark — so the catalogue at the head of the
