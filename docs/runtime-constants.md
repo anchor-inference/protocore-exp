@@ -259,6 +259,18 @@ prefix-declared group is listed by its prefix, and `max_tool_calls_per_turn`
 per-message clip is off, and turning it on is not recommended. See
 [`tools.md`](tools.md#holding-tool-groups-back).
 
+The recovery fields are a third. `recovery_budget_max_attempts` and
+`recovery_budget_max_seconds` (both `None`, which counts without bounding) cap
+one stretch of recovery across every layer, on top of each layer's own bound:
+`llm_transient_error_retry_max_attempts`, `llm_provider_chain_max_advances`,
+`max_consecutive_empty_responses`, `empty_completion_guard_max_redrives` and
+`context_overflow_retry_max_attempts`. A shared cap below the sum of those is
+what makes it bite. `recovery_redrive_backoff_base_seconds` (30),
+`recovery_redrive_backoff_max_seconds` (600) and
+`recovery_overflow_redrive_max_attempts` (2) shape the re-drive delay a failed
+run reports on its terminal stop to a host deciding whether to re-drive it. See
+[`contracts.md`](contracts.md#provider-failures-and-the-runs-outcome).
+
 ## See also
 
 - [`architecture.md`](architecture.md) — the LoopConstants system in the

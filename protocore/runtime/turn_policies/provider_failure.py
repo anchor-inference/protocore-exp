@@ -91,6 +91,15 @@ FallbackAnnouncer = Callable[..., TurnEvent]
 #: Say on the wire that the run will try the same provider again.
 RetryAnnouncer = Callable[..., TurnEvent]
 
+#: Say which model the run left and which it is on now, and why.
+ModelChangeAnnouncer = Callable[..., TurnEvent]
+
+#: The rung of the chain the run is on, named as the chain names it.
+CurrentRung = Callable[[Any], str]
+
+#: Draw one in-place retry from the run's recovery budget; ``False`` when it refuses.
+RecoveryDraw = Callable[[Any], bool]
+
 #: Record what the failed attempt spent.
 UsageCommit = Callable[..., TurnEvent | None]
 
@@ -122,6 +131,8 @@ class ProviderFailurePolicy:
         "_backoff",
         "_commit_usage",
         "_context_overflow",
+        "_current_rung",
+        "_draw_retry",
         "_fallback_event",
         "_has_final_answer",
         "_has_preserved_answer",
@@ -130,6 +141,7 @@ class ProviderFailurePolicy:
         "_log_crash",
         "_log_failure",
         "_may_retry",
+        "_model_changed_event",
         "_preserved_finish",
         "_produced_output",
         "_retries",
@@ -160,6 +172,9 @@ class ProviderFailurePolicy:
         retries: RunCounter,
         log_crash: CrashLogger,
         log_failure: FailureLogger,
+        model_changed_event: ModelChangeAnnouncer | None = None,
+        current_rung: CurrentRung | None = None,
+        draw_retry: RecoveryDraw | None = None,
     ) -> None:
         self._advance_chain = advance_chain
         self._context_overflow = context_overflow
@@ -180,6 +195,9 @@ class ProviderFailurePolicy:
         self._retries = retries
         self._log_crash = log_crash
         self._log_failure = log_failure
+        self._model_changed_event = model_changed_event
+        self._current_rung = current_rung
+        self._draw_retry = draw_retry
 
     async def apply(self, turn: TurnContext) -> AsyncIterator[TurnEvent]:
         if turn.coordinate is TurnCoordinate.stream_settled:
@@ -335,8 +353,21 @@ class ProviderFailurePolicy:
             if turn.outcome.directive is not TurnDirective.proceed:
                 return
 
+        left = self._current_rung(engine) if self._current_rung is not None else ""
         advanced_to = await self._advance_chain(engine, exc, kind=kind)
         if advanced_to:
+            # Said before the restart, so it precedes the new model's first
+            # delta: a fallback reopens the stream inside the same assistant
+            # message, and no second message_start marks the switch.
+            if self._model_changed_event is not None:
+                yield self._model_changed_event(
+                    engine,
+                    left,
+                    advanced_to,
+                    reason="provider_chain_advance",
+                    exc=exc,
+                    error_class=kind,
+                )
             # The partial the reader already saw live is in the transcript,
             # and the rebuild the loop does next is what puts it in front of
             # the replacement provider. Without it the new provider answers a
@@ -410,6 +441,10 @@ class ProviderFailurePolicy:
             # Cancelled, or out of wall clock. The attempt budget may be
             # untouched and it does not matter: nobody is waiting for the
             # answer another attempt would produce.
+            return
+        if self._draw_retry is not None and not self._draw_retry(engine):
+            # The run's one recovery budget is spent across the layers: the
+            # chain advances and re-asks before this retry drew from it too.
             return
         spent = self._commit_usage(
             engine,

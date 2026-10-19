@@ -458,7 +458,14 @@ crashes. The shared assistant loop is **not** a single immutable path:
   `resume_interrupts` is that drive on its own, for a caller that has already
   restored the run. `resume_approved_tool` executes one call held for
   approval, verified against the durable pending call and idempotent on
-  replay; both run inside `driving_turn()` too. `_query_raw` implements the
+  replay; both run inside `driving_turn()` too. `QueryEngine.answer_pending(tool_call_id,
+  content, is_error=False, operator_words=True)` answers one parked question
+  on a live or restored engine without driving it: the answer becomes the
+  call's result (marked as the operator's words unless `operator_words=False`),
+  the wait is released, the run leaves `AWAITING` once nothing else is parked,
+  and a snapshot is persisted; the caller then opens the turn with
+  `run(None)`. An approval, or a call the run is not waiting on, raises
+  `InterruptResolutionError` with nothing changed. `_query_raw` implements the
   turn lifecycle: stop check → resume interrupted intents → the
   `run_start` coordinate → optional `/compact` via `CompactCheckpoint` → compaction
   check → UserPromptSubmit hook → build context → `select_strategy(run_mode).prepare_turn`
@@ -750,6 +757,15 @@ already has — and two rules keep the last of them honest.
   `outcome="failed"` on its terminal `message_stop`, with the verdict in
   `cause.failure`, even when the closing turn wrote prose (see
   [`contracts.md`](contracts.md#provider-failures-and-the-runs-outcome)).
+- **A change of model is announced.** Every chain advance emits
+  `model_changed` with `from` and `to` (the rungs, named as the chain names
+  them), `reason="provider_chain_advance"`, `error_class` (the failure class
+  that moved it) and `failure` (the `ProviderFailure` in JSON form, or `None`),
+  before the restarted turn's first delta: a fallback reopens the stream inside
+  the same assistant message, so no second `message_start` marks the switch.
+  A restore that re-seats the run on a later rung than the chain stood on
+  emits nothing itself; the first drive after it emits `model_changed` with
+  `reason="snapshot_restore"`, once.
 
 ### The run snapshot: schema version and upcasters
 
@@ -784,8 +800,9 @@ instead of an untyped dictionary threaded through `ToolContext.metadata` under
 an agreed string. A field that moves is a type error at the reader; a host
 wiring its own slots keeps them in `RunScopedState.host`, one opaque
 compartment, so core never has to know what a host puts there.
-`RunScopedState.to_snapshot()` states exactly the two durable allowances and
-`apply_snapshot()` puts them back — live objects (an `asyncio.Event`, a
+`RunScopedState.to_snapshot()` states exactly the durable allowances (the
+tree's work ledger and concurrency capacity, and since version 9 the run's
+`recovery_budget`) and `apply_snapshot()` puts them back — live objects (an `asyncio.Event`, a
 semaphore, a lock) are per-process by nature and are rebuilt by whoever wires
 the resumed run. `ToolContext` was narrowed to match: `tenant_id`, `run_id`,
 `session_id`, `work_scope`, optional `evidence`, optional `run_state`, and
@@ -970,7 +987,8 @@ owner, a scope, and a disposer, or by implementing `IHookManager` in the host.
   `usage_committed`, `session_forked`, `lane_locked`, `recovery_marked`,
   `compact_checkpoint`, steer/follow-up/queue events (`steer_queued`,
   `follow_up_queued`, `queue_update`), live-control
-  `model_changed`/`thinking_changed`, and candidate-verification events
+  `model_changed`/`thinking_changed` (`model_changed` is emitted on a provider
+  chain advance and after a restore onto a later rung), and candidate-verification events
   (`candidate_ready`, `verification_started`, `verification_reported`,
   `repair_requested`, `release_decided`, `candidate_released`), and
   `interrupt_parked` — emitted whenever the run records something it is waiting
@@ -1241,6 +1259,25 @@ the matching RC field says otherwise.
   `restored_queue_items` beside the joined `restored_queue_text`.
   `restore_queued_prompts` is its text-only view, for a caller that puts words
   back and nothing else.
+  A host controls the queues through the engine rather than its private
+  lists: `queued()` lists what the engine holds, steers first;
+  `queue_input(kind, text, attachments=, item_id=)` adds one under the caps;
+  `withdraw_queued(id)` takes an item back before it is placed (`False` when
+  the engine holds none: placed already, or it arrived in the host's store
+  after the engine's last read, where the host removes it); and
+  `promote_queued(id)` turns a waiting follow-up into the last steer. A host
+  that keeps the queues in a store calls `load_queued(steer, follow_up)` from
+  its `reload_live_control` and `merge_queued(stored_steer, stored_follow_up)`
+  from its `persist_live_control`, inside the store's transaction. The merge
+  applies the seen rule (`merge_queue`): a stored item the engine holds or was
+  handed by its last read is the engine's to decide about; any other stored
+  item arrived after that read and is kept behind the engine's remainder, so a
+  message that landed while the run held the queue is not overwritten. The
+  returned `QueueMerge` carries the lists to write and `consumed`, the ids the
+  engine was handed and placed (never one taken back). A withdrawal and a
+  promotion outlive a read that predates them until the next merge. Every
+  terminal `message_stop` lists the ids the engine still held unplaced as
+  `leftover_queued`, so a host can open its next run with them.
 - `runtime/run_work_budget.py` — cumulative tree-lifetime budget
   (`max_subagent_runs_per_tree`, `max_total_tokens_per_tree`) for one root
   run and everything it spawns. Sibling of `SubagentTreeBudget` (permits),

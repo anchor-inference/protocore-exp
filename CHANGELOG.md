@@ -8,6 +8,59 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- **One recovery budget across the retry layers, and `recoverable_after` on
+  the terminal stop.** `RecoveryBudget` (`protocore.contracts.recovery`) sits
+  in `RunScopedState.recovery_budget`, is read through
+  `QueryEngine.recovery_budget`, and is drawn from by in-place retries,
+  provider-chain advances, re-asks after an empty round and shrinking a
+  request the window refused; a host draws its own re-drives from it
+  (`RecoveryKind.redrive`, `overflow_redrive`) and hands it on with
+  `rearm(recovery_budget=...)` or the new run's state. A provider round with
+  words or tool calls settles it. New constants
+  `recovery_budget_max_attempts` and `recovery_budget_max_seconds` bound it;
+  both default to `None`, which only counts, so every layer recovers exactly
+  as before until a host sets one. Every terminal `message_stop` carries
+  `recoverable_after`: the seconds to wait before re-driving a failed run, or
+  `None`. An overflow is recoverable at once up to
+  `recovery_overflow_redrive_max_attempts` (2) times in a row; an outage after
+  `recovery_redrive_backoff_base_seconds` (30) doubling per re-drive up to
+  `recovery_redrive_backoff_max_seconds` (600), never sooner than the
+  provider's `retry_after_seconds`; a permanent refusal, a spend cap, a crash
+  or a spent budget never. The snapshot becomes version 9, with an upcaster
+  from 8 that records no budget.
+- **The core emits `model_changed` when the model answering a run changes.**
+  Every provider-chain advance emits it before the restarted turn's first
+  delta, with `from`, `to` (rungs named as the chain names them),
+  `reason="provider_chain_advance"`, `error_class` and `failure` (the
+  `ProviderFailure` verdict in JSON form, or `None`). A restore that re-seats a
+  run on a later rung emits it once, on the next drive, with
+  `reason="snapshot_restore"`. The event type existed and nothing emitted it;
+  a host that rebuilt the switch from `state_changed(model_fallback_triggered)`
+  and `message_start` may keep doing so, and the existing `state_changed`
+  event is unchanged.
+- **`QueryEngine.answer_pending(tool_call_id, content, *, is_error=False,
+  operator_words=True)`** (and `protocore.runtime.answer_pending`) answers the
+  question a run parked on and leaves it ready for `run(None)`: the answer is
+  written as the call's result, marked with `OPERATOR_WORDS_METADATA_KEY`
+  unless `operator_words=False`, the wait is released, the run leaves
+  `AWAITING` once nothing else is parked, and a snapshot is persisted. It
+  replaces building the result message by hand and calling
+  `clear_pending_approval` and `transition_to(RUNNING)` before `run(None)`,
+  which still works. An approval, or a call the run is not waiting on, raises
+  `InterruptResolutionError` with nothing changed; an answer already in the
+  history is not written twice.
+- **A live-control queue API on `QueryEngine`.** `queued()`, `queue_input()`,
+  `withdraw_queued(id)` and `promote_queued(id)` (a waiting follow-up becomes
+  the last steer) replace writing `_steer_queue` / `_follow_up_queue`
+  directly. A host that keeps the queues in a store calls `load_queued()` from
+  its `reload_live_control` and `merge_queued()` from its
+  `persist_live_control`: the merge keeps an item the store gained after the
+  engine's last read (the seen rule, `merge_queue`), and its `consumed` names
+  only what the engine was handed and placed, never an item taken back. A
+  withdrawal or a promotion outlives a read that predates it. Every terminal
+  `message_stop` lists the ids the engine still held unplaced as
+  `leftover_queued`. Nothing changes for a host that keeps writing the lists;
+  the payload field is new and may be ignored.
 - **`OPERATOR_WORDS_METADATA_KEY` (`"protocore.operator_words"`) says who
   wrote a message.** `True` on `Message.metadata` makes the message the
   operator's, `False` makes a user-role message a runtime note, and a list of

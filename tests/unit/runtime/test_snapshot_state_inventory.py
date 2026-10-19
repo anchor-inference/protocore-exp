@@ -97,6 +97,18 @@ _PROCESS_LOCAL: dict[str, str] = {
         "loads them. A resume is not a seed: the snapshot's loaded tools say "
         "which groups are loaded, so it empties this."
     ),
+    "_restored_model_change": (
+        "derived on the way in: the restore that re-seats the run on a later "
+        "rung sets it, from the provider_chain_advances and "
+        "provider_chain_model_name the snapshot does carry."
+    ),
+    "_queue_sync": (
+        "what the queues owe one process's reads of a host's store. A resumed "
+        "run reloads the queues from that store before its first model call, "
+        "and that read hands it the ids afresh; withdrawals and promotions not "
+        "yet written back are the host's to repeat, since its store is the "
+        "record of them."
+    ),
     "events": "the event stream is the host's transport, not run state.",
     "hooks": "the hook manager is injected by the host.",
     "skills": "the skill store is injected by the host.",
@@ -314,7 +326,7 @@ async def test_a_version_one_payload_is_lifted_and_resumes_empty(engine_factory)
     source = engine_factory(run_id="run-1", tenant_id="scope-1", session_id="session-1")
     source.turn_count = 5
     payload = source.snapshot()
-    assert payload["schema_version"] == SNAPSHOT_SCHEMA_VERSION == 8
+    assert payload["schema_version"] == SNAPSHOT_SCHEMA_VERSION == 9
     # A version-1 payload named the run's two allowances at the top level.
     run_state_payload = payload.pop(RUN_SCOPED_STATE_SNAPSHOT_KEY)
     payload["run_work_ledger"] = run_state_payload["run_work_ledger"]

@@ -270,6 +270,20 @@ if iteration >= 50:
 отсечение по сообщению выключено, и включать его не рекомендуется. См.
 [`tools.md`](tools.md#отложенные-группы-инструментов).
 
+Поля восстановления — третий такой набор. `recovery_budget_max_attempts` и
+`recovery_budget_max_seconds` (оба `None`: считать, не ограничивая)
+ограничивают один отрезок восстановления по всем слоям сверх собственного
+предела каждого: `llm_transient_error_retry_max_attempts`,
+`llm_provider_chain_max_advances`, `max_consecutive_empty_responses`,
+`empty_completion_guard_max_redrives` и `context_overflow_retry_max_attempts`.
+Действует общий предел, только если он ниже их суммы.
+`recovery_redrive_backoff_base_seconds` (30),
+`recovery_redrive_backoff_max_seconds` (600) и
+`recovery_overflow_redrive_max_attempts` (2) задают задержку перезапуска,
+которую упавший прогон сообщает в своём терминальном стопе хосту, решающему,
+перезапускать ли его. См.
+[`contracts.md`](contracts.md#сбои-провайдера-и-исход-прогона).
+
 ## Смотрите также
 
 - [`architecture.md`](architecture.md) — система LoopConstants в полной

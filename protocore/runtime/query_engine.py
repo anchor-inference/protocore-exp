@@ -69,6 +69,8 @@ from protocore.contracts.observability import (
     read_manifest_schema_version,
 )
 from protocore.contracts.outcome import (
+    LEFTOVER_QUEUED_FIELD,
+    RECOVERABLE_AFTER_FIELD,
     RUN_CAUSE_FIELD,
     RUN_OUTCOME_FIELD,
     RunCause,
@@ -76,6 +78,7 @@ from protocore.contracts.outcome import (
 )
 from protocore.contracts.prompts import IPromptTemplateProvider
 from protocore.contracts.reasoning_effort import IReasoningEffortClassifier
+from protocore.contracts.recovery import RecoveryBudget, recoverable_after
 from protocore.contracts.resilience import IResilienceClassifier
 from protocore.contracts.run_state import RunScopedState
 from protocore.contracts.runtime_constants import LoopConstants
@@ -121,6 +124,12 @@ from protocore.runtime.deadline_clock import (
     restore_deadline_clock,
 )
 from protocore.runtime.events import EventType, TurnEvent
+from protocore.runtime.live_control import (
+    QueuedPrompt,
+    QueueKind,
+    QueueMerge,
+    QueueSync,
+)
 from protocore.runtime.loop_state import (
     InvalidStateTransitionError,
     LoopState,
@@ -970,6 +979,9 @@ class QueryEngine:
             # surface build to replay it. A resumed run is re-armed before its
             # first turn, so dropping it here would drop it every time.
             "_restored_deferred_groups",
+            # The model change a restore owes the wire, for the same reason:
+            # the re-arm before the resumed run's first turn would drop it.
+            "_restored_model_change",
             # The rules the run was given stay given: the result or catalogue
             # that gave them is still in the conversation.
             "_tool_group_rules_given",
@@ -1013,6 +1025,11 @@ class QueryEngine:
             # model/thinking overrides are the operator's standing choice.
             "_steer_queue",
             "_follow_up_queue",
+            # What the queues owe a host's store: the ids its last read handed
+            # over, and the withdrawals and promotions since. It goes with the
+            # queues it describes; reset alone, the next write-back would call
+            # an item taken back consumed.
+            "_queue_sync",
             "_live_model_name",
             "_live_thinking_enabled",
             "_live_reasoning_effort",
@@ -1318,6 +1335,9 @@ class QueryEngine:
         # failed at message three has not been shown to be healthy again by
         # message four and re-testing it costs the same failed turn twice.
         self._provider_chain_advances: int = 0
+        # The rung a restore left and the rung it re-seated the run on, held
+        # until the next drive announces it as ``model_changed``.
+        self._restored_model_change: tuple[str, str] | None = None
         # Continue-prompt fallback: count of
         # consecutive assistant turns that returned empty content + populated
         # reasoning_content. Bound by ``rc.max_consecutive_empty_responses``;
@@ -1457,6 +1477,7 @@ class QueryEngine:
         self._loop_guard_nudge_count: int = 0
         self._steer_queue: list[dict[str, Any]] = []
         self._follow_up_queue: list[dict[str, Any]] = []
+        self._queue_sync: QueueSync = QueueSync()
         self._live_model_name: str | None = None
         self._live_thinking_enabled: bool | None = None
         self._live_reasoning_effort: str | None = None
@@ -2205,6 +2226,12 @@ class QueryEngine:
         outcome, cause = self._run_outcome(payload.get("stop_reason"), windup_cause)
         payload[RUN_OUTCOME_FIELD] = outcome.value
         payload[RUN_CAUSE_FIELD] = None if cause is None else cause.model_dump(mode="json")
+        from protocore.runtime.live_control import leftover_queued_ids
+
+        payload[LEFTOVER_QUEUED_FIELD] = leftover_queued_ids(self)
+        payload[RECOVERABLE_AFTER_FIELD] = recoverable_after(
+            outcome, cause, self.recovery_budget, self.config.rc
+        )
         return event.model_copy(update={"payload": payload})
 
     def _run_outcome(
@@ -2480,7 +2507,20 @@ class QueryEngine:
         # the call itself, because the two used to be free to disagree.
         return narrow_tool_capabilities(allowed, roles=self.config.tool_roles)
 
-    def rearm(self) -> None:
+    @property
+    def recovery_budget(self) -> RecoveryBudget:
+        """The one allowance every recovery layer of this run draws from.
+
+        Minted from ``recovery_budget_max_attempts`` and
+        ``recovery_budget_max_seconds`` on first use. A host that re-drives a
+        failed run draws one :attr:`~protocore.contracts.recovery.RecoveryKind.redrive`
+        (or ``overflow_redrive``) from it and hands it to the run it starts,
+        through :meth:`rearm` or the new engine's
+        :attr:`~protocore.contracts.run_state.RunScopedState.recovery_budget`.
+        """
+        return self.run_state.ensure_recovery_budget(self.config.rc)
+
+    def rearm(self, *, recovery_budget: RecoveryBudget | None = None) -> None:
         """Return a settled engine to PENDING so it can take another turn.
 
         A conversational run settles once: it answers, and the engine is
@@ -2520,6 +2560,11 @@ class QueryEngine:
         *continuation* rather than a new run; the injected collaborators are not
         run state at all; and every per-run allowance, latch, streak and
         recovery budget starts over, because each was sized for one question.
+
+        The recovery budget is one of those allowances, unless the caller
+        passes ``recovery_budget``: a host re-driving a run that failed on an
+        outage or an overflow hands the next turn the budget it drew the
+        re-drive from, so the turn cannot start the recovery over.
 
         Raises :class:`~protocore.runtime.loop_state.InvalidStateTransitionError`
         when the engine is not terminal — that is a caller re-arming a turn
@@ -2561,6 +2606,7 @@ class QueryEngine:
         # subagents that may still be drawing on it — but the per-run streaks
         # and one-shot signals inside it are allowances like any other.
         self.run_state.clear_run_scoped_streaks()
+        self.run_state.recovery_budget = recovery_budget
         # A turn boundary is one of the places the prompt prefix starts over,
         # so it is where loaded tools over the cap are unloaded.
         self.context_manager.evict_discovered_tools()
@@ -3000,6 +3046,32 @@ class QueryEngine:
         cannot be accepted as authority at the gated delivery boundary.
         """
         return CandidateReleasedProjection.from_lifecycle(self._verification_lifecycle)
+
+    async def answer_pending(
+        self,
+        tool_call_id: str,
+        content: str,
+        *,
+        is_error: bool = False,
+        operator_words: bool = True,
+    ) -> None:
+        """Answer the question this run parked on ``tool_call_id``; then call ``run(None)``.
+
+        See :func:`~protocore.runtime.query.answer_pending`: the answer becomes
+        the call's result, the wait is released, the run leaves ``AWAITING``
+        once nothing else is parked, and a snapshot is persisted. An approval,
+        or a call the run is not waiting on, raises
+        :class:`~protocore.contracts.interrupt.InterruptResolutionError`.
+        """
+        from protocore.runtime.query import answer_pending
+
+        await answer_pending(
+            self,
+            tool_call_id,
+            content,
+            is_error=is_error,
+            operator_words=operator_words,
+        )
 
     def clear_pending_approval(self, tool_call_id: str) -> None:
         """Release the wait recorded against ``tool_call_id``, if any."""
@@ -3448,6 +3520,7 @@ class QueryEngine:
         persisted_rung = snapshot.get("provider_chain_model_name")
         if not isinstance(persisted_rung, str) or not persisted_rung:
             raise ValueError("snapshot is missing provider_chain_model_name")
+        seated_on = chain.current_model_name()
         for _ in range(advances - walked):
             if not await chain.advance(reason="snapshot_restore"):
                 raise ValueError(
@@ -3462,6 +3535,10 @@ class QueryEngine:
         self.llm = chain.current()
         self.config = replace(self.config, model_name=persisted_model_name)
         self._provider_chain_advances = advances
+        if seated_on != persisted_rung:
+            # Announced by the next drive: a run put back on a later rung
+            # otherwise changes model with nothing on the wire to say so.
+            self._restored_model_change = (seated_on, persisted_rung)
 
     async def resume_from_snapshot(self, snapshot: dict[str, Any]) -> None:
         """Rehydrate this engine from a snapshot, or refuse it and change nothing.
@@ -4196,6 +4273,69 @@ class QueryEngine:
         """Clear temporary controls and start a fresh retry budget."""
         self.clear_reasoning_recovery_overrides()
         self._reasoning_length_cut_count = 0
+
+    # ------------------------------------------------------------------
+    # Live-control queues
+    # ------------------------------------------------------------------
+
+    def queued(self) -> list[QueuedPrompt]:
+        """Every steer and follow-up the engine holds and has not placed, steers first."""
+        from protocore.runtime.live_control import queued_items
+
+        return queued_items(self)
+
+    def queue_input(
+        self,
+        kind: QueueKind,
+        text: str,
+        *,
+        attachments: list[dict[str, Any]] | None = None,
+        item_id: str | None = None,
+    ) -> QueuedPrompt:
+        """Queue a steer or a follow-up on this engine; raises ``ValueError`` over the caps."""
+        from protocore.runtime.live_control import queue_input
+
+        return queue_input(self, kind, text, attachments=attachments, item_id=item_id)
+
+    def withdraw_queued(self, item_id: str) -> bool:
+        """Take a waiting item back before it is placed; ``False`` when the engine holds none.
+
+        See :func:`~protocore.runtime.live_control.withdraw_queued` for the two
+        meanings of ``False``.
+        """
+        from protocore.runtime.live_control import withdraw_queued
+
+        return withdraw_queued(self, item_id)
+
+    def promote_queued(self, item_id: str) -> bool:
+        """Turn a waiting follow-up into the last steer; ``False`` when it is not waiting here."""
+        from protocore.runtime.live_control import promote_queued
+
+        return promote_queued(self, item_id)
+
+    def load_queued(
+        self, steer: list[dict[str, Any]], follow_up: list[dict[str, Any]]
+    ) -> None:
+        """Take a store's queues as the engine's, remembering the ids handed over.
+
+        The call a host's ``reload_live_control`` makes instead of assigning the
+        private queue lists.
+        """
+        from protocore.runtime.live_control import load_queued
+
+        load_queued(self, steer, follow_up)
+
+    def merge_queued(
+        self, stored_steer: list[dict[str, Any]], stored_follow_up: list[dict[str, Any]]
+    ) -> QueueMerge:
+        """What to write back to a store whose row is now as given, and what the model read.
+
+        The call a host's ``persist_live_control`` makes, inside the store's
+        transaction, instead of writing the engine's lists over the row.
+        """
+        from protocore.runtime.live_control import merge_queued
+
+        return merge_queued(self, stored_steer, stored_follow_up)
 
     def apply_live_controls(
         self,

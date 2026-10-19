@@ -8,6 +8,7 @@ wire-format placeholders, chain parser, BM25 tool retrieval.
  - :func:`~protocore.runtime.query.resume` pick a stored run back up and drive it
  - :func:`~protocore.runtime.query.resume_approved_tool` run a call held for approval
  - :func:`~protocore.runtime.query.resume_interrupts` answer everything a run waits on
+ - :func:`~protocore.runtime.query.answer_pending` answer one parked question in place
  - :class:`~protocore.runtime.context.manager.ContextManager` + two-tier compaction
  - :class:`~protocore.runtime.events.types.EventType` + :class:`~protocore.runtime.events.envelope.TurnEvent`
  - :class:`~protocore.runtime.loop_state.LoopState` state machine
@@ -34,7 +35,12 @@ from protocore.runtime.loop_state import (
     assert_transition,
     is_terminal,
 )
-from protocore.runtime.query import resume, resume_approved_tool, resume_interrupts
+from protocore.runtime.query import (
+    answer_pending,
+    resume,
+    resume_approved_tool,
+    resume_interrupts,
+)
 from protocore.runtime.query_engine import QueryEngine, QueryEngineConfig
 from protocore.runtime.tool_dispatch import (
     DispatchErrorKind,
@@ -83,6 +89,7 @@ __all__ = [
     "ToolRegistry",
     "TurnEvent",
     "WorkspacePathPolicy",
+    "answer_pending",
     "assert_transition",
     "consume_transport_down_injection_signal",
     "derive_budgets",

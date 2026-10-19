@@ -89,6 +89,7 @@ from protocore.contracts.observability import (
 )
 from protocore.contracts.outcome import RunCause
 from protocore.contracts.reasoning_effort import EffortRequest
+from protocore.contracts.recovery import RecoveryKind
 from protocore.contracts.run_state import RunScopedState
 from protocore.contracts.skills import (
     ISkillStore,
@@ -501,7 +502,18 @@ def _empty_rounds_spent(engine: QueryEngine) -> int:
 
 
 def _charge_empty_round(engine: QueryEngine) -> int:
+    """Count one empty round, and draw the re-ask it earns from the recovery budget.
+
+    A refused draw reports the round as past the bound, so the policy goes to
+    its wind-down or terminal instead of re-asking: the re-ask is a recovery
+    like any other, and the budget is what keeps the layers from multiplying.
+    """
     engine._consecutive_empty_responses += 1
+    if not engine.recovery_budget.draw(RecoveryKind.empty_response):
+        return max(
+            engine._consecutive_empty_responses,
+            engine.config.rc.max_consecutive_empty_responses + 1,
+        )
     return engine._consecutive_empty_responses
 
 
@@ -563,6 +575,50 @@ def _policy_fallback_event(
         run_id=engine.config.run_id,
         payload=payload,
     )
+
+
+def _model_changed_event(
+    engine: QueryEngine,
+    from_model: str,
+    to_model: str,
+    *,
+    reason: str,
+    exc: BaseException | None = None,
+    error_class: str | None = None,
+) -> TurnEvent:
+    """``model_changed``: the model that answers from here on, the one it replaces, and why.
+
+    ``failure`` is the provider's verdict on the error that moved the chain,
+    when it carried one, so a host can show "moved off X: rate limited" without
+    reading the error text.
+    """
+    failure = provider_failure_of(exc) if exc is not None else None
+    return TurnEvent(
+        type=EventType.MODEL_CHANGED,
+        run_id=engine.config.run_id,
+        payload={
+            "from": from_model,
+            "to": to_model,
+            "reason": reason,
+            "error_class": error_class,
+            "failure": None if failure is None else failure.model_dump(mode="json"),
+        },
+    )
+
+
+def _draw_transient_retry(engine: QueryEngine) -> bool:
+    """Draw one in-place retry from the run's recovery budget."""
+    return engine.recovery_budget.draw(RecoveryKind.transient_retry)
+
+
+def _current_chain_rung(engine: QueryEngine) -> str:
+    """The rung the run is on, named as the chain names it.
+
+    The chain's name and not the configured model name, which can be a pin
+    the chain never mentions; the rung a change moves to is named the same way.
+    """
+    chain = engine.provider_chain
+    return chain.current_model_name() if chain is not None else engine.config.model_name
 
 
 def _policy_transient_retry_event(
@@ -768,13 +824,24 @@ def _log_output_token_budget_exhausted(
 
 
 def _empty_completion_redrives_spent(engine: QueryEngine) -> int:
-    """How many re-drives this run has already spent on an empty finish."""
+    """How many re-drives this run has already spent on an empty finish.
+
+    Reported as all of them when the run's recovery budget refuses another
+    draw, so the guard closes the run instead of re-asking on an allowance the
+    other layers already spent.
+    """
+    if not engine.recovery_budget.permits():
+        return max(
+            engine._empty_completion_redrive_count,
+            engine.config.rc.empty_completion_guard_max_redrives,
+        )
     return engine._empty_completion_redrive_count
 
 
 def _charge_empty_completion_redrive(engine: QueryEngine) -> None:
-    """Spend one of them."""
+    """Spend one of them, and one draw of the run's recovery budget."""
     engine._empty_completion_redrive_count += 1
+    engine.recovery_budget.draw(RecoveryKind.empty_response)
 
 
 def _log_answer_floor_repair(
@@ -2269,6 +2336,16 @@ async def _drive_turn(engine: QueryEngine) -> AsyncIterator[TurnEvent]:
             payload={"from": LoopState.PENDING.value, "to": LoopState.RUNNING.value},
         )
 
+    # A restore that re-seated the run on a later rung of its chain could not
+    # say so itself (a restore emits nothing); the first drive after it does,
+    # before anything the restored model writes.
+    restored_rung = engine._restored_model_change
+    if restored_rung is not None:
+        engine._restored_model_change = None
+        yield _model_changed_event(
+            engine, restored_rung[0], restored_rung[1], reason="snapshot_restore"
+        )
+
     # Per-turn block index reset
     engine.reset_block_idx()
     engine.total_usage.reset_turn()
@@ -3120,8 +3197,14 @@ async def _advance_provider_chain(
         return ""
     if engine._provider_chain_advances >= engine.config.rc.llm_provider_chain_max_advances:
         return ""
+    # Checked before the step and drawn after it: a chain with no rung left
+    # recovered nothing, and charging it would spend the allowance of the
+    # retry the caller falls through to.
+    if not engine.recovery_budget.permits():
+        return ""
     if not await chain.advance(reason=kind):
         return ""
+    engine.recovery_budget.draw(RecoveryKind.chain_advance)
     engine._provider_chain_advances += 1
     engine.llm = chain.current()
     engine.config = replace(engine.config, model_name=chain.current_model_name())
@@ -3727,6 +3810,11 @@ async def _stream_one_assistant_message(
             if _turn.outcome.tool_calls is not None:
                 pending_tool_calls = list(_turn.outcome.tool_calls)
             stream_result.tool_calls = history_tool_calls
+            if text_buffer.strip() or pending_tool_calls:
+                # The provider answered with something to act on, which ends
+                # the recovery stretch. A round of reasoning alone does not:
+                # re-asking after it is itself a recovery.
+                engine.recovery_budget.settle()
             break
 
         # The inner loop has stopped re-streaming, so this assistant message
@@ -5784,7 +5872,10 @@ async def _handle_context_window_exceeded(
     if (
         engine._reactive_compaction_attempted_for_current_turn
         and (attempts_exhausted or not retry_strictly_shrinks)
-    ):
+    ) or not engine.recovery_budget.draw(RecoveryKind.context_overflow):
+        # The second operand runs only when a recovery is still on the table:
+        # shrinking the request is a draw like a retry, and a run whose budget
+        # is spent ends on the overflow rather than compacting on credit.
         async for evt in _emit_llm_terminal(
             engine, exc, kind="llm_context_window_exceeded"
         ):
@@ -12358,6 +12449,60 @@ async def resume_interrupts(
             engine.transition_to(LoopState.COMPLETED)
 
 
+async def answer_pending(
+    engine: QueryEngine,
+    tool_call_id: str,
+    content: str,
+    *,
+    is_error: bool = False,
+    operator_words: bool = True,
+) -> None:
+    """Answer the question a run parked on, and leave it ready for ``run(None)``.
+
+    The answer is written as the result of the call that asked, where the
+    tool's own result would have gone, the wait is released, and the run leaves
+    ``AWAITING`` once nothing else is parked. Nothing is driven: the caller
+    opens the next turn with ``run(None)``, which reads the answer as the
+    newest thing in the history. Building those steps by hand is how a host
+    left a call with no result, which the wire repair then reported to the
+    model as a failure, or a run that refused to start from ``AWAITING``.
+
+    ``operator_words`` marks the result as the operator's own reply
+    (:data:`~protocore.contracts.types.OPERATOR_WORDS_METADATA_KEY`), so
+    compaction quotes it whole; pass ``False`` for an answer another agent or a
+    timeout gave. An approval is refused: it is a decision about a call that
+    has not run, and answering it would write a result for a call nobody
+    allowed (:func:`resume_interrupts` decides one). So is a call the run is
+    not waiting on, with nothing changed. An answer already in the history, from
+    a process that wrote it and died before releasing the wait, is not written
+    a second time.
+    """
+    waiting = find_interrupt_for_call(engine.pending_interrupts, tool_call_id)
+    if waiting is None:
+        raise InterruptResolutionError(
+            f"this run is not waiting on call {tool_call_id!r}; it is waiting on "
+            f"{[item.tool_call_id for item in engine.pending_interrupts]}"
+        )
+    if waiting.kind is InterruptKind.approval:
+        raise InterruptResolutionError(
+            f"call {tool_call_id!r} is parked for an approval, which is decided "
+            "rather than answered; resolve it with resume_interrupts or "
+            "resume_approved_tool"
+        )
+    if not _history_has_tool_result(engine, tool_call_id):
+        _settle_parked_call(
+            engine,
+            tool_call_id=tool_call_id,
+            content=content,
+            is_error=is_error,
+            operator_reply=operator_words and waiting.kind is InterruptKind.question,
+        )
+    engine.release_interrupt(waiting.interrupt_id)
+    if engine.state is LoopState.AWAITING and not engine.pending_interrupts:
+        engine.transition_to(LoopState.RUNNING)
+    await engine._persist_snapshot()
+
+
 async def resume_approved_tool(
     engine: QueryEngine,
     tool_call: ToolCall,
@@ -13249,7 +13394,7 @@ def _resolve_safety_band_value(engine: QueryEngine) -> int:
     return max(0, current)
 
 
-__all__ = ["resume", "resume_approved_tool", "resume_interrupts"]
+__all__ = ["answer_pending", "resume", "resume_approved_tool", "resume_interrupts"]
 
 
 #: The core's own policy set, in the order :data:`TURN_POLICY_ORDER` fixes.
@@ -13418,6 +13563,9 @@ _CORE_TURN_POLICIES: Final[TurnPolicyRegistry] = TurnPolicyRegistry(
             ),
             log_crash=_policy_log_stream_crash,
             log_failure=_policy_log_stream_failure,
+            model_changed_event=_model_changed_event,
+            current_rung=_current_chain_rung,
+            draw_retry=_draw_transient_retry,
         ),
         TruncatedToolCallRecoveryPolicy(
             recoveries=RunCounter(
