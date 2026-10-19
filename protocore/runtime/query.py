@@ -196,7 +196,7 @@ from protocore.runtime.live_control import (
     QueuedPrompt,
     place_items,
     placed_as_user_message,
-    restore_queued_prompts,
+    restore_queued_items,
 )
 from protocore.runtime.llm.delta_bridge import (
     delta_to_turn_events,
@@ -1481,6 +1481,10 @@ async def _persist_live_control(engine: QueryEngine) -> None:
     await persister(engine)
 
 
+def _restored_queue_text(items: list[QueuedPrompt]) -> str:
+    return "\n\n".join(item.text.strip() for item in items if item.text.strip())
+
+
 def _inject_queue_into_history(
     engine: QueryEngine,
     *,
@@ -2140,7 +2144,7 @@ async def _drive_turn(engine: QueryEngine) -> AsyncIterator[TurnEvent]:
             engine.history,
             error_content=engine.prompt_text("tool_result_interrupted"),
         )
-        restored = restore_queued_prompts(engine)
+        restored = restore_queued_items(engine)
         await _persist_live_control(engine)
         from protocore.runtime.correctness_bind import commit_usage
 
@@ -2166,7 +2170,10 @@ async def _drive_turn(engine: QueryEngine) -> AsyncIterator[TurnEvent]:
             payload={
                 "turn_id": engine.turn_id(),
                 "stop_reason": StopReason.cancelled.value,
-                "restored_queue_text": "\n\n".join(restored),
+                "restored_queue_text": _restored_queue_text(restored),
+                # The text alone dropped a queued screenshot on stop; a host
+                # that can put files back reads the items.
+                "restored_queue_items": [item.to_dict() for item in restored],
             },
         )
         return
@@ -2448,7 +2455,7 @@ async def _drive_turn(engine: QueryEngine) -> AsyncIterator[TurnEvent]:
             engine.history,
             error_content=engine.prompt_text("tool_result_interrupted"),
         )
-        restored = restore_queued_prompts(engine)
+        restored = restore_queued_items(engine)
         await _persist_live_control(engine)
         from_state = engine.state
         engine.transition_to(LoopState.CANCELLED)
@@ -2464,7 +2471,10 @@ async def _drive_turn(engine: QueryEngine) -> AsyncIterator[TurnEvent]:
             payload={
                 "turn_id": engine.turn_id(),
                 "stop_reason": StopReason.cancelled.value,
-                "restored_queue_text": "\n\n".join(restored),
+                "restored_queue_text": _restored_queue_text(restored),
+                # The text alone dropped a queued screenshot on stop; a host
+                # that can put files back reads the items.
+                "restored_queue_items": [item.to_dict() for item in restored],
             },
         )
         return

@@ -154,25 +154,62 @@ def lease_key(scope_id: str, session_id: str, lane: str) -> str:
     return f"pc:lease:{scope_id}:{session_id}:{lane}"
 
 
+def _restorable(raw: Any, kind: QueueKind) -> QueuedPrompt | None:
+    """One queue entry as a :class:`QueuedPrompt`, or ``None`` when it carries nothing.
+
+    A queue is a list of dicts that a host or a live store wrote, and a stop
+    must hand back whatever was in it: an entry without an ``id`` or ``kind``
+    is still restored, under the queue it sat in, rather than raising on the
+    cancel path.
+    """
+    if isinstance(raw, QueuedPrompt):
+        item = raw
+    elif isinstance(raw, dict):
+        item = QueuedPrompt(
+            id=str(raw.get("id") or ""),
+            kind=raw.get("kind") or kind,
+            text=str(raw.get("text") or ""),
+            attachments=list(raw.get("attachments") or []),
+        )
+    else:
+        item = QueuedPrompt(id="", kind=kind, text=str(getattr(raw, "text", "") or ""))
+    if not item.text.strip() and not item.attachments:
+        return None
+    return item
+
+
+def restore_queued_items(engine: Any) -> list[QueuedPrompt]:
+    """Drain steer + follow-up queues and return their items whole.
+
+    Each item keeps its ``id``, ``kind`` and ``attachments`` beside its text,
+    steer items first. A stopped run hands these back so a host can put them
+    in the composer again; returning texts alone lost a queued screenshot,
+    and the whole item when it had no caption.
+    """
+    items: list[QueuedPrompt] = []
+    queues: tuple[tuple[QueueKind, Any], ...] = (
+        ("steer", getattr(engine, "_steer_queue", [])),
+        ("follow_up", getattr(engine, "_follow_up_queue", [])),
+    )
+    for kind, queue in queues:
+        for raw in list(queue or []):
+            item = _restorable(raw, kind)
+            if item is not None:
+                items.append(item)
+    engine._steer_queue = []
+    engine._follow_up_queue = []
+    return items
+
+
 def restore_queued_prompts(engine: Any) -> list[str]:
     """Drain steer + follow-up queues and return their texts.
 
-    This is the shipped cancel helper: HTTP cancel, ``query()`` stop, and
-    the composer restore path all call this rather than copying lists.
+    The text-only view of :func:`restore_queued_items`, kept for callers that
+    put words back in a composer and nothing else; it drops attachments and
+    items with no text. A caller that can take files back uses
+    :func:`restore_queued_items`.
     """
-    texts: list[str] = []
-    for raw in list(getattr(engine, "_steer_queue", []) or []) + list(
-        getattr(engine, "_follow_up_queue", []) or []
-    ):
-        if isinstance(raw, dict):
-            text = str(raw.get("text") or "").strip()
-        else:
-            text = str(getattr(raw, "text", "") or "").strip()
-        if text:
-            texts.append(text)
-    engine._steer_queue = []
-    engine._follow_up_queue = []
-    return texts
+    return [item.text.strip() for item in restore_queued_items(engine) if item.text.strip()]
 
 
 # SequenceLike avoids importing Sequence in the public helper signature noise.
@@ -188,6 +225,7 @@ __all__ = [
     "new_queued_prompt",
     "place_items",
     "placed_as_user_message",
+    "restore_queued_items",
     "restore_queued_prompts",
     "validate_thinking_for_mode",
 ]

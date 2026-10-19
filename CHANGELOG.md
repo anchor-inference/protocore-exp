@@ -74,6 +74,13 @@ All notable changes to this project are recorded here. The format follows
   rather than dropped. `message_image_refs` reads a message's images from its
   blocks and that key, and the prompt estimate now prices images carried in
   the key. See `docs/contracts.md`.
+- **A stopped run hands back its queued items with their files.**
+  `restore_queued_prompts` returned texts only, so a screenshot queued while a
+  run was busy was lost when the run stopped, and an item with no caption was
+  lost whole. The new `restore_queued_items` drains both queues and returns
+  each item as a `QueuedPrompt` (`id`, `kind`, text, attachments), and the
+  stop's `message_stop` event carries them as `restored_queue_items`.
+  `restore_queued_prompts` keeps its `list[str]` return as the text-only view.
 - **The compaction ledger no longer clips the operator's words.** Each quote
   was cut at 1,200 characters without a marker. A quote is now kept whole, the
   other sections of the ledger give up their room before it, and a quote that

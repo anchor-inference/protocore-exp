@@ -22,7 +22,11 @@ from protocore.contracts.types import (
 )
 from protocore.runtime.context.compaction import estimate_message_tokens
 from protocore.runtime.events import EventType
-from protocore.runtime.live_control import new_queued_prompt, placed_as_user_message
+from protocore.runtime.live_control import (
+    new_queued_prompt,
+    placed_as_user_message,
+    restore_queued_items,
+)
 from protocore.runtime.query import _query as query
 from protocore.tests_support.adapters import InMemoryLLMProvider
 
@@ -184,3 +188,46 @@ async def test_snapshot_round_trip_keeps_queued_and_placed_attachments(engine_fa
     restored = next(m for m in other.history if m.text == "now")
     assert message_image_refs(restored) == (ImageRefBlock(blob_ref="seen-1"),)
     assert restored.metadata[QUEUED_ITEMS_METADATA_KEY][0]["id"] == "q-now"
+
+
+def test_restoring_the_queue_hands_back_each_item_with_its_files(engine_factory) -> None:
+    engine = engine_factory(rc=_enabled())
+    shot = new_queued_prompt("steer", "", attachments=[_image("shot-1")], item_id="q-shot")
+    later = new_queued_prompt("follow_up", "later", item_id="q-later")
+    engine._steer_queue = [shot.to_dict(), new_queued_prompt("steer", "  ").to_dict()]
+    engine._follow_up_queue = [later.to_dict()]
+
+    restored = restore_queued_items(engine)
+
+    # The screenshot has no caption, so the text-only restore had nothing to
+    # hand back for it and the image was lost when the run stopped.
+    assert restored == [shot, later]
+    assert engine._steer_queue == []
+    assert engine._follow_up_queue == []
+
+
+def test_restoring_a_queue_entry_without_an_id_or_kind_still_gives_it_back(engine_factory) -> None:
+    engine = engine_factory(rc=_enabled())
+    engine._steer_queue = [{"text": "look left"}]
+    engine._follow_up_queue = [{"text": "", "attachments": [_image("x")]}]
+
+    restored = restore_queued_items(engine)
+
+    assert [(item.kind, item.text, item.attachments) for item in restored] == [
+        ("steer", "look left", []),
+        ("follow_up", "", [_image("x")]),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_run_reports_the_queued_items_it_hands_back(engine_factory) -> None:
+    engine = engine_factory(rc=_enabled())
+    shot = new_queued_prompt("steer", "this screen", attachments=[_image("shot-1")], item_id="q-shot")
+    engine._steer_queue = [shot.to_dict()]
+    engine.stop()
+
+    events = [event async for event in query(engine)]
+
+    stop = next(event for event in events if event.type is EventType.MESSAGE_STOP)
+    assert stop.payload["restored_queue_text"] == "this screen"
+    assert stop.payload["restored_queue_items"] == [shot.to_dict()]
