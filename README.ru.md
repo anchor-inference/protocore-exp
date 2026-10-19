@@ -70,6 +70,7 @@ Python ≥ 3.12. Зависимости рантайма — `pydantic`, `jinja2
 ```bash
 pip install "protocore[testing]==2.0.0a25"   # прогнать conformance-наборы на своих адаптерах
 pip install "protocore[openai]==2.0.0a25"    # эталонный адаптер chat-completions
+pip install "protocore[mcp]==2.0.0a25"       # инструменты MCP-сервера как инструменты ядра
 ```
 
 `testing` добавляет только тест-раннер: `protocore.conformance` — это pytest-набор,
@@ -82,6 +83,10 @@ pip install "protocore[openai]==2.0.0a25"    # эталонный адаптер
 адаптера для любого сервера с API OpenAI chat-completions (облачный вендор,
 шлюз, vLLM, SGLang, llama.cpp). Ядро его никогда не импортирует; см.
 [Провайдеры](docs/ru/providers.md).
+
+`mcp` добавляет `httpx` для транспорта streamable HTTP в `protocore.mcp`,
+который публикует инструменты MCP-сервера одной откладываемой группой;
+транспорту stdio ничего не нужно. См. [MCP](docs/ru/mcp.md).
 
 У оценки токенов есть и нативная реализация — отдельный дистрибутив
 `protocore-native`. Колёс для него на индексе пока нет, поэтому сейчас он
@@ -168,6 +173,7 @@ asyncio.run(main())
 | [Runtime-константы](docs/ru/runtime-constants.md) | модель конфигурации |
 | [Расширение ядра](docs/ru/extending.md) | адаптеры, hooks, переключатели, секции промпта |
 | [Провайдеры](docs/ru/providers.md) | эталонный адаптер chat-completions и цепочка провайдеров |
+| [MCP](docs/ru/mcp.md) | инструменты MCP-сервера как инструменты ядра |
 | [Тестирование](docs/ru/testing.md) | запуск тестов и страж границы импортов |
 | [Глоссарий](docs/ru/glossary.md) | ключевые термины |
 

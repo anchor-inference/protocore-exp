@@ -194,6 +194,27 @@ All notable changes to this project are recorded here. The format follows
   (for instance `resolver.rung_window`); its fit check then uses the smaller
   of the configured and the discovered window. Without it the chain behaves
   as before. See `docs/providers.md`.
+- **An MCP server's tools as core tools (`protocore.mcp`, extra `mcp`).**
+  `McpServer.stdio(...)` or `McpServer.http(...)` connects to a server,
+  lists its tools and publishes them in an `IToolRegistry` as `McpTool`
+  proxies named `Mcp_<Name>_<tool>`, declared as one dynamic tool group with
+  the server's handshake `instructions` as the group's rules and a host
+  `search_hint`, so a large server is held back behind `ToolSearch` and named
+  in one catalogue line. Schemas keep `properties`, `required` and a boolean
+  `additionalProperties`, with local `$ref`s inlined; results map text,
+  images, audio, resources and structured content, and `isError` is an error
+  result; protocol errors, timeouts (with `notifications/cancelled`) and lost
+  connections raise `ToolInvocationError`, saying when a call's outcome is
+  unknown. A call that finds the connection closed reconnects once before
+  sending; one whose connection breaks in flight is not retried. A changed
+  tool list is listed again and the registry updated. The stdio transport
+  passes the server only a few inherited environment variables plus its own
+  `env`; the streamable-HTTP transport carries the session id and protocol
+  revision, takes per-connection `auth` headers, and needs `httpx`, which
+  the new `mcp` extra installs. The client is a small JSON-RPC session
+  (`McpClientSession`) rather than the official SDK, and any object with the
+  five `McpTransport` methods can carry it. Nothing else imports the
+  package. See `docs/mcp.md`.
 
 ### Changed
 

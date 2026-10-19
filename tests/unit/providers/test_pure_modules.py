@@ -11,6 +11,8 @@ PURE_MODULES = (
     "protocore.providers.context_window",
     "protocore.providers.spend",
     "protocore.providers.text_tool_calls",
+    # Only the HTTP transport needs httpx, and it is imported when asked for.
+    "protocore.mcp",
 )
 
 
