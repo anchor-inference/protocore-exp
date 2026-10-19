@@ -12181,6 +12181,60 @@ async def resume_interrupts(
             engine.transition_to(LoopState.COMPLETED)
 
 
+async def answer_pending(
+    engine: QueryEngine,
+    tool_call_id: str,
+    content: str,
+    *,
+    is_error: bool = False,
+    operator_words: bool = True,
+) -> None:
+    """Answer the question a run parked on, and leave it ready for ``run(None)``.
+
+    The answer is written as the result of the call that asked, where the
+    tool's own result would have gone, the wait is released, and the run leaves
+    ``AWAITING`` once nothing else is parked. Nothing is driven: the caller
+    opens the next turn with ``run(None)``, which reads the answer as the
+    newest thing in the history. Building those steps by hand is how a host
+    left a call with no result, which the wire repair then reported to the
+    model as a failure, or a run that refused to start from ``AWAITING``.
+
+    ``operator_words`` marks the result as the operator's own reply
+    (:data:`~protocore.contracts.types.OPERATOR_WORDS_METADATA_KEY`), so
+    compaction quotes it whole; pass ``False`` for an answer another agent or a
+    timeout gave. An approval is refused: it is a decision about a call that
+    has not run, and answering it would write a result for a call nobody
+    allowed (:func:`resume_interrupts` decides one). So is a call the run is
+    not waiting on, with nothing changed. An answer already in the history, from
+    a process that wrote it and died before releasing the wait, is not written
+    a second time.
+    """
+    waiting = find_interrupt_for_call(engine.pending_interrupts, tool_call_id)
+    if waiting is None:
+        raise InterruptResolutionError(
+            f"this run is not waiting on call {tool_call_id!r}; it is waiting on "
+            f"{[item.tool_call_id for item in engine.pending_interrupts]}"
+        )
+    if waiting.kind is InterruptKind.approval:
+        raise InterruptResolutionError(
+            f"call {tool_call_id!r} is parked for an approval, which is decided "
+            "rather than answered; resolve it with resume_interrupts or "
+            "resume_approved_tool"
+        )
+    if not _history_has_tool_result(engine, tool_call_id):
+        _settle_parked_call(
+            engine,
+            tool_call_id=tool_call_id,
+            content=content,
+            is_error=is_error,
+            operator_reply=operator_words and waiting.kind is InterruptKind.question,
+        )
+    engine.release_interrupt(waiting.interrupt_id)
+    if engine.state is LoopState.AWAITING and not engine.pending_interrupts:
+        engine.transition_to(LoopState.RUNNING)
+    await engine._persist_snapshot()
+
+
 async def resume_approved_tool(
     engine: QueryEngine,
     tool_call: ToolCall,
@@ -13072,7 +13126,7 @@ def _resolve_safety_band_value(engine: QueryEngine) -> int:
     return max(0, current)
 
 
-__all__ = ["resume", "resume_approved_tool", "resume_interrupts"]
+__all__ = ["answer_pending", "resume", "resume_approved_tool", "resume_interrupts"]
 
 
 #: The core's own policy set, in the order :data:`TURN_POLICY_ORDER` fixes.

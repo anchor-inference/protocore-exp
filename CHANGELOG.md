@@ -8,6 +8,17 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- **`QueryEngine.answer_pending(tool_call_id, content, *, is_error=False,
+  operator_words=True)`** (and `protocore.runtime.answer_pending`) answers the
+  question a run parked on and leaves it ready for `run(None)`: the answer is
+  written as the call's result, marked with `OPERATOR_WORDS_METADATA_KEY`
+  unless `operator_words=False`, the wait is released, the run leaves
+  `AWAITING` once nothing else is parked, and a snapshot is persisted. It
+  replaces building the result message by hand and calling
+  `clear_pending_approval` and `transition_to(RUNNING)` before `run(None)`,
+  which still works. An approval, or a call the run is not waiting on, raises
+  `InterruptResolutionError` with nothing changed; an answer already in the
+  history is not written twice.
 - **A live-control queue API on `QueryEngine`.** `queued()`, `queue_input()`,
   `withdraw_queued(id)` and `promote_queued(id)` (a waiting follow-up becomes
   the last steer) replace writing `_steer_queue` / `_follow_up_queue`

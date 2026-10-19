@@ -2945,6 +2945,32 @@ class QueryEngine:
         """
         return CandidateReleasedProjection.from_lifecycle(self._verification_lifecycle)
 
+    async def answer_pending(
+        self,
+        tool_call_id: str,
+        content: str,
+        *,
+        is_error: bool = False,
+        operator_words: bool = True,
+    ) -> None:
+        """Answer the question this run parked on ``tool_call_id``; then call ``run(None)``.
+
+        See :func:`~protocore.runtime.query.answer_pending`: the answer becomes
+        the call's result, the wait is released, the run leaves ``AWAITING``
+        once nothing else is parked, and a snapshot is persisted. An approval,
+        or a call the run is not waiting on, raises
+        :class:`~protocore.contracts.interrupt.InterruptResolutionError`.
+        """
+        from protocore.runtime.query import answer_pending
+
+        await answer_pending(
+            self,
+            tool_call_id,
+            content,
+            is_error=is_error,
+            operator_words=operator_words,
+        )
+
     def clear_pending_approval(self, tool_call_id: str) -> None:
         """Release the wait recorded against ``tool_call_id``, if any."""
         self._pending_interrupts = release_interrupt(

@@ -442,7 +442,15 @@ protocore (чистое ядро, ноль импортов вверх)
   `resume_interrupts` — тот же драйв отдельно, для вызывающей стороны, которая
   уже восстановила прогон. `resume_approved_tool` исполняет один вызов,
   удержанный на одобрении: сверенный с durable ожидающим вызовом и
-  идемпотентный на повторе; оба тоже идут внутри `driving_turn()`. `_query_raw` реализует жизненный цикл хода: stop check → resume прерванных
+  идемпотентный на повторе; оба тоже идут внутри `driving_turn()`.
+  `QueryEngine.answer_pending(tool_call_id, content, is_error=False,
+  operator_words=True)` отвечает на один припаркованный вопрос на живом или
+  восстановленном движке, не запуская его: ответ становится результатом вызова
+  (помеченным как слова оператора, если не передан `operator_words=False`),
+  ожидание снимается, прогон уходит из `AWAITING`, когда больше ничего не
+  припарковано, и сохраняется снимок; затем вызывающий открывает ход через
+  `run(None)`. Одобрение или вызов, которого прогон не ждёт, поднимают
+  `InterruptResolutionError`, ничего не меняя. `_query_raw` реализует жизненный цикл хода: stop check → resume прерванных
   намерений → координата `run_start` → опциональный `/compact` через
   `CompactCheckpoint` → compaction check → UserPromptSubmit hook → build
   context → `select_strategy(run_mode).prepare_turn` →

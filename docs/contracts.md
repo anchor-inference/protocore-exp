@@ -96,7 +96,7 @@ the typed models that cross them. Two `__all__` lists matter:
 
 `QueryEngine` is **not** re-exported at either level — import it directly from
 `protocore.runtime.query_engine`; the resume entries (`resume`,
-`resume_interrupts`, `resume_approved_tool`) come from `protocore.runtime`. See the
+`resume_interrupts`, `resume_approved_tool`, `answer_pending`) come from `protocore.runtime`. See the
 [Public API](architecture.md#public-api-protocore__init__py) section.
 
 ---

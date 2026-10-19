@@ -99,7 +99,7 @@ protocore/contracts/
 
 `QueryEngine` **не** реэкспортируется ни на одном из уровней — импортируйте его
 напрямую из `protocore.runtime.query_engine`; точки подъёма (`resume`,
-`resume_interrupts`, `resume_approved_tool`) — из `protocore.runtime`. См. раздел
+`resume_interrupts`, `resume_approved_tool`, `answer_pending`) — из `protocore.runtime`. См. раздел
 [Public API](architecture.md#public-api-protocore__init__py).
 
 ---

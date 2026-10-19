@@ -456,7 +456,14 @@ crashes. The shared assistant loop is **not** a single immutable path:
   `resume_interrupts` is that drive on its own, for a caller that has already
   restored the run. `resume_approved_tool` executes one call held for
   approval, verified against the durable pending call and idempotent on
-  replay; both run inside `driving_turn()` too. `_query_raw` implements the
+  replay; both run inside `driving_turn()` too. `QueryEngine.answer_pending(tool_call_id,
+  content, is_error=False, operator_words=True)` answers one parked question
+  on a live or restored engine without driving it: the answer becomes the
+  call's result (marked as the operator's words unless `operator_words=False`),
+  the wait is released, the run leaves `AWAITING` once nothing else is parked,
+  and a snapshot is persisted; the caller then opens the turn with
+  `run(None)`. An approval, or a call the run is not waiting on, raises
+  `InterruptResolutionError` with nothing changed. `_query_raw` implements the
   turn lifecycle: stop check → resume interrupted intents → the
   `run_start` coordinate → optional `/compact` via `CompactCheckpoint` → compaction
   check → UserPromptSubmit hook → build context → `select_strategy(run_mode).prepare_turn`
