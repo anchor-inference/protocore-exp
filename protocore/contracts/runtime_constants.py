@@ -285,6 +285,20 @@ class LoopConstants(BaseModel):
             "would crowd out history."
         ),
     )
+    tool_result_entry_cap_tail_share: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=0.9,
+        description=(
+            "Share of what a fresh result keeps, once it is cut to the "
+            "per-result limit where it enters the run, that comes from the end "
+            "of the output rather than its head. The omitted middle is marked "
+            "between the two. The line that says why a build or a test run "
+            "failed is usually the last one, and a head-only cut drops exactly "
+            "that. 0 keeps the head alone; 0.25 keeps three quarters head and "
+            "one quarter tail."
+        ),
+    )
 
  # ----- System prompt / skill index budgets -----
     system_prompt_max_ratio: float = Field(

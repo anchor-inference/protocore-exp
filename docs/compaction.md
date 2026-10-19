@@ -391,6 +391,7 @@ nothing or keep nothing; point the same code at a real provider to measure it.
 | `compaction_keep_recent_max_ratio` | 0.25 | share of the trigger the kept tail may hold; at least `compaction_force_keep_recent_turns` messages and the unread batch are kept whatever they weigh |
 | `compaction_force_keep_recent_turns` | 1 | the same after a provider refusal |
 | `tool_result_truncation_ratio` | 0.10 | the most one tool result may take: a larger fresh result is cut to its head where it enters (the whole value stored, its reference named), and an older output this size is masked whatever its age |
+| `tool_result_entry_cap_tail_share` | 0.0 | the share of a fresh result cut where it enters that comes from the end of the output; the omitted middle is marked between head and tail. 0 keeps the head only; 0.25 keeps the last lines, where a failed build says why |
 | `compaction_mask_keep_recent_results` | 8 | outputs never masked for age |
 | `compaction_mask_min_tokens` | 300 | smaller outputs are not masked for age |
 | `compaction_mask_keep_reads_pattern` | instruction and memory files | outputs of matching reads are not masked for age |

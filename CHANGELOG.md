@@ -101,6 +101,14 @@ All notable changes to this project are recorded here. The format follows
   and a request to be asked shares no word with its description. A host that
   subclassed the tool only to add a hint can drop the subclass; one that wants
   its own hint still overrides the class attribute.
+- **`LoopConstants.tool_result_entry_cap_tail_share`** keeps the end of a
+  fresh result as well as its head when it is cut to the per-result limit
+  where it enters the run, with the omitted middle marked between the two
+  (the whole value is still stored and named). The reason a build or a test
+  run failed is usually its last line, which a head-only cut drops. The cut
+  metadata gains `kept_tail_chars`, and `kept_chars` counts both ends. The
+  default 0 keeps the head only, as before; 0.25 keeps three quarters head and
+  one quarter tail.
 
 ### Changed
 
