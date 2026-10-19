@@ -104,6 +104,15 @@ All notable changes to this project are recorded here. The format follows
   request, which carries the source's bytes, reaches the machine holding the
   source's cache. Left unset, the request's context is unchanged and routing
   follows the session, so recorded manifests keep their identity.
+- **`protocore.providers.chain.ListProviderChain`, a concrete
+  `IProviderChain`.** Rungs (`ChainRung`: name, model, a built provider or an
+  async factory run only when the run reaches the rung, and the rung's context
+  window and output cap) are walked one way under a lock, so two failures
+  arriving together cannot demote past each other. A fallback whose window
+  cannot hold the prompt the run carries (`prompt_tokens`, bound later with
+  `bind_prompt_size`) plus its reply is skipped, as is one a `resting` check
+  names, and one whose factory raises; each is recorded with its reason in
+  `attempted()`. The primary is never checked. Pure Python, no extra needed.
 
 ### Changed
 
