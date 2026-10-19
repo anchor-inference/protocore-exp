@@ -25,7 +25,12 @@ from protocore.contracts.config import IConstantsRegistry, ICoreConstantsProvide
 from protocore.contracts.events import IEventStream
 from protocore.contracts.hooks import IHookManager
 from protocore.contracts.llm import ILLMProvider, IProviderChain, IRequestTokenCounter
-from protocore.contracts.memory import IMemory, IMemoryContentScanner
+from protocore.contracts.memory import (
+    IMemory,
+    IMemoryContentScanner,
+    IMemoryWritePolicy,
+    IProvenanceMemory,
+)
 from protocore.contracts.middleware import ILifecycleRegistry
 from protocore.contracts.observability import CacheObserverProtocol
 from protocore.contracts.prompts import IPromptTemplateProvider
@@ -135,6 +140,18 @@ class MemoryConformance(ContractSuite):
     """The durable memory store."""
 
     protocol = IMemory
+
+
+class ProvenanceMemoryConformance(ContractSuite):
+    """The memory store that also keeps who wrote each record."""
+
+    protocol = IProvenanceMemory
+
+
+class MemoryWritePolicyConformance(ContractSuite):
+    """The host's say over a memory write before it reaches the store."""
+
+    protocol = IMemoryWritePolicy
 
 
 class MemoryContentScannerConformance(ContractSuite):
@@ -265,6 +282,8 @@ SUITES: tuple[type[ContractSuite], ...] = (
     ProviderChainConformance,
     RequestTokenCounterConformance,
     MemoryConformance,
+    ProvenanceMemoryConformance,
+    MemoryWritePolicyConformance,
     MemoryContentScannerConformance,
     CacheObserverConformance,
     PromptTemplateProviderConformance,

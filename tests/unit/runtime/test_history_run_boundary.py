@@ -317,6 +317,23 @@ _WHOLE_HISTORY_BY_DESIGN: dict[str, _Declaration] = {
         "is persisted is the whole of what the session has said, because that "
         "is what the next process reads back when it seeds an engine"
     ),
+    "protocore/runtime/history_persist.py::OrderedHistoryPersister.persist_session_history": _whole(
+        "queues a full write of the session transcript to the store: what is "
+        "persisted is the whole of what the session has said"
+    ),
+    "protocore/runtime/history_persist.py::OrderedHistoryPersister._run": _whole(
+        "rewrites the session transcript whole after a lost write, from the "
+        "longer of the live history and the snapshot it was handed: the rows "
+        "the store is missing are the session's"
+    ),
+    "protocore/runtime/history_persist.py::OrderedHistoryPersister._lost": _whole(
+        "queues the repair write of the whole session transcript after a lost "
+        "write, for the same reason as the write it repairs"
+    ),
+    "protocore/runtime/history_persist.py::_whole": _whole(
+        "wraps the transcript it is handed as a full replacement of what the "
+        "store holds; it asks nothing of the messages"
+    ),
     "protocore/runtime/stale_result_trim.py::trim_stale_results": _whole(
         "prompt assembly over the outbound view it is handed: cuts oversized "
         "tool results down to their head. Every result the request carries "

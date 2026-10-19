@@ -43,7 +43,7 @@ protocore/contracts/
   agent_dispatch.py# IAgentDispatch
   events.py       # IEventStream
   hooks.py        # IHookManager + HookResult / HookSpec / HookActionKind
-  memory.py       # IMemory (+ IMemoryContentScanner)
+  memory.py       # IMemory (+ IProvenanceMemory, IMemoryWritePolicy, IMemoryContentScanner)
   workspace.py    # IWorkspace
   resilience.py   # IToolTransport + IResilienceClassifier (+ the taxonomy)
   prompts.py      # IPromptTemplateProvider
@@ -125,7 +125,7 @@ protocore/contracts/
 | `ISkillStore` | `contracts/skills.py` | Хранение и поиск skill-бандлов **и** многофайловый API: `list_files` / `load_file`, возвращающие строки `SkillFileRef` (как минимум каноническая запись `SKILL.md` / `SKILL_ENTRY_PATH`). **Цикл ядра никогда не вызывает** `list_files` / `load_file` — каталог строится через `list` / `list_enabled_subset`, тело по триггеру — через `load` / `list_subset`. Чтения store ключуются по `QueryEngineConfig.account_id`, не по `tenant_id`. Каталог рендерит `render_skills_catalog` (+ `derive_skill_index_budget_tokens`) в `runtime/skill_index.py` строками `Skill(skill="{name}")`, а не путями файлов. |
 | `IHookManager` | `contracts/hooks.py` | Хуки, исполнитель которых живёт вне процесса (`invoke(event, payload, tenant_id)`); цикл ведёт их на гейте разрешений и вокруг диспетча инструмента. |
 | `ILifecycleRegistry` | `contracts/middleware.py` | Единственный шов жизненного цикла: observe / decide / transform / around / notify, с владельцем, скоупом и идемпотентным диспозером у каждой регистрации. |
-| `IEventStream` | `contracts/events.py` | Кросс-подовый долговечный поток событий для переподключения / повтора SSE. |
+| `IEventStream` | `contracts/events.py` | Кросс-подовый долговечный поток событий для переподключения / повтора SSE. Обязан хранить каждое событие, которое `event_durability()` называет `durable`; может отбрасывать `live_only` после раздачи и хранить поле с полезной нагрузкой по ссылке один раз (`payload_by_reference()`). |
 | `IBlobStore` | `contracts/blob.py` | Content-addressed хранилище блобов, используемое компакцией Tier-1. |
 | `ISearchIndex` | `contracts/search.py` | Универсальный лексический поисковый индекс. |
 | `ITodoStorage` | `contracts/todo.py` | Посессионное хранение todo. |
@@ -140,16 +140,18 @@ protocore/contracts/
 | `IResilienceClassifier` | `contracts/resilience.py` | К какому нейтральному `ResilienceErrorClass` относится сообщение об отказе. Формулировки принадлежат тому, что хост поставил за своими инструментами, и шаблон для них в ядре — копия чужой кодовой базы, которая протухает, ни разу не уронив сборку. Хост, не привязавший классификатор, сохраняет нейтральное поведение: каждый отказ различается по собственному тексту, и ни один не считается «транспорт лежит». |
 | `IRunToolErrorCounter` | `contracts/run.py` | Долговечный счёт ошибок инструментов на прогон, переживающий смену процесса. |
 | `IMemoryContentScanner` | `contracts/memory.py` | Сканирование содержимого памяти на инъекции при записи. |
+| `IProvenanceMemory` | `contracts/memory.py` | `IMemory`, чей `write` принимает ещё и `provenance=` и хранит его на записи. Отдельный контракт, чтобы хранилище, написанное только под `IMemory`, по-прежнему проходило проверку соответствия; его требует `RememberTool(record_provenance=True)`. |
+| `IMemoryWritePolicy` | `contracts/memory.py` | Слово хоста о записи в память до того, как она ляжет: `async review(MemoryWriteRequest) -> MemoryWriteVerdict` классифицирует (kind, metadata, source refs, salience) или отказывает с сообщением, которое прочтёт модель. Необязательна; `None` пишет как раньше. |
 | `ITurnPolicy` | `contracts/turn_policy.py` | Одно продуктовое решение о ходе. Не адаптер, который обязан поставить хост: ядро везёт собственный набор, а хост подставляет политику в него **по имени**. |
 
-**32 `Protocol`-а** в `contracts/` — это не один плоский список адаптеров: часть
+**34 `Protocol`-а** в `contracts/` — это не один плоский список адаптеров: часть
 из них — хранилища, которые хост обязан поставить (`ILLMProvider`, `IRunStore`,
 `ISessionStore`, `IBlobStore`, `ISearchIndex`, `ITodoStorage`, `IToolRegistry`,
 `ISkillStore`, `IAgentDispatch`, `IEventStream`, `IHookManager`, `IMemory`,
 `IWorkspace`, `IWorkPool`); часть — опциональные швы, остающиеся инертными,
 пока ничего не привязано (`IToolTransport`, `IResilienceClassifier`,
 `CacheObserverProtocol`, `IRequestManifestSink`, `IProviderChain`,
-`ILifecycleRegistry`); а часть — формы, которые ядро отдаёт *обратно*, а не
+`ILifecycleRegistry`, `IProvenanceMemory`, `IMemoryWritePolicy`); а часть — формы, которые ядро отдаёт *обратно*, а не
 просит (`WorkHandle`, `BackgroundTaskView`, `ITurnState`, `ClassifiedLike`).
 `IToolSafetyPolicy` (`runtime/tool_permission.py`) — регистрируемая в рантайме
 политика разрешений, а не контракт, а `Tool` — это ABC, а не `Protocol`: хост
@@ -287,6 +289,57 @@ value-объекты.
   записи вызовов инструментов, записи LLM-вызовов, предупреждения, запуски
   субагентов, артефакты и опциональный снимок `AttemptLedger`) со структурными
   ограничениями из `protocore.constants`.
+
+#### Запись истории сессии вне цикла
+
+Движок отдаёт рабочую историю хранилищу через `runtime/history_persist.py`:
+`persist_history_delta(engine, delta)` только с тем, что изменилось, и
+**возврат — это обещание хранилища, что запись легла**. Хранилище, которое не
+хочет заставлять каждый раунд ждать базу данных, использует
+`OrderedHistoryPersister(write)`, где `write` — `async`-вызов, получающий
+`HistoryDelta`:
+
+```python
+persister = OrderedHistoryPersister(store.write_history)
+persister.attach(engine)
+...
+await persister.flush()   # в терминальном состоянии, до передачи сессии дальше
+```
+
+- Записи идут по одной, в порядке передачи, вне стека вызывающего.
+- Запись, которая бросила исключение или была отменена, сразу вызывает
+  `engine.forget_persisted_history()`; каждая ещё стоящая в очереди запись —
+  включая добавления, переданные до того, как сбой стал известен, —
+  записывается целиком из живой истории движка, а если в очереди больше ничего
+  нет, ставится одна восстанавливающая запись. Восстановление, которое тоже
+  упало, не повторяется.
+- **Долговечность:** возврат из передачи значит *поставлено в очередь*. Возврат
+  из `flush()` значит, что всё переданное до него легло; пока хранилище
+  отстаёт, он бросает `HistoryPersistError` (причина — исключение хранилища).
+  Очередь живёт в процессе, поэтому падение до `flush()` её теряет, и первая
+  передача следующего прогона — полная перезапись.
+
+#### Что поток событий обязан хранить
+
+`contracts/events.py` говорит, какие события `IEventStream` обязан хранить для
+повтора и какие полезные нагрузки может хранить один раз. И то и другое —
+подсказки: поток, хранящий всё дословно, по-прежнему корректен, только больше.
+
+- **`event_durability(name)`** → `EventDurability.durable` или `live_only`.
+  `LIVE_ONLY_EVENT_NAMES` — это `content_block_delta` и `tool_use_input_delta`:
+  текст и вход инструмента, которые они несут, оказываются в сообщении к его
+  событию остановки, а затем в истории, поэтому их раздают текущим подписчикам и
+  хранить не обязательно. Любое другое имя, включая собственные события хоста,
+  долговечно; хост со своими live-only событиями передаёт
+  `live_only=LIVE_ONLY_EVENT_NAMES | {...}`.
+- **`payload_by_reference(name, payload)`** → `PayloadReference` для события из
+  `BY_REFERENCE_EVENTS` (сейчас `tool_surface_advertised`, поле `tools`):
+  полезная нагрузка строки с полем, заменённым на `{"digest", "count"}`, дайджест
+  (`tool_surface_digest` эмиттера, если он его назвал, иначе SHA-256
+  канонического JSON значения), само значение и `complete`. Хранилище пишет
+  полное значение поверх того, что держит под дайджестом, а сокращённое
+  (`tool_surface_described` ложно) — только туда, где ничего нет. Живые
+  подписчики получают событие в том виде, в каком оно испущено.
 
 ### LLM-запрос / ответ
 
@@ -485,6 +538,34 @@ value-объекты.
   поэтому делегирование — заявленная возможность, а не догадка по утиной
   типизации.
 - **`Todo`** / **`TodoStatus`** (`StrEnum`) — форма посессионного хранения todo.
+
+### Память
+
+- **`MemoryRecord`** — один типизированный факт: `scope` / `scope_key`, `kind`,
+  `text`, `metadata`, аддитивные `source_refs`, `salience`, `version` (защита от
+  дрейфа), отметки времени и счётчики подкрепления.
+- **`MemoryProvenance`** — кто написал запись и откуда: `source_kind`
+  (обычно одно из `MEMORY_SOURCE_KINDS`: `agent`, `operator`, `import`,
+  `system`, `unknown`), `run_id`, `root_run_id`, `session_id`, `subagent_id`,
+  `message_id`, `tool_call_id`, `observed_at`. Все поля необязательны, и
+  отсутствующее значит *неизвестно*: импорт без отметки времени сохраняет
+  `observed_at=None`, а не момент копирования. Лежит в
+  `MemoryRecord.provenance`, по умолчанию `None`, поэтому запись, сохранённая до
+  появления поля, по-прежнему загружается. Называет запись, которая последней
+  изменила факт: ставится при CREATE, заменяется при MERGE, если сливающая запись
+  его несёт, не трогается при SKIP — и одно лишь другое происхождение никогда не
+  превращает SKIP в MERGE. Передаётся только хранилищу, реализующему
+  `IProvenanceMemory`.
+- **`MemoryWriteRequest`** / **`MemoryWriteVerdict`** — вопрос к
+  `IMemoryWritePolicy` и её ответ. Запрос — запись такой, какой она ляжет
+  (разрешённые scope и ключ, `kind` и назвала ли его модель, дополнительные поля
+  входа хоста в `extra`, происхождение); строится после проверки содержимого и
+  правил scope, так что политика никогда не решает о записи, которую ядро и так
+  отвергло бы. Ответ — `MemoryWriteVerdict.allow(kind=…, metadata=…,
+  source_refs=…, salience=…)` или `MemoryWriteVerdict.refuse(message)`; отказ
+  обязан нести сообщение, которое прочтёт модель. `result_metadata` в любом
+  случае вливается в метаданные результата инструмента, под собственными ключами
+  ядра.
 
 ---
 

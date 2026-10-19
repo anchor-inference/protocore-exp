@@ -42,7 +42,7 @@ protocore/contracts/
   agent_dispatch.py# IAgentDispatch
   events.py       # IEventStream
   hooks.py        # IHookManager + HookResult / HookSpec / HookActionKind
-  memory.py       # IMemory (+ IMemoryContentScanner)
+  memory.py       # IMemory (+ IProvenanceMemory, IMemoryWritePolicy, IMemoryContentScanner)
   workspace.py    # IWorkspace
   resilience.py   # IToolTransport + IResilienceClassifier (+ the taxonomy)
   prompts.py      # IPromptTemplateProvider
@@ -122,7 +122,7 @@ concrete adapter. Each is one line: the contract and what a host supplies.
 | `ISkillStore` | `contracts/skills.py` | Skill-bundle storage and lookup **and** the multi-file API: `list_files` / `load_file` returning `SkillFileRef` rows (at minimum the canonical `SKILL.md` / `SKILL_ENTRY_PATH` entry). The **core loop never calls** `list_files` / `load_file` — it catalogs via `list` / `list_enabled_subset` and loads a triggered body via `load` / `list_subset`. Store reads key on `QueryEngineConfig.account_id`, not `tenant_id`. The catalog is rendered by `render_skills_catalog` (+ `derive_skill_index_budget_tokens`) in `runtime/skill_index.py` as `Skill(skill="{name}")` lines, not file paths. |
 | `IHookManager` | `contracts/hooks.py` | Hooks whose executor is out of process (`invoke(event, payload, tenant_id)`), driven at the permission gate and around tool dispatch. |
 | `ILifecycleRegistry` | `contracts/middleware.py` | The one lifecycle seam: observe / decide / transform / around / notify, with an owner, a scope and an idempotent disposer per registration. |
-| `IEventStream` | `contracts/events.py` | Cross-pod durable event stream for SSE reconnect / replay. |
+| `IEventStream` | `contracts/events.py` | Cross-pod durable event stream for SSE reconnect / replay. Must keep every event `event_durability()` calls `durable`; may drop `live_only` ones after fanning them out, and may keep a by-reference payload member once (`payload_by_reference()`). |
 | `IBlobStore` | `contracts/blob.py` | Content-addressed blob storage used by Tier-1 compaction. |
 | `ISearchIndex` | `contracts/search.py` | A generic lexical search index. |
 | `ITodoStorage` | `contracts/todo.py` | Per-session todo persistence. |
@@ -137,15 +137,18 @@ concrete adapter. Each is one line: the contract and what a host supplies.
 | `IResilienceClassifier` | `contracts/resilience.py` | Which neutral `ResilienceErrorClass` a failure message describes. The wordings belong to whatever the host put behind its tools, and a pattern for them in core is a copy of another codebase that goes stale without a build ever failing. A host that binds none keeps the neutral behaviour: every failure is told apart by its own text and none is recognised as a transport being down. |
 | `IRunToolErrorCounter` | `contracts/run.py` | Durable per-run tool-error counting that survives a process change. |
 | `IMemoryContentScanner` | `contracts/memory.py` | Injection-scanning of memory content on the way in. |
+| `IProvenanceMemory` | `contracts/memory.py` | An `IMemory` whose `write` also takes `provenance=` and keeps it on the record. A separate contract so a store written against `IMemory` alone still conforms; `RememberTool(record_provenance=True)` requires it. |
+| `IMemoryWritePolicy` | `contracts/memory.py` | The host's say over a memory write before it lands: `async review(MemoryWriteRequest) -> MemoryWriteVerdict` classifies (kind, metadata, source refs, salience) or refuses with a message the model reads. Optional; `None` writes as before. |
 | `ITurnPolicy` | `contracts/turn_policy.py` | One product decision about a turn. Not an adapter the host must supply: the core ships its own set, and a host substitutes a policy into it **by name**. |
 
-The **32 `Protocol`s** in `contracts/` are not one flat list of adapters: some
+The **34 `Protocol`s** in `contracts/` are not one flat list of adapters: some
 are stores the host must supply (`ILLMProvider`, `IRunStore`, `ISessionStore`,
 `IBlobStore`, `ISearchIndex`, `ITodoStorage`, `IToolRegistry`, `ISkillStore`,
 `IAgentDispatch`, `IEventStream`, `IHookManager`, `IMemory`, `IWorkspace`,
 `IWorkPool`), some are optional seams that stay inert when nothing is bound
 (`IToolTransport`, `IResilienceClassifier`, `CacheObserverProtocol`,
-`IRequestManifestSink`, `IProviderChain`, `ILifecycleRegistry`), and some are
+`IRequestManifestSink`, `IProviderChain`, `ILifecycleRegistry`,
+`IProvenanceMemory`, `IMemoryWritePolicy`), and some are
 shapes the core hands *back* rather than asks for (`WorkHandle`,
 `BackgroundTaskView`, `ITurnState`, `ClassifiedLike`).
 `IToolSafetyPolicy` (`runtime/tool_permission.py`) is a runtime-registered
@@ -277,6 +280,56 @@ Three distinct run shapes — do not conflate them (see
   tool-call records, LLM-call records, warnings, subagent runs, artifacts, and an
   optional `AttemptLedger` snapshot), with structural caps from
   `protocore.constants`.
+
+#### Writing a session's history off the loop
+
+The engine hands its working history to the store through
+`runtime/history_persist.py`: `persist_history_delta(engine, delta)` with only
+what changed, and **returning is the store's promise that the write landed**.
+A store that would rather not make every round wait for its database uses
+`OrderedHistoryPersister(write)`, where `write` is an `async` callable given
+the `HistoryDelta`:
+
+```python
+persister = OrderedHistoryPersister(store.write_history)
+persister.attach(engine)
+...
+await persister.flush()   # at a terminal state, before handing the session on
+```
+
+- Writes run one at a time, in hand-over order, off the caller's stack.
+- A write that raises or is cancelled calls
+  `engine.forget_persisted_history()` at once; every write still queued —
+  appends handed over before the failure was known included — is written whole
+  instead, from the engine's live history, and if nothing else is queued one
+  repair write is. A repair that fails is not repeated.
+- **Durability:** a hand-over returning means *queued*. `flush()` returning
+  means everything handed over before it landed; it raises
+  `HistoryPersistError` (cause: the store's exception) while the store is
+  behind. Queued writes are process-local, so a crash before the flush loses
+  them, and the next run's first hand-over is a rewrite.
+
+#### What an event stream has to keep
+
+`contracts/events.py` says which events an `IEventStream` must keep for
+replay and which payloads it may keep once. Both are hints: a stream that keeps
+everything verbatim is still correct, only larger.
+
+- **`event_durability(name)`** → `EventDurability.durable` or `live_only`.
+  `LIVE_ONLY_EVENT_NAMES` is `content_block_delta` and `tool_use_input_delta`:
+  the text and tool input they carry are in the message by its stop event and
+  in the history after that, so they are fanned out to current subscribers and
+  need not be stored. Every other name, a host's own included, is durable; a
+  host with live-only events of its own passes
+  `live_only=LIVE_ONLY_EVENT_NAMES | {...}`.
+- **`payload_by_reference(name, payload)`** → a `PayloadReference` for an event
+  in `BY_REFERENCE_EVENTS` (today `tool_surface_advertised`, member `tools`):
+  the row's payload with the member replaced by `{"digest", "count"}`, the
+  digest (the emitter's `tool_surface_digest` when it names one, else the
+  SHA-256 of the value's canonical JSON), the value, and `complete`. A store
+  writes a complete value over what it holds for the digest and an abridged one
+  (`tool_surface_described` false) only where it holds nothing. Live
+  subscribers are handed the event as emitted.
 
 ### LLM request / response
 
@@ -467,6 +520,32 @@ Three distinct run shapes — do not conflate them (see
   carrying a flag attribute, so delegation is a stated capability rather than a
   duck-typed guess.
 - **`Todo`** / **`TodoStatus`** (`StrEnum`) — per-session todo persistence shape.
+
+### Memory
+
+- **`MemoryRecord`** — one typed fact: `scope` / `scope_key`, `kind`, `text`,
+  `metadata`, additive `source_refs`, `salience`, `version` (the drift guard),
+  timestamps and reinforcement counters.
+- **`MemoryProvenance`** — who wrote a record and from where: `source_kind`
+  (conventionally one of `MEMORY_SOURCE_KINDS`: `agent`, `operator`, `import`,
+  `system`, `unknown`), `run_id`, `root_run_id`, `session_id`, `subagent_id`,
+  `message_id`, `tool_call_id`, `observed_at`. Every field is optional and an
+  absent one means *unknown*: an import without a timestamp keeps
+  `observed_at=None` rather than the moment it was copied. It sits on
+  `MemoryRecord.provenance`, `None` by default, so a record stored before the
+  field existed still loads. It names the write that last changed the record:
+  set on CREATE, replaced on MERGE when the merging write carries one, untouched
+  on SKIP — and a different provenance alone never turns a SKIP into a MERGE.
+  Only a store that implements `IProvenanceMemory` is handed one.
+- **`MemoryWriteRequest`** / **`MemoryWriteVerdict`** — what an
+  `IMemoryWritePolicy` is asked and answers. The request is the write as it
+  would land (resolved scope and key, `kind` and whether the model named it,
+  the host's `extra` input fields, the provenance), built after the content
+  scan and the scope rules, so a policy never decides about a write the core
+  would have refused. The verdict is `MemoryWriteVerdict.allow(kind=…,
+  metadata=…, source_refs=…, salience=…)` or `MemoryWriteVerdict.refuse(message)`;
+  a refusal must carry the message the model reads. `result_metadata` is merged
+  into the tool result either way, under the core's own keys.
 
 ---
 

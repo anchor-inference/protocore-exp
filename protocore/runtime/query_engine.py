@@ -1079,10 +1079,17 @@ class QueryEngine:
         }
     )
 
-    #: Kept: nothing. Everything a host used to attach to an engine after
+    #: Kept: the session store's two hand-over methods, which
+    #: :meth:`OrderedHistoryPersister.attach
+    #: <protocore.runtime.history_persist.OrderedHistoryPersister.attach>`
+    #: installs. The store belongs to the session, not to one run, and a re-arm
+    #: that dropped them would make every later run of the engine persist
+    #: nothing without a word. Everything else a host used to attach after
     #: construction now lives on :attr:`run_state`, which the constructor
     #: declares and :data:`_REARM_PRESERVED_ATTRS` keeps.
-    _REARM_ATTACHED_KEPT: ClassVar[frozenset[str]] = frozenset()
+    _REARM_ATTACHED_KEPT: ClassVar[frozenset[str]] = frozenset(
+        {"persist_history_delta", "persist_session_history"}
+    )
 
     def __init__(
         self,

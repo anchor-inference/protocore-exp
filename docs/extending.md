@@ -508,6 +508,61 @@ the commit. Persist the `CompactionHold` that `CompactionHoldPolicy` returns
 after a failed or low-yield pass and ask `policy.holds(...)` before the next
 automatic one. Section texts and the rendering are yours; everything else is in
 [compaction](compaction.md#compacting-a-session).
+### Shape the memory tools
+
+**Use when** your memory has a taxonomy, fields or rules of its own — a
+category on every note, tags, subjects the operator does not want kept — and
+you want the core's `Remember` / `Recall` / `Forget` to carry them. Do not
+subclass the tools to re-implement `invoke`: the scope rules (which scope a
+call files under, which keys it may address, what an unscoped recall fans out
+to) are the core's, and a copy of them drifts. Four seams cover it.
+
+- **Extra fields** — pass a subclass of `RememberInput` / `RecallInput` as
+  `input_model=`. The schema the model sees is built from it. On `Remember`,
+  every field it adds is content-scanned like the text (the model wrote it)
+  and handed to the write policy in `MemoryWriteRequest.extra`.
+- **A write policy** — `write_policy=` takes an `IMemoryWritePolicy`. It is
+  asked after the content scan and the scope rules, with the write as it would
+  land, and answers `MemoryWriteVerdict.allow(kind=..., metadata=...,
+  source_refs=..., salience=...)` or `MemoryWriteVerdict.refuse(message)`. A
+  refusal is an error result carrying your message verbatim and your
+  `result_metadata`, and nothing reaches the store. Say in the message what was
+  refused, why and what to do instead: a model told only "blocked" tries again
+  in other words.
+- **Recall filters and display** — override `RecallTool.search_filters(payload)`
+  to pass extra keywords to your store's `search` (they go on the scoped search
+  and the default fan-out alike), and `render_hit(index, hit)` to show a hit
+  your way. Run every value taken from a record through `screen_recalled()`.
+  `RememberTool.describe_write(result, scope)` is the same hook for the line a
+  write returns.
+- **Provenance** — `record_provenance=True` stamps every write with a
+  `MemoryProvenance` built from what the loop vouches for (run, root run,
+  session, subagent, call id, time), never from the model's arguments. The
+  store must implement `IProvenanceMemory`; one that does not is refused when
+  the tool is built, not on the first write.
+
+```python
+class NoteInput(RememberInput):
+    topics: list[str] | None = Field(default=None, max_length=5)
+
+class OurPolicy:
+    async def review(self, request: MemoryWriteRequest) -> MemoryWriteVerdict:
+        if mentions_health(request.text):
+            return MemoryWriteVerdict.refuse("Not saved: health notes are not kept. ...")
+        return MemoryWriteVerdict.allow(metadata={"topics": request.extra["topics"] or infer(request.text)})
+
+tools = [
+    ForgetTool(store),
+    OurRecall(store, scanner=scanner, input_model=OurRecallInput),
+    RememberTool(store, scanner=scanner, input_model=NoteInput,
+                 write_policy=OurPolicy(), record_provenance=True),
+]
+```
+
+Keep the order `Forget`, `Recall`, `Remember` when you build the list
+yourself; it is the order `build_memory_tools` returns and the one the
+prompt-cache sort expects. Every seam is off by default: without them the tools
+behave exactly as before.
 
 ---
 

@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from protocore.contracts.events import payload_by_reference
 from protocore.contracts.types import Message, MessageRole, TextBlock
 from protocore.runtime.events import EventType
 from protocore.runtime.history_persist import HistoryDelta, HistoryPersister
@@ -228,3 +229,25 @@ def test_a_host_key_gives_a_tenant_one_rules_mark_across_processes(
     assert run.engine._tool_rules_mark == tool_rules_mark(run.engine.config.tenant_id, key=key)
     assert run.engine._tool_rules_mark != scenario().engine._tool_rules_mark
     assert "kkkk" not in repr(run.engine.config)
+
+
+async def test_a_store_keeps_the_surface_a_run_advertises_once_by_reference(
+    scenario: ScenarioFactory,
+) -> None:
+    run = scenario(tools=[ScriptedTool(tool_name="Note", description="record a note")])
+    run.llm.queue_response(text="the first answer")
+    run.llm.queue_response(text="the second answer")
+
+    await run.run("first")
+    run.engine.rearm()
+    await run.run("second")
+
+    first, second = (
+        payload_by_reference(evt.type.value, evt.payload) for evt in run.events_of(EventType.TOOL_SURFACE_ADVERTISED)
+    )
+    assert first is not None and second is not None
+    # One key for both advertisements of one surface, and only the described
+    # one may write it: the second carries names without descriptions.
+    assert first.digest == second.digest
+    assert first.complete and not second.complete
+    assert first.payload["tools"] == {"digest": first.digest, "count": 1}

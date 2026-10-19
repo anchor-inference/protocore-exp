@@ -55,9 +55,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, Self, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -164,6 +164,66 @@ class ScopeRef(BaseModel):
         return (self.scope.value, self.scope_key)
 
 
+#: Conventional (non-exhaustive, non-enforced) values of
+#: :attr:`MemoryProvenance.source_kind`. A host may use its own; these are the
+#: ones the core itself writes or that a reader can expect to understand.
+MEMORY_SOURCE_KINDS: tuple[str, ...] = (
+    "agent",
+    "operator",
+    "import",
+    "system",
+    "unknown",
+)
+
+
+class MemoryProvenance(BaseModel):
+    """Who or what wrote a memory, and from where.
+
+    Every field is optional and an absent one means *unknown*, never a guess:
+    a record carried over from an import without a timestamp keeps
+    ``observed_at=None`` rather than acquiring the freshness of the moment it
+    was copied, and a record written outside a run names no run. The store
+    keeps the value as given; it never fills one in.
+
+    It names the *write that last changed the record*: set on CREATE, replaced
+    on MERGE when the merging write carries one, left alone on SKIP. The
+    record's ``created_at`` still says when the fact first arrived, and
+    ``source_refs`` stays the additive list of evidence it was derived from.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    source_kind: str = Field(
+        default="unknown",
+        max_length=64,
+        description=(
+            "What kind of writer this was: conventionally one of "
+            ":data:`MEMORY_SOURCE_KINDS` — the agent through its tool, the "
+            "operator by hand, an import, or the system itself."
+        ),
+    )
+    run_id: str | None = Field(default=None, description="The run that wrote it.")
+    root_run_id: str | None = Field(
+        default=None,
+        description="The root of that run's tree, when the writer was a subagent.",
+    )
+    session_id: str | None = Field(default=None, description="The session the write was made in.")
+    subagent_id: str | None = Field(
+        default=None, description="The subagent that wrote it, when one did."
+    )
+    message_id: str | None = Field(
+        default=None,
+        description="The message the fact was taken from, when the writer knows it.",
+    )
+    tool_call_id: str | None = Field(
+        default=None, description="The tool call that wrote it, when one did."
+    )
+    observed_at: datetime | None = Field(
+        default=None,
+        description="When the writer observed the fact. ``None`` = not known.",
+    )
+
+
 class MemoryRecord(BaseModel):
     """A single typed memory.
 
@@ -233,6 +293,15 @@ class MemoryRecord(BaseModel):
             "from (e.g. ``CompactionSourceRef`` ids, file paths, run ids). Lets "
             "a recalled memory be traced back to evidence and dovetails with the "
             "grounding/citation discipline. Never invented by the store."
+        ),
+    )
+    provenance: MemoryProvenance | None = Field(
+        default=None,
+        description=(
+            "Who wrote the record and from where (see :class:`MemoryProvenance`). "
+            "``None`` for a record written by a store or a caller that does not "
+            "record provenance — including every record written before the "
+            "field existed, which therefore still loads."
         ),
     )
     salience: float = Field(
@@ -618,6 +687,187 @@ class IMemory(Protocol):
         ...
 
 
+@runtime_checkable
+class IProvenanceMemory(IMemory, Protocol):
+    """An :class:`IMemory` that also keeps who wrote each record.
+
+    A separate contract rather than a new keyword on :meth:`IMemory.write`,
+    because the core calls a store by keyword: a keyword added to the base
+    contract would make every store written before it fail its conformance
+    suite and raise ``TypeError`` on the first write. A store opts in by
+    accepting ``provenance``; a caller asks for it only when it knows the
+    store has (the memory tools check at construction, see
+    :class:`~protocore.tools.memory.RememberTool`).
+    """
+
+    async def write(
+        self,
+        tenant_id: str,
+        scope: MemoryScope,
+        scope_key: str,
+        text: str,
+        *,
+        kind: str = "fact",
+        metadata: dict[str, Any] | None = None,
+        source_refs: Sequence[str] | None = None,
+        salience: float = 0.0,
+        similarity_threshold: float | None = None,
+        max_records_per_scope: int | None = None,
+        expected_version: int | None = None,
+        provenance: MemoryProvenance | None = None,
+    ) -> MemoryWriteResult:
+        """:meth:`IMemory.write`, keeping ``provenance`` on the surviving record.
+
+        * CREATE stores ``provenance`` as given (``None`` stays ``None``).
+        * MERGE replaces the record's provenance with ``provenance`` when one
+          is given, and keeps the old one when not: the record names the last
+          write that changed it.
+        * SKIP leaves the record untouched. A different ``provenance`` alone
+          is not new information — the same fact restated by another run must
+          stay a SKIP, or every re-save would bump ``version``.
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Write policy seam (classify or refuse a write before it lands)
+# ---------------------------------------------------------------------------
+
+
+class MemoryWriteRequest(BaseModel):
+    """A memory write as the ``Remember`` tool is about to make it.
+
+    Handed to an :class:`IMemoryWritePolicy` after the content scan and the
+    scope rules have passed, so the policy decides about the write that would
+    actually land — the resolved scope and key, not what the model asked for —
+    and never about one the core would have refused anyway.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    tenant_id: str
+    scope: MemoryScope
+    scope_key: str
+    text: str
+    kind: str
+    kind_given: bool = Field(
+        description=(
+            "Whether the caller named ``kind``. ``False`` means ``kind`` is the "
+            "default, so a policy that infers a category knows it may replace it."
+        ),
+    )
+    extra: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "The fields the tool's input model adds to the core's, by name, as "
+            "the model sent them (``None`` for one it left out). Model-authored "
+            "and already content-scanned, never trusted for anything else."
+        ),
+    )
+    provenance: MemoryProvenance | None = Field(
+        default=None,
+        description="Who is writing, when the tool records provenance.",
+    )
+
+
+class MemoryWriteVerdict(BaseModel):
+    """What an :class:`IMemoryWritePolicy` decided about one write.
+
+    Either a refusal, whose ``message`` is the whole of what the model reads
+    (so it should say what was refused, why, and what to do instead), or an
+    allowance that may amend the write. Amendments come from the host and are
+    trusted as such: they are not content-scanned again.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    refused: bool = False
+    message: str = Field(
+        default="",
+        description="The refusal the model reads. Required when ``refused``.",
+    )
+    kind: str | None = Field(
+        default=None,
+        description="A replacement ``kind`` for the write; ``None`` keeps the request's.",
+    )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Metadata to store with the write.",
+    )
+    source_refs: list[str] = Field(
+        default_factory=list,
+        description="Source references to store with the write.",
+    )
+    salience: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="A salience for the write; ``None`` keeps the default.",
+    )
+    result_metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Merged into the tool result's metadata, refused or not, for the "
+            "host's own readers of the result."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _refusal_says_why(self) -> Self:
+        # A bare refusal reads to the model as "blocked", and a model told
+        # only that tends to try again in other words.
+        if self.refused and not self.message.strip():
+            raise ValueError("a refused memory write needs a message for the model")
+        return self
+
+    @classmethod
+    def allow(
+        cls,
+        *,
+        kind: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        source_refs: Sequence[str] | None = None,
+        salience: float | None = None,
+        result_metadata: dict[str, Any] | None = None,
+    ) -> MemoryWriteVerdict:
+        """Let the write land, amended as given."""
+        return cls(
+            kind=kind,
+            metadata=dict(metadata or {}),
+            source_refs=list(source_refs or ()),
+            salience=salience,
+            result_metadata=dict(result_metadata or {}),
+        )
+
+    @classmethod
+    def refuse(
+        cls, message: str, *, result_metadata: dict[str, Any] | None = None
+    ) -> MemoryWriteVerdict:
+        """Refuse the write; ``message`` is what the model reads."""
+        return cls(refused=True, message=message, result_metadata=dict(result_metadata or {}))
+
+
+@runtime_checkable
+class IMemoryWritePolicy(Protocol):
+    """The host's say over a memory write before it reaches the store.
+
+    The place for what is the host's own and not the core's: a taxonomy to
+    classify a note into (possibly by asking a model), subjects the operator
+    has not allowed in long-term memory, a field the host's input model adds
+    that has to become metadata. Optional: the ``Remember`` tool without one
+    writes exactly as it always did.
+
+    Asked once per write, after the content scan and scope resolution and
+    before the store. A raise is not a refusal: it propagates like any tool
+    failure, so a policy that wants the model to read a refusal returns
+    :meth:`MemoryWriteVerdict.refuse`.
+    """
+
+    async def review(self, request: MemoryWriteRequest) -> MemoryWriteVerdict:
+        """Decide about ``request``: allow it (possibly amended) or refuse it."""
+        ...
+
+
 # ---------------------------------------------------------------------------
 # Untrusted-content scan seam (memory text is untrusted input)
 # ---------------------------------------------------------------------------
@@ -690,17 +940,23 @@ __all__ = [
     "DEFAULT_RECALL_SCOPES",
     "MEMORY_BLOCKED_PLACEHOLDER",
     "MEMORY_KINDS",
+    "MEMORY_SOURCE_KINDS",
     "IMemory",
     "IMemoryContentScanner",
+    "IMemoryWritePolicy",
+    "IProvenanceMemory",
     "MemoryConflictError",
     "MemoryError",
     "MemoryHit",
     "MemoryNotFoundError",
+    "MemoryProvenance",
     "MemoryRecord",
     "MemoryScope",
     "MemoryStoreUnavailableError",
     "MemoryWriteDecision",
+    "MemoryWriteRequest",
     "MemoryWriteResult",
+    "MemoryWriteVerdict",
     "ScopeRef",
     "blocked_memory_placeholder",
 ]

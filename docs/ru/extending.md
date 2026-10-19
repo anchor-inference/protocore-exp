@@ -519,6 +519,63 @@ if await commit_session_compaction(engine, result) is None:
 `policy.holds(...)` перед следующим автоматическим. Тексты разделов и
 отрисовка — ваши; всё остальное — в
 [компакции](compaction.md#компакция-сессии).
+### Настройка инструментов памяти
+
+**Используйте, когда** у вашей памяти свои таксономия, поля или правила —
+категория у каждой заметки, теги, темы, которые оператор не хочет хранить, — и
+вы хотите, чтобы их несли `Remember` / `Recall` / `Forget` ядра. Не наследуйтесь
+от инструментов ради переписывания `invoke`: правила scope (под какой scope
+ложится вызов, какие ключи он может адресовать, на что раскрывается recall без
+scope) принадлежат ядру, а их копия расходится. Хватает четырёх швов.
+
+- **Дополнительные поля** — передайте подкласс `RememberInput` / `RecallInput`
+  как `input_model=`. Схема, которую видит модель, строится по нему. В
+  `Remember` каждое добавленное поле проверяется сканером так же, как текст
+  (его написала модель), и передаётся политике записи в
+  `MemoryWriteRequest.extra`.
+- **Политика записи** — `write_policy=` принимает `IMemoryWritePolicy`. Её
+  спрашивают после проверки содержимого и правил scope, о записи такой, какой
+  она ляжет, и она отвечает `MemoryWriteVerdict.allow(kind=..., metadata=...,
+  source_refs=..., salience=...)` или `MemoryWriteVerdict.refuse(message)`.
+  Отказ — это результат-ошибка с вашим сообщением дословно и вашими
+  `result_metadata`, и до хранилища ничего не доходит. Скажите в сообщении, что
+  отвергнуто, почему и что делать вместо этого: модель, которой сказали только
+  «заблокировано», пробует снова другими словами.
+- **Фильтры и вид recall** — переопределите
+  `RecallTool.search_filters(payload)`, чтобы передать в `search` вашего
+  хранилища дополнительные ключевые аргументы (они идут и в поиск с явным scope,
+  и в раскрытие по умолчанию), и `render_hit(index, hit)`, чтобы показать
+  находку по-своему. Каждое значение из записи пропускайте через
+  `screen_recalled()`. `RememberTool.describe_write(result, scope)` — такой же
+  крючок для строки, которую возвращает запись.
+- **Происхождение** — `record_provenance=True` помечает каждую запись
+  `MemoryProvenance`, собранным из того, за что ручается цикл (прогон, корневой
+  прогон, сессия, субагент, id вызова, время), и никогда из аргументов модели.
+  Хранилище обязано реализовать `IProvenanceMemory`; не реализующее
+  отвергается при сборке инструмента, а не на первой записи.
+
+```python
+class NoteInput(RememberInput):
+    topics: list[str] | None = Field(default=None, max_length=5)
+
+class OurPolicy:
+    async def review(self, request: MemoryWriteRequest) -> MemoryWriteVerdict:
+        if mentions_health(request.text):
+            return MemoryWriteVerdict.refuse("Not saved: health notes are not kept. ...")
+        return MemoryWriteVerdict.allow(metadata={"topics": request.extra["topics"] or infer(request.text)})
+
+tools = [
+    ForgetTool(store),
+    OurRecall(store, scanner=scanner, input_model=OurRecallInput),
+    RememberTool(store, scanner=scanner, input_model=NoteInput,
+                 write_policy=OurPolicy(), record_provenance=True),
+]
+```
+
+Собирая список сами, сохраняйте порядок `Forget`, `Recall`, `Remember`: его
+возвращает `build_memory_tools` и его ожидает сортировка ради кэша промпта.
+Каждый шов по умолчанию выключен: без них инструменты ведут себя ровно как
+раньше.
 
 ---
 

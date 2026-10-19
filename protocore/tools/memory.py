@@ -49,6 +49,8 @@ so the dispatcher surfaces a corrective message.)
 """
 from __future__ import annotations
 
+import inspect
+from datetime import UTC, datetime
 from typing import Any, ClassVar, Final
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -57,8 +59,14 @@ from protocore.contracts.memory import (
     DEFAULT_RECALL_SCOPES,
     IMemory,
     IMemoryContentScanner,
+    IMemoryWritePolicy,
+    MemoryHit,
+    MemoryProvenance,
     MemoryScope,
     MemoryStoreUnavailableError,
+    MemoryWriteRequest,
+    MemoryWriteResult,
+    MemoryWriteVerdict,
     blocked_memory_placeholder,
 )
 from protocore.contracts.tools import Tool, ToolContext, has_metadata, read_metadata
@@ -420,11 +428,64 @@ class RememberTool(Tool):
         "память запомнить запомни сохранить заметка факт"
     )
 
-    def __init__(self, store: IMemory, *, scanner: IMemoryContentScanner | None = None) -> None:
+    def __init__(
+        self,
+        store: IMemory,
+        *,
+        scanner: IMemoryContentScanner | None = None,
+        record_provenance: bool = False,
+        provenance_source: str = "agent",
+        input_model: type[RememberInput] = RememberInput,
+        write_policy: IMemoryWritePolicy | None = None,
+    ) -> None:
+        """Bind the tool to ``store``.
+
+        ``input_model`` is the argument schema the model is shown; a subclass
+        of :class:`RememberInput` adds fields (tags, a category, a source
+        link) without re-implementing the tool. The fields it adds are
+        content-scanned like the text, since the model wrote them, and handed
+        to ``write_policy`` as :attr:`MemoryWriteRequest.extra`.
+
+        ``write_policy`` is asked about every write that passed the scan and
+        the scope rules, and may refuse it or amend its kind, metadata, source
+        references and salience (see
+        :class:`~protocore.contracts.memory.IMemoryWritePolicy`). ``None``
+        writes as the tool always has.
+
+        ``record_provenance`` makes every write carry a
+        :class:`~protocore.contracts.memory.MemoryProvenance` naming the run,
+        session and call that made it, under ``provenance_source``. It needs a
+        store that accepts the ``provenance`` keyword
+        (:class:`~protocore.contracts.memory.IProvenanceMemory`); asking for it
+        from one that does not raises ``TypeError`` here, at wiring, rather
+        than on the first write inside a run. Off by default, so a store
+        written against :class:`IMemory` alone is called exactly as before.
+        """
+        if not (isinstance(input_model, type) and issubclass(input_model, RememberInput)):
+            raise TypeError("input_model must be RememberInput or a subclass of it")
+        if record_provenance and not _accepts_keyword(store.write, "provenance"):
+            raise TypeError(
+                f"{type(store).__name__}.write does not accept 'provenance'; "
+                "record_provenance needs an IProvenanceMemory store"
+            )
         self._store = store
         # : optional untrusted-content scanner. The host injects the
         # concrete threat-pattern scanner; pure-core callers pass None (no scan).
         self._scanner = scanner
+        self._record_provenance = record_provenance
+        self._provenance_source = provenance_source
+        self._input_model = input_model
+        self._write_policy = write_policy
+
+    @property
+    def records_provenance(self) -> bool:
+        """Whether writes made through this tool carry their provenance."""
+        return self._record_provenance
+
+    @property
+    def write_policy(self) -> IMemoryWritePolicy | None:
+        """The policy asked about every write, or ``None``."""
+        return self._write_policy
 
     @property
     def name(self) -> str:
@@ -432,17 +493,30 @@ class RememberTool(Tool):
 
     @property
     def definition(self) -> ToolDefinition:
-        return _definition_from_model(self.name_, self.description_, RememberInput)
+        return _definition_from_model(self.name_, self.description_, self._input_model)
+
+    def describe_write(self, result: MemoryWriteResult, scope: MemoryScope) -> str:
+        """The line the model reads about a write that landed.
+
+        Overridable, so a host that stores more on a record (tags, a
+        category) can show it without re-implementing :meth:`invoke`.
+        """
+        return (
+            f"{result.decision.value} memory {result.record.id} "
+            f"(scope={scope.value}; kind={result.record.kind})"
+        )
 
     async def invoke(
         self,
         context: ToolContext,
         arguments: dict[str, Any],
     ) -> ToolResult:
-        payload = RememberInput.model_validate(arguments)
+        payload = self._input_model.model_validate(arguments)
         call_id = _call_id(context)
         if _memory_disabled(context):
             return _memory_disabled_error(call_id)
+        extra_names = set(type(payload).model_fields) - set(RememberInput.model_fields)
+        extra = payload.model_dump(include=extra_names) if extra_names else {}
         # Scan the untrusted text BEFORE it is persisted; a flagged write is
         # refused with a corrective error so poison never reaches the store
         # (and therefore can never be re-injected on a later recall).
@@ -451,38 +525,83 @@ class RememberTool(Tool):
         # snapshot, so a benign text + malicious kind would otherwise bypass
         # both the write rejection and the recall [BLOCKED] placeholder.
         # Scan both; reject if EITHER trips.
+        # A host's extra fields are model-authored too, and a host commonly
+        # renders them back on recall (tags beside the text), so they pass the
+        # same screen.
         if self._scanner is not None:
-            threat = self._scanner.scan(payload.text) or self._scanner.scan(
-                payload.kind
+            threat = next(
+                (
+                    hit
+                    for value in (payload.text, payload.kind, *_scannable_strings(extra))
+                    if (hit := self._scanner.scan(value))
+                ),
+                None,
             )
             if threat:
                 return _blocked_write_error(call_id, threat)
         scope, scope_key = _resolve_scope(context, payload.scope, payload.scope_key)
+        provenance = (
+            memory_provenance(context, source_kind=self._provenance_source)
+            if self._record_provenance
+            else None
+        )
+        verdict = MemoryWriteVerdict()
+        if self._write_policy is not None:
+            verdict = await self._write_policy.review(
+                MemoryWriteRequest(
+                    tenant_id=context.tenant_id,
+                    scope=scope,
+                    scope_key=scope_key,
+                    text=payload.text,
+                    kind=payload.kind,
+                    kind_given="kind" in payload.model_fields_set,
+                    extra=extra,
+                    provenance=provenance,
+                )
+            )
+            if verdict.refused:
+                return ToolResult(
+                    tool_call_id=call_id,
+                    content=verdict.message,
+                    is_error=True,
+                    metadata=dict(verdict.result_metadata),
+                )
+        # The keyword is passed only when asked for: a store written against
+        # the base contract has no such parameter and would raise on it.
+        optional: dict[str, Any] = {"provenance": provenance} if provenance is not None else {}
         try:
             result = await self._store.write(
                 context.tenant_id,
                 scope,
                 scope_key,
                 payload.text,
-                kind=payload.kind,
+                kind=verdict.kind or payload.kind,
+                metadata=verdict.metadata or None,
+                source_refs=verdict.source_refs or None,
+                salience=verdict.salience if verdict.salience is not None else 0.0,
                 similarity_threshold=_resolved_similarity_threshold(context),
                 max_records_per_scope=_resolved_max_records_per_scope(context),
+                **optional,
             )
         except MemoryStoreUnavailableError as exc:
             return _non_fatal_error(call_id, f"memory unavailable: {exc}")
+        # The core's own keys win over the policy's: a reader of these names
+        # must be able to trust that they mean what the core says they mean.
+        metadata: dict[str, Any] = {
+            **verdict.result_metadata,
+            "memory_id": result.record.id,
+            "decision": result.decision.value,
+            "scope": scope.value,
+            "scope_key": scope_key,
+            "version": result.record.version,
+            "kind": result.record.kind,
+        }
+        if result.record.provenance is not None:
+            metadata["provenance"] = result.record.provenance.model_dump(mode="json")
         return ToolResult(
             tool_call_id=call_id,
-            content=(
-                f"{result.decision.value} memory {result.record.id} "
-                f"(scope={scope.value}; kind={result.record.kind})"
-            ),
-            metadata={
-                "memory_id": result.record.id,
-                "decision": result.decision.value,
-                "scope": scope.value,
-                "scope_key": scope_key,
-                "version": result.record.version,
-            },
+            content=self.describe_write(result, scope),
+            metadata=metadata,
         )
 
 
@@ -559,13 +678,28 @@ class RecallTool(Tool):
         "память вспомнить вспомни найти поиск сохранённые факты"
     )
 
-    def __init__(self, store: IMemory, *, scanner: IMemoryContentScanner | None = None) -> None:
+    def __init__(
+        self,
+        store: IMemory,
+        *,
+        scanner: IMemoryContentScanner | None = None,
+        input_model: type[RecallInput] = RecallInput,
+    ) -> None:
+        """Bind the tool to ``store``.
+
+        ``input_model`` is the argument schema the model is shown; a subclass
+        of :class:`RecallInput` adds filters, which :meth:`search_filters`
+        turns into extra keywords for the store's ``search``.
+        """
+        if not (isinstance(input_model, type) and issubclass(input_model, RecallInput)):
+            raise TypeError("input_model must be RecallInput or a subclass of it")
         self._store = store
         # : optional scanner applied to RECALLED rows (defense against a
         # poisoned-on-disk record the write-side scan never saw — e.g. a sister
         # session sharing a non-session scope). A flagged hit is replaced by a
         # [BLOCKED] placeholder rather than rendered verbatim back into context.
         self._scanner = scanner
+        self._input_model = input_model
 
     @property
     def name(self) -> str:
@@ -573,14 +707,53 @@ class RecallTool(Tool):
 
     @property
     def definition(self) -> ToolDefinition:
-        return _definition_from_model(self.name_, self.description_, RecallInput)
+        return _definition_from_model(self.name_, self.description_, self._input_model)
+
+    def search_filters(self, payload: RecallInput) -> dict[str, Any]:
+        """Extra keywords for the store's ``search``, from the host's own fields.
+
+        Empty by default. A host whose store filters on more than
+        :meth:`IMemory.search` names (a tag, a category of its own) overrides
+        this, and the keywords are passed on every search the call makes —
+        the scoped one and the default fan-out alike. The scope rules are the
+        core's either way.
+        """
+        return {}
+
+    def render_hit(self, index: int, hit: MemoryHit) -> str:
+        """The line the model reads for one hit; ``index`` counts from 1.
+
+        Overridable. Anything taken from the record goes through
+        :meth:`screen_recalled` first: it is untrusted and re-enters context.
+        The store id is shown so the model can hand it straight to ``Forget``.
+        """
+        return (
+            f"[{index}] id={hit.record.id} "
+            f"({hit.record.scope.value}/{self.screen_recalled(hit.record.kind)}) "
+            f"{self.screen_recalled(hit.record.text)}"
+        )
+
+    def screen_recalled(self, value: str) -> str:
+        """``value`` from a recalled record, or a [BLOCKED] placeholder.
+
+        Any field of a record rendered back to the model can carry an
+        injection a write-side scan never saw, so every one of them is
+        screened, not only the text. The raw value is never echoed. No
+        scanner wired → the value passes through unchanged.
+        """
+        if self._scanner is None:
+            return value
+        threat = self._scanner.scan(value)
+        if threat:
+            return blocked_memory_placeholder(value, reason=threat)
+        return value
 
     async def invoke(
         self,
         context: ToolContext,
         arguments: dict[str, Any],
     ) -> ToolResult:
-        payload = RecallInput.model_validate(arguments)
+        payload = self._input_model.model_validate(arguments)
         call_id = _call_id(context)
         if _memory_disabled(context):
             return _memory_disabled_error(call_id)
@@ -593,6 +766,7 @@ class RecallTool(Tool):
         # ``session`` must not recall ``global``/``user`` rows just because the
         # store's ``DEFAULT_RECALL_SCOPES`` includes them.
         kinds = [payload.kind] if payload.kind else None
+        filters = self.search_filters(payload)
         try:
             if payload.scope is not None:
                 scope, scope_key = _resolve_scope(
@@ -605,6 +779,7 @@ class RecallTool(Tool):
                     scope_keys={scope: scope_key},
                     kinds=kinds,
                     limit=payload.limit,
+                    **filters,
                 )
             else:
                 recall_scopes = _allowed_recall_scopes(context)
@@ -627,6 +802,7 @@ class RecallTool(Tool):
                     scope_keys=_ambient_scope_keys(context),
                     kinds=kinds,
                     limit=payload.limit,
+                    **filters,
                 )
         except MemoryStoreUnavailableError as exc:
             return _non_fatal_error(call_id, f"memory unavailable: {exc}")
@@ -641,12 +817,7 @@ class RecallTool(Tool):
         # straight to ``forget`` — the display index alone is not addressable
         # (forget deletes by id, tenant-scoped). Same id ``remember`` already
         # prints, so this exposes nothing new.
-        lines = [
-            f"[{i + 1}] id={h.record.id} "
-            f"({h.record.scope.value}/{self._safe_recall_kind(h.record.kind)}) "
-            f"{self._safe_recall_text(h.record.text)}"
-            for i, h in enumerate(hits)
-        ]
+        lines = [self.render_hit(i + 1, h) for i, h in enumerate(hits)]
         return ToolResult(
             tool_call_id=call_id,
             content="\n".join(lines),
@@ -665,12 +836,7 @@ class RecallTool(Tool):
  re-enter context, while the model still sees that an entry was filtered.
  No scanner wired → text passes through unchanged.
  """
-        if self._scanner is None:
-            return text
-        threat = self._scanner.scan(text)
-        if threat:
-            return blocked_memory_placeholder(text, reason=threat)
-        return text
+        return self.screen_recalled(text)
 
     def _safe_recall_kind(self, kind: str) -> str:
         """Return ``kind`` for a recalled row, or a [BLOCKED] placeholder if it
@@ -682,12 +848,7 @@ class RecallTool(Tool):
         through the kind field. The raw kind is replaced (never echoed). No
         scanner wired → kind passes through unchanged.
         """
-        if self._scanner is None:
-            return kind
-        threat = self._scanner.scan(kind)
-        if threat:
-            return blocked_memory_placeholder(kind, reason=threat)
-        return kind
+        return self.screen_recalled(kind)
 
 
 # ---------------------------------------------------------------------------
@@ -871,6 +1032,56 @@ def _blocked_write_error(call_id: str, threat: str) -> ToolResult:
     )
 
 
+def memory_provenance(context: ToolContext, *, source_kind: str = "agent") -> MemoryProvenance:
+    """The provenance of a write made from inside a tool call.
+
+    Read from what the loop already vouches for: the run and session on the
+    context, the call id the dispatcher stamped, and the run-tree origin when
+    the call carries one (otherwise the run state's root, for a subagent whose
+    own id names no durable row). Nothing is taken from the model's
+    arguments, so a model cannot claim another writer. The message the fact
+    came from is not known here and stays ``None``.
+    """
+    origin = context.evidence.origin if context.evidence is not None else None
+    root_run_id = origin.root_run_id if origin is not None else None
+    if root_run_id is None and context.run_state is not None:
+        root_run_id = context.run_state.root_run_id
+    raw_call_id = read_metadata(context, TOOL_CALL_ID_CONTEXT_KEY)
+    return MemoryProvenance(
+        source_kind=source_kind,
+        run_id=context.run_id,
+        root_run_id=root_run_id,
+        session_id=context.session_id or None,
+        subagent_id=origin.subagent_id if origin is not None else None,
+        tool_call_id=str(raw_call_id) if raw_call_id else None,
+        observed_at=datetime.now(UTC),
+    )
+
+
+def _scannable_strings(values: dict[str, Any]) -> list[str]:
+    """The strings among a host's extra fields: plain ones and lists of them."""
+    found: list[str] = []
+    for value in values.values():
+        if isinstance(value, str):
+            found.append(value)
+        elif isinstance(value, (list, tuple)):
+            found.extend(item for item in value if isinstance(item, str))
+    return found
+
+
+def _accepts_keyword(func: Any, name: str) -> bool:
+    """Whether ``func`` can be called with the keyword ``name``."""
+    try:
+        parameters = inspect.signature(func).parameters.values()
+    except (TypeError, ValueError):  # pragma: no cover - builtins without signatures
+        return False
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        or (parameter.name == name and parameter.kind is not inspect.Parameter.POSITIONAL_ONLY)
+        for parameter in parameters
+    )
+
+
 def _call_id(context: ToolContext) -> str:
     """Stable per-invocation id for the ToolResult.
 
@@ -915,6 +1126,8 @@ def build_memory_tools(
     store: IMemory,
     *,
     scanner: IMemoryContentScanner | None = None,
+    record_provenance: bool = False,
+    write_policy: IMemoryWritePolicy | None = None,
 ) -> list[Tool]:
     """Construct the three memory tools bound to ``store``.
 
@@ -926,11 +1139,20 @@ def build_memory_tools(
  into ``remember`` (scan-on-write) and ``recall`` (scan-on-read → [BLOCKED]
  placeholder). ``forget`` takes no text so it needs no scanner. When ``None``
  no scan runs (pure-core callers / tests).
+
+ ``record_provenance`` and ``write_policy`` are handed to
+ :class:`RememberTool`; see there. A host that also adds fields builds the
+ tools itself, in this order.
  """
     return [
         ForgetTool(store),
         RecallTool(store, scanner=scanner),
-        RememberTool(store, scanner=scanner),
+        RememberTool(
+            store,
+            scanner=scanner,
+            record_provenance=record_provenance,
+            write_policy=write_policy,
+        ),
     ]
 
 
@@ -956,4 +1178,5 @@ __all__ = [
     "RememberInput",
     "RememberTool",
     "build_memory_tools",
+    "memory_provenance",
 ]

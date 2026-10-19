@@ -55,11 +55,19 @@ batch) is promising on that write's behalf, and owes the engine a
 :meth:`~protocore.runtime.query_engine.QueryEngine.forget_persisted_history`
 call if the deferred write is dropped or fails; without it, the messages it
 dropped are never offered again.
+
+:class:`OrderedHistoryPersister` is that deferred store, written once: it
+takes an ``async`` write, runs the writes of one engine one at a time in the
+order they were handed over, keeps the promise above on every failure, and
+offers :meth:`OrderedHistoryPersister.flush` as the point at which the store is
+known to hold everything it was given.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -68,7 +76,17 @@ from protocore.contracts.types import Message
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from protocore.runtime.query_engine import QueryEngine
 
-__all__ = ["HistoryDelta", "HistoryPersister", "history_rewrite", "persist_history"]
+__all__ = [
+    "HistoryDelta",
+    "HistoryPersistError",
+    "HistoryPersister",
+    "HistoryWrite",
+    "OrderedHistoryPersister",
+    "history_rewrite",
+    "persist_history",
+]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -120,6 +138,172 @@ class HistoryPersister:
     def persist_history_delta(self, engine: QueryEngine, delta: HistoryDelta) -> None:
         """Write what changed. Falls back to the full write."""
         self.persist_session_history(engine)
+
+
+#: The store's own write: given what changed, make it durable, and raise if it
+#: did not land.
+HistoryWrite = Callable[[HistoryDelta], Awaitable[None]]
+
+
+class HistoryPersistError(RuntimeError):
+    """The store does not hold everything it was handed.
+
+    Raised by :meth:`OrderedHistoryPersister.flush` when the last write that
+    could have repaired the store failed too. The engine has already been told
+    (:meth:`~protocore.runtime.query_engine.QueryEngine.forget_persisted_history`),
+    so its next hand-over is a whole rewrite; what this error says is that,
+    until then, the stored history is short. The store's own exception is the
+    ``__cause__``.
+    """
+
+
+class OrderedHistoryPersister(HistoryPersister):
+    """A store's write deferred off the loop, in order, with a flush.
+
+    The hand-over returns as soon as the write is queued, so a round does not
+    wait for the database. What the class adds over a bare task is the part
+    that is easy to get wrong:
+
+    * **Order.** Writes run one at a time, each after the one handed over
+      before it, whatever its outcome. Without that, a failed write could have
+      its repair overtaken by an append queued behind it, and the append would
+      land on rows that are not there.
+    * **The promise on failure.** A write that raises (or is cancelled) makes
+      the engine forget what it was told at once, from inside the failing
+      write rather than from a done-callback a loop iteration later, by which
+      time the next round could already have been handed over as an append.
+    * **Repair.** While the store is behind, every queued write — including
+      appends handed over before the failure was known — is written whole
+      instead, from the engine's live history when that is at least as long as
+      the snapshot it was handed. If nothing else is queued, one repair write
+      is, so a failure in the last round of a run still gets written. A repair
+      that fails is not repeated: a store refusing every write is retried by
+      the engine's next hand-over, not in a loop here.
+
+    **Durability.** Returning from a hand-over means *queued*, not *landed*.
+    :meth:`flush` is the barrier: once it returns, every history handed over
+    before it was called has landed. Call it when the run reaches a terminal
+    state and before the session moves to another process; it raises
+    :class:`HistoryPersistError` if the store is still behind. Writes are
+    process-local tasks: a crash before the flush loses what was queued, and
+    the next run's first hand-over is a rewrite (an engine that never handed
+    anything over trusts nothing), which is what makes that loss recoverable.
+
+    The write is the store's only part. It is ``async``, is given a
+    :class:`HistoryDelta`, writes ``delta.history`` whole when
+    ``delta.rewritten`` and ``delta.appended`` otherwise, and raises when it
+    did not land. Hand-overs need a running event loop. One instance serves
+    one engine at a time; :meth:`attach` installs it.
+    """
+
+    def __init__(self, write: HistoryWrite, *, name: str = "history-persist") -> None:
+        self._write = write
+        self._name = name
+        self._tail: asyncio.Task[None] | None = None
+        self._repair: asyncio.Task[None] | None = None
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._behind = False
+        self._error: BaseException | None = None
+
+    def attach(self, engine: QueryEngine) -> None:
+        """Make ``engine`` hand its history to this persister."""
+        engine.persist_session_history = self.persist_session_history  # type: ignore[attr-defined]
+        engine.persist_history_delta = self.persist_history_delta  # type: ignore[attr-defined]
+
+    @property
+    def pending(self) -> int:
+        """Writes queued or running."""
+        return len(self._tasks)
+
+    @property
+    def behind(self) -> bool:
+        """Whether a write was lost and nothing has written the history whole since."""
+        return self._behind
+
+    def persist_session_history(self, engine: QueryEngine) -> None:
+        """Queue a whole write of the engine's history."""
+        self._enqueue(engine, _whole(tuple(engine.history), engine.session_state_changed))
+
+    def persist_history_delta(self, engine: QueryEngine, delta: HistoryDelta) -> None:
+        """Queue ``delta`` behind every write handed over before it."""
+        self._enqueue(engine, delta)
+
+    async def flush(self) -> None:
+        """Wait until every queued write has finished; raise if the store is behind."""
+        while self._tail is not None and not self._tail.done():
+            # A failing write queues its repair before it finishes, so a tail
+            # that is done is the last write there is.
+            await asyncio.wait([self._tail])
+        if self._behind:
+            raise HistoryPersistError(
+                "the session store is missing history it was handed; "
+                "the engine's next hand-over rewrites it whole"
+            ) from self._error
+
+    def cancel(self) -> None:
+        """Cancel every queued write, for a shutdown that cannot wait for them.
+
+        The store is then behind, and the engine is told so by each cancelled
+        write; :meth:`flush` afterwards raises :class:`HistoryPersistError`.
+        """
+        for task in list(self._tasks):
+            task.cancel()
+
+    def _enqueue(self, engine: QueryEngine, delta: HistoryDelta, *, repair: bool = False) -> asyncio.Task[None]:
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(self._run(engine, delta, self._tail, repair), name=self._name)
+        self._tail = task
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+    async def _run(
+        self,
+        engine: QueryEngine,
+        delta: HistoryDelta,
+        prior: asyncio.Task[None] | None,
+        repair: bool,
+    ) -> None:
+        try:
+            if prior is not None and not prior.done():
+                # Its outcome is its own; this waits only for its turn.
+                await asyncio.wait([prior])
+            if repair and not self._behind:
+                return  # a hand-over queued behind the failure already wrote it whole
+            if self._behind:
+                live = tuple(engine.history)
+                history = live if len(live) >= len(delta.history) else delta.history
+                delta = _whole(history, delta.session_state_changed)
+            await self._write(delta)
+        except asyncio.CancelledError as exc:
+            self._lost(engine, exc, schedule_repair=False)
+            raise
+        except Exception as exc:
+            logger.warning("session history write failed; the next write rewrites it whole", exc_info=True)
+            self._lost(engine, exc, schedule_repair=not repair)
+            return
+        if delta.rewritten:
+            self._behind = False
+            self._error = None
+
+    def _lost(self, engine: QueryEngine, exc: BaseException, *, schedule_repair: bool) -> None:
+        self._behind = True
+        self._error = exc
+        engine.forget_persisted_history()
+        if not schedule_repair or (self._repair is not None and not self._repair.done()):
+            return
+        self._repair = self._enqueue(engine, _whole(tuple(engine.history), False), repair=True)
+
+
+def _whole(history: tuple[Message, ...], state_changed: bool) -> HistoryDelta:
+    """A delta that replaces what the store holds with ``history``."""
+    return HistoryDelta(
+        history=history,
+        appended=(),
+        persisted_through=0,
+        rewritten=True,
+        session_state_changed=state_changed,
+    )
 
 
 def persist_history(engine: QueryEngine) -> None:
