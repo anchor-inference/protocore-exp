@@ -228,6 +228,15 @@ model asked to judge. The host supplies that adapter, the loop calls its 3-arg
 permission gate and around tool dispatch, and it fails closed there for the
 same reason: an executor that could not be reached did not authorise anything.
 
+At `post_tool_use` it is asked once for every call that produces a result,
+failures included: a raised exception, a timeout, an unknown tool, a refusal
+and bad arguments reach it with `is_error=True` and an `error_kind`, and a
+`MODIFY` of `tool_output` is applied there exactly as on a success, before the
+text reaches the history, the events or the next request. A redaction hook
+therefore covers an exception message too. A hook raising there is logged and
+ignored, since the call has already happened. The payload is described in
+[Tools](tools.md#the-post_tool_use-payload).
+
 `tool_execute` is the coordinate the tool dispatcher wraps its invocation in,
 and the only place an `around` registration straddles a call: the handler is
 entered before the tool runs and resumes after it returned, so one handler

@@ -25,7 +25,9 @@ emitting it. Concerns:
  start**, with a payload naming the transport and describing how it
  was brought up. The dispatcher here cannot tell a cold start from a
  warm one, so any emission of its own would be double-emit noise.
-* ``PostToolUse`` hook — fire-and-await; may rewrite the output.
+* ``PostToolUse`` hook — fire-and-await; may rewrite the output. Asked
+ once for every call that produces a result, the failures the dispatcher
+ writes itself included, so a redaction hook sees an exception message too.
 
 The dispatcher is **agnostic to the tool implementation** — it depends
 only on :class:`~protocore.contracts.tools.Tool.invoke`. Tests inject a
@@ -54,7 +56,7 @@ from collections.abc import (
     Iterable,
     Mapping,
 )
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Final
 
@@ -716,6 +718,14 @@ class DispatchOutcome:
  stored it anywhere.
  path:
  The workspace path this result is a view of, if it is a view of one.
+ replay_message:
+ The failure text as the tool or the dispatcher wrote it, set only when
+ the ``post_tool_use`` hook rewrote it. The parallel path re-keys the
+ consecutive-error streak from the words the serial path keyed it on, so
+ it needs the unmasked text; carried in ``metadata`` it would follow the
+ result into the transcript and every snapshot, which is exactly what
+ the hook rewrote it to prevent. It lives on this object and dies with
+ the turn.
  """
 
     tool_call: ToolCall
@@ -735,6 +745,7 @@ class DispatchOutcome:
     ui_payload: dict[str, Any] | None = None
     canonical_ref: str | None = None
     path: str | None = None
+    replay_message: str | None = field(default=None, repr=False, compare=False)
 
 
 DISPATCH_REPLAY_ERROR_KIND_METADATA_KEY: str = "tool_dispatch.replay_error_kind"
@@ -1667,19 +1678,8 @@ class ToolDispatcher:
                 )
                 if nearest:
                     msg += f". Did you mean: {', '.join(nearest)}?"
-            final_kind, final_msg = self._apply_consecutive_error_cap(
-                ctx, tool_call.name, DispatchErrorKind.unknown_tool, msg
-            )
-            async for evt in self._emit_failure(tool_call, ctx, final_kind, final_msg):
-                yield evt
-            yield DispatchOutcome(
-                tool_call=tool_call,
-                success=False,
-                content=final_msg,
-                is_error=True,
-                error_kind=final_kind,
-                metadata=_dispatch_replay_metadata(DispatchErrorKind.unknown_tool, msg),
-            )
+            async for item in self._fail(tool_call, ctx, DispatchErrorKind.unknown_tool, msg):
+                yield item
             return
 
         # The binding is runtime execution metadata: it is taken from the
@@ -1716,37 +1716,15 @@ class ToolDispatcher:
                 f"{depth_ceiling} levels — re-issue the call with a "
                 "flatter payload"
             ) + unseen_signature
-            final_kind, final_msg = self._apply_consecutive_error_cap(
-                ctx, tool_call.name, DispatchErrorKind.validation, msg
-            )
-            async for evt in self._emit_failure(tool_call, ctx, final_kind, final_msg):
-                yield evt
-            yield DispatchOutcome(
-                tool_call=tool_call,
-                success=False,
-                content=final_msg,
-                is_error=True,
-                error_kind=final_kind,
-                metadata=_dispatch_replay_metadata(DispatchErrorKind.validation, msg),
-            )
+            async for item in self._fail(tool_call, ctx, DispatchErrorKind.validation, msg):
+                yield item
             return
         try:
             arguments_json = json.dumps(tool_call.arguments, ensure_ascii=False)
         except (TypeError, ValueError) as exc:
             msg = f"tool arguments not JSON-serialisable: {exc}" + unseen_signature
-            final_kind, final_msg = self._apply_consecutive_error_cap(
-                ctx, tool_call.name, DispatchErrorKind.validation, msg
-            )
-            async for evt in self._emit_failure(tool_call, ctx, final_kind, final_msg):
-                yield evt
-            yield DispatchOutcome(
-                tool_call=tool_call,
-                success=False,
-                content=final_msg,
-                is_error=True,
-                error_kind=final_kind,
-                metadata=_dispatch_replay_metadata(DispatchErrorKind.validation, msg),
-            )
+            async for item in self._fail(tool_call, ctx, DispatchErrorKind.validation, msg):
+                yield item
             return
         del arguments_json  # validation only
 
@@ -1811,23 +1789,14 @@ class ToolDispatcher:
 
         if decision.denied:
             denial_reason = decision.reason or "blocked by policy"
-            final_kind, final_msg = self._apply_consecutive_error_cap(
-                ctx, tool_call.name, DispatchErrorKind.permission, denial_reason
-            )
-            async for evt in self._emit_failure(tool_call, ctx, final_kind, final_msg):
-                yield evt
-            yield DispatchOutcome(
-                tool_call=tool_call,
-                success=False,
-                content=final_msg,
-                is_error=True,
-                error_kind=final_kind,
-                metadata=_dispatch_replay_metadata(
-                    DispatchErrorKind.permission,
-                    denial_reason,
-                    {"stage": decision.stage.value},
-                ),
-            )
+            async for item in self._fail(
+                tool_call,
+                ctx,
+                DispatchErrorKind.permission,
+                denial_reason,
+                replay_extra={"stage": decision.stage.value},
+            ):
+                yield item
             return
 
         # Apply hook-driven mutation.
@@ -1847,23 +1816,14 @@ class ToolDispatcher:
         )
         if precondition_reason is not None:
             msg = f"[PRECONDITION NOT MET: {precondition_reason}]"
-            final_kind, final_msg = self._apply_consecutive_error_cap(
-                ctx, tool_call.name, DispatchErrorKind.permission, msg
-            )
-            async for evt in self._emit_failure(tool_call, ctx, final_kind, final_msg):
-                yield evt
-            yield DispatchOutcome(
-                tool_call=tool_call,
-                success=False,
-                content=final_msg,
-                is_error=True,
-                error_kind=final_kind,
-                metadata=_dispatch_replay_metadata(
-                    DispatchErrorKind.permission,
-                    msg,
-                    {"precondition_denial": precondition_reason},
-                ),
-            )
+            async for item in self._fail(
+                tool_call,
+                ctx,
+                DispatchErrorKind.permission,
+                msg,
+                replay_extra={"precondition_denial": precondition_reason},
+            ):
+                yield item
             return
 
         # NOTE: ``tool_transport_starting`` is intentionally NOT emitted
@@ -1930,38 +1890,26 @@ class ToolDispatcher:
                 else effective_timeout
             )
             msg = f"tool {tool_call.name!r} timed out after {timeout_label}s"
-            final_kind, final_msg = self._apply_consecutive_error_cap(
-                ctx, tool_call.name, DispatchErrorKind.timeout, msg
-            )
-            async for evt in self._emit_failure(tool_call, ctx, final_kind, final_msg):
-                yield evt
-            yield DispatchOutcome(
-                tool_call=tool_call,
-                success=False,
-                content=final_msg,
-                is_error=True,
-                error_kind=final_kind,
+            async for item in self._fail(
+                tool_call,
+                ctx,
+                DispatchErrorKind.timeout,
+                msg,
                 duration_ms=duration_ms,
-                metadata=_dispatch_replay_metadata(DispatchErrorKind.timeout, msg),
-            )
+            ):
+                yield item
             return
         except ToolPolicyDenied as exc:
             duration_ms = int((loop.time() - started_at) * 1000)
             reason = str(exc) or "tool policy denied"
-            final_kind, final_msg = self._apply_consecutive_error_cap(
-                ctx, tool_call.name, DispatchErrorKind.permission, reason
-            )
-            async for evt in self._emit_failure(tool_call, ctx, final_kind, final_msg):
-                yield evt
-            yield DispatchOutcome(
-                tool_call=tool_call,
-                success=False,
-                content=final_msg,
-                is_error=True,
-                error_kind=final_kind,
+            async for item in self._fail(
+                tool_call,
+                ctx,
+                DispatchErrorKind.permission,
+                reason,
                 duration_ms=duration_ms,
-                metadata=_dispatch_replay_metadata(DispatchErrorKind.permission, reason),
-            )
+            ):
+                yield item
             return
         except AskUserPauseRequested as pause:
             # AskUser invoke raises this
@@ -2008,11 +1956,6 @@ class ToolDispatcher:
                 tool_call.id,
                 exc_info=True,
             )
-            final_kind, final_msg = self._apply_consecutive_error_cap(
-                ctx, tool_call.name, DispatchErrorKind.execution, msg
-            )
-            async for evt in self._emit_failure(tool_call, ctx, final_kind, final_msg):
-                yield evt
             # Surface a machine-readable give-up signal. A tool may attach a
             # ``structured_error`` mapping to the exception it raises (e.g. a
             # retry-budget exhaustion carries
@@ -2027,36 +1970,28 @@ class ToolDispatcher:
                 if isinstance(structured_error, dict)
                 else None
             )
-            yield DispatchOutcome(
-                tool_call=tool_call,
-                success=False,
-                content=final_msg,
-                is_error=True,
-                error_kind=final_kind,
+            async for item in self._fail(
+                tool_call,
+                ctx,
+                DispatchErrorKind.execution,
+                msg,
                 duration_ms=duration_ms,
-                metadata=_dispatch_replay_metadata(
-                    DispatchErrorKind.execution, msg, structured_error_extra
-                ),
-            )
+                replay_extra=structured_error_extra,
+            ):
+                yield item
             return
 
         duration_ms = int((loop.time() - started_at) * 1000)
         if not isinstance(tool_result, ToolResult):
             msg = f"tool {tool_call.name!r} returned non-ToolResult shape: {type(tool_result).__name__}"
-            final_kind, final_msg = self._apply_consecutive_error_cap(
-                ctx, tool_call.name, DispatchErrorKind.execution, msg
-            )
-            async for evt in self._emit_failure(tool_call, ctx, final_kind, final_msg):
-                yield evt
-            yield DispatchOutcome(
-                tool_call=tool_call,
-                success=False,
-                content=final_msg,
-                is_error=True,
-                error_kind=final_kind,
+            async for item in self._fail(
+                tool_call,
+                ctx,
+                DispatchErrorKind.execution,
+                msg,
                 duration_ms=duration_ms,
-                metadata=_dispatch_replay_metadata(DispatchErrorKind.execution, msg),
-            )
+            ):
+                yield item
             return
 
         success = not tool_result.is_error
@@ -2214,52 +2149,29 @@ class ToolDispatcher:
                 )
 
         # ── Step 7: PostToolUse hook (may mutate output) ───────────
-        post_tool_output_modified = False
-        if self._hooks is not None:
-            try:
-                post_hook = await self._hooks.invoke(
-                    HookEvent.post_tool_use,
-                    {
-                        "run_id": ctx.run_id,
-                        "tenant_id": ctx.tenant_id,
-                        "tool_call_id": tool_call.id,
-                        "tool_name": tool_call.name,
-                        "tool_output": content,
-                        "success": success,
-                        "duration_ms": duration_ms,
-                    },
-                    ctx.tenant_id,
-                )
-            except Exception:
-                _logger.warning(
-                    "PostToolUse hook raised for tool=%s; isolating",
-                    tool_call.name,
-                    exc_info=True,
-                )
-                post_hook = None
-            if post_hook is not None:
-                yield TurnEvent(
-                    type=EventType.HOOK_FIRED,
-                    run_id=ctx.run_id,
-                    payload={
-                        "hook_event": HookEvent.post_tool_use.value,
-                        "outcome": ("modify" if post_hook.action == HookActionKind.MODIFY else "success"),
-                        "tool_call_id": tool_call.id,
-                    },
-                )
-                if post_hook.action == HookActionKind.MODIFY:
-                    modified = post_hook.modifications.get("tool_output")
-                    if isinstance(modified, str):
-                        content = modified
-                        post_tool_output_modified = True
+        content, post_tool_output_modified, post_hook_fired = await self._post_tool_use(
+            tool_call,
+            ctx,
+            content=content,
+            error_kind=None if success else soft_error_kind,
+            duration_ms=duration_ms,
+        )
+        if post_hook_fired is not None:
+            yield post_hook_fired
 
         outcome_metadata: dict[str, Any] | None = result_metadata or None
+        outcome_replay_message: str | None = None
         if not success:
             replay_extra = (
                 {DISPATCH_POST_TOOL_OUTPUT_MODIFIED_METADATA_KEY: True}
                 if post_tool_output_modified
                 else None
             )
+            if post_tool_output_modified:
+                # The tool's own words stay off the metadata, which is
+                # persisted with the result; see ``DispatchOutcome.replay_message``.
+                outcome_replay_message = replay_message
+                replay_message = content
             outcome_metadata = {
                 **result_metadata,
                 **_dispatch_replay_metadata(
@@ -2310,11 +2222,134 @@ class ToolDispatcher:
             ui_payload=ui_payload,
             canonical_ref=canonical_ref,
             path=result_path,
+            replay_message=outcome_replay_message,
         )
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    async def _post_tool_use(
+        self,
+        tool_call: ToolCall,
+        ctx: ToolContext,
+        *,
+        content: str,
+        error_kind: DispatchErrorKind | None,
+        duration_ms: int,
+    ) -> tuple[str, bool, TurnEvent | None]:
+        """Ask the ``post_tool_use`` hook about the text the model will read.
+
+        Returns the text to surface, whether the hook rewrote it, and the
+        ``hook_fired`` notice to yield before the result (``None`` when no hook
+        is bound or the hook raised). Every result a call produces passes
+        through here exactly once — a success, a tool's own error result and
+        every failure the dispatcher writes itself. A failure used to skip the
+        hook, and an exception message is where a token, a credentialed URL or
+        an echoed key most often turns up, so a redaction hook missed the very
+        text it exists for. ``error_kind`` is ``None`` for a success and the
+        surfaced kind otherwise, which is how a hook that only cares about
+        successes tells the two apart.
+
+        A hook that raises is logged and ignored, on a failure as on a success:
+        the result stands as written rather than the call failing twice.
+        """
+        if self._hooks is None:
+            return content, False, None
+        is_error = error_kind is not None
+        try:
+            post_hook = await self._hooks.invoke(
+                HookEvent.post_tool_use,
+                {
+                    "run_id": ctx.run_id,
+                    "tenant_id": ctx.tenant_id,
+                    "tool_call_id": tool_call.id,
+                    "tool_name": tool_call.name,
+                    "tool_output": content,
+                    "success": not is_error,
+                    "is_error": is_error,
+                    "error_kind": error_kind.value if error_kind is not None else None,
+                    "duration_ms": duration_ms,
+                },
+                ctx.tenant_id,
+            )
+        except Exception:
+            _logger.warning(
+                "PostToolUse hook raised for tool=%s; isolating",
+                tool_call.name,
+                exc_info=True,
+            )
+            return content, False, None
+        if post_hook is None:
+            return content, False, None
+        fired = TurnEvent(
+            type=EventType.HOOK_FIRED,
+            run_id=ctx.run_id,
+            payload={
+                "hook_event": HookEvent.post_tool_use.value,
+                "outcome": ("modify" if post_hook.action == HookActionKind.MODIFY else "success"),
+                "tool_call_id": tool_call.id,
+            },
+        )
+        if post_hook.action == HookActionKind.MODIFY:
+            modified = post_hook.modifications.get("tool_output")
+            if isinstance(modified, str):
+                return modified, True, fired
+        return content, False, fired
+
+    async def _fail(
+        self,
+        tool_call: ToolCall,
+        ctx: ToolContext,
+        kind: DispatchErrorKind,
+        message: str,
+        *,
+        duration_ms: int = 0,
+        replay_extra: dict[str, Any] | None = None,
+    ) -> AsyncIterator[TurnEvent | DispatchOutcome]:
+        """Answer a call with a failure the dispatcher wrote itself.
+
+        The one exit for every such path, so none of them can forget a step:
+        the consecutive-error cap, then the ``post_tool_use`` hook on the text
+        the model would read, then the result event and the outcome carrying
+        whatever the hook made of that text. The hook runs after the cap so it
+        sees the wrapped message too. The streak is keyed on ``message``, the
+        words before any rewrite, here and in the parallel path's replay, so a
+        hook that masks differently each time cannot split one repeated failure
+        into many.
+        """
+        final_kind, final_msg = self._apply_consecutive_error_cap(
+            ctx, tool_call.name, kind, message
+        )
+        content, modified, fired = await self._post_tool_use(
+            tool_call,
+            ctx,
+            content=final_msg,
+            error_kind=final_kind,
+            duration_ms=duration_ms,
+        )
+        if fired is not None:
+            yield fired
+        async for evt in self._emit_failure(tool_call, ctx, final_kind, content):
+            yield evt
+        if modified:
+            metadata = _dispatch_replay_metadata(
+                kind,
+                content,
+                {**(replay_extra or {}), DISPATCH_POST_TOOL_OUTPUT_MODIFIED_METADATA_KEY: True},
+            )
+        else:
+            metadata = _dispatch_replay_metadata(kind, message, replay_extra)
+        yield DispatchOutcome(
+            tool_call=tool_call,
+            success=False,
+            content=content,
+            is_error=True,
+            error_kind=final_kind,
+            duration_ms=duration_ms,
+            metadata=metadata,
+            replay_message=message if modified else None,
+        )
 
     async def _emit_failure(
         self,

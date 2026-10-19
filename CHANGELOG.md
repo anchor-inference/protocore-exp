@@ -60,9 +60,27 @@ All notable changes to this project are recorded here. The format follows
   loaded as part of a whole group still one entry with it; names come back
   before `loaded_tool_groups`, which swapped a group loaded before a single
   tool and moved the tool list.
+- **`post_tool_use` now also fires for failed calls**, with two new payload
+  fields on every call: `is_error` (`False` on success) and `error_kind` (the
+  `DispatchErrorKind` value of the surfaced failure, `None` on success). A
+  hook that should only see successes returns `ALLOW` when `is_error` is true.
+  `success` is still sent. A `MODIFY` on a failure replaces the error text
+  everywhere it goes, as on a success.
 
 ### Fixed
 
+- **A failed tool call no longer bypasses the `post_tool_use` hook.** A tool
+  that raised, timed out, returned something other than a `ToolResult`, was
+  called with arguments that could not be serialised, was unknown, or was
+  refused by the gate got its error text — the exception message included —
+  written into the history, the `tool_result` event and the next request
+  without the hook being asked, so a redaction hook missed a token in a failed
+  command line or a key a server echoed back. Every such path now asks the
+  hook once, after the consecutive-error cap, and a `MODIFY` lands in the
+  outcome, the event and the transcript. The hook's rewrite also replaces the
+  unmasked text in the result's replay metadata; the parallel path keys its
+  error streak on the original words, held in memory only. A hook that raises
+  on a failure is logged and ignored, as on a success.
 - **The compaction ledger no longer clips the operator's words.** Each quote
   was cut at 1,200 characters without a marker. A quote is now kept whole, the
   other sections of the ledger give up their room before it, and a quote that

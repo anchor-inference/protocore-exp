@@ -531,7 +531,7 @@ class HookEvent(StrEnum):
         ``tool_execute`` — the invocation itself, wrapped by the dispatcher:
         an ``around`` here sees the call go in and the result come out, and a
         handler that skips ``next`` means the tool never runs at all;
-        ``post_tool_use`` — after it returned;
+        ``post_tool_use`` — after it produced a result, a failure included;
         ``file_changed`` — a workspace file was created, changed or removed.
 
     Compaction, as a transaction
