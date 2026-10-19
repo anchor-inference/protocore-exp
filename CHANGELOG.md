@@ -187,6 +187,16 @@ All notable changes to this project are recorded here. The format follows
   `ui_payload` (the hook is not shown it); `path` stays. A host that relies on
   one of them surviving a rewrite has to mask it before the tool returns. A
   hook that allows the result changes nothing.
+- **A run with no background pool is reported as detached only when it has
+  commands a pool should answer for.** `background_tasks_detached` with
+  `detached_reason="no_pool_bound"` used to be emitted for every run of a host
+  that binds no pool, which read as the reason its own background jobs never
+  woke the agent, and the only way to silence it was
+  `background_tasks_enabled=False`. It is now emitted when the run's snapshot
+  names background commands that were still running and the process it was
+  resumed into bound no pool. A host that watched for the old report on fresh
+  runs to detect a missing pool binds the pool, or checks
+  `engine.background_pool` itself.
 
 ### Fixed
 

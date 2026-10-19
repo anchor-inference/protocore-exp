@@ -1343,7 +1343,8 @@ def _activate_rules_from_tool(engine: QueryEngine, tool_call: ToolCall) -> None:
         ]
 
 
-#: Background tasks are enabled for this run and no pool was injected at all.
+#: Background tasks are enabled, the run's own durable state names commands
+#: that were still running, and no pool was injected to answer for them.
 BACKGROUND_DETACHED_NO_POOL = "no_pool_bound"
 #: A pool is bound but it does not yet speak for this session — the shape a
 #: resumed run takes when the host has not re-attached the session's commands.
@@ -1402,7 +1403,14 @@ async def _maybe_place_background_wakes(
         return _BackgroundWakeOutcome()
     pool = engine.background_pool
     if pool is None:
-        return _BackgroundWakeOutcome(detached_reason=BACKGROUND_DETACHED_NO_POOL)
+        # Detached only when the run itself recorded commands a pool was
+        # holding. A host that runs no pool at all used to see every run
+        # reported as ``no_pool_bound``; the report read as the reason its
+        # own background jobs never woke the agent when it was not, and the
+        # only way to silence it was to switch the feature off.
+        if engine._resumed_background_task_ids:
+            return _BackgroundWakeOutcome(detached_reason=BACKGROUND_DETACHED_NO_POOL)
+        return _BackgroundWakeOutcome()
     detached_reason = ""
     if not await pool.ensure_session_attached(engine.config.session_id):
         detached_reason = BACKGROUND_DETACHED_SESSION_NOT_REATTACHED

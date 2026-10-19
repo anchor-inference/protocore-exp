@@ -117,18 +117,52 @@ async def test_pool_is_an_injected_collaborator(
     assert engine.background_pool is pool
 
 
-async def test_a_run_with_no_pool_bound_says_so_instead_of_reporting_quiet(
+async def test_a_run_that_never_had_a_pool_is_quiet(
     engine_factory: Any, in_memory_runtime: dict[str, object]
 ) -> None:
+    """A host that runs no pool is not missing one.
+
+    Every run of such a host used to be reported as detached with
+    ``no_pool_bound``, and the report read as the reason background work never
+    woke the agent when it was not; the only way to silence it was to switch
+    the feature off. Nothing was ever started in a pool, so there is nothing
+    nobody can answer for.
+    """
     engine = _engine_with_answer(engine_factory, in_memory_runtime, _rc())
     assert engine.background_pool is None
 
     events = await _drive(engine)
 
+    assert _detach_events(events) == []
+    assert not [evt for evt in events if evt.type == EventType.BACKGROUND_WAKE]
+
+
+async def test_a_resumed_run_whose_commands_have_no_pool_says_so(
+    engine_factory: Any, in_memory_runtime: dict[str, object]
+) -> None:
+    """The case the report exists for: commands were running, and no pool is bound.
+
+    The snapshot names the commands this run started, and the process it was
+    resumed into bound no pool to answer for them.
+    """
+    rc = _rc()
+    source = _engine_with_answer(engine_factory, in_memory_runtime, rc)
+    source_pool = FakeBackgroundPool()
+    source.background_pool = source_pool
+    source_pool.start(source.config.session_id, notify_on_finish=True)
+    snapshot = source.snapshot()
+
+    resumed = _engine_with_answer(engine_factory, in_memory_runtime, rc)
+    resumed._helpers = {}
+    await resumed.resume_from_snapshot(snapshot)
+    assert resumed.background_pool is None
+
+    events = await _drive(resumed)
+
     detached = _detach_events(events)
     assert len(detached) == 1, "reported once per turn, not once per assistant message"
     assert detached[0].payload["detached_reason"] == BACKGROUND_DETACHED_NO_POOL
-    assert detached[0].payload["session_id"] == engine.config.session_id
+    assert detached[0].payload["session_id"] == resumed.config.session_id
     assert not [evt for evt in events if evt.type == EventType.BACKGROUND_WAKE]
 
 
