@@ -122,12 +122,13 @@ from protocore.runtime.loop_state import (
     is_terminal,
 )
 from protocore.runtime.request_budget import ExactTokenCountCache
-from protocore.runtime.tool_deferral import ToolDeferral, tool_rules_mark
+from protocore.runtime.tool_deferral import ToolDeferral, tool_rules_mark, tool_rules_scope
 from protocore.runtime.usage import TokenUsage
 
 _logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from protocore.runtime.tool_permission import IToolSafetyPolicy
     from protocore.runtime.turn_policies import TurnPolicyRegistry
 
 
@@ -638,6 +639,19 @@ class QueryEngineConfig:
     the config's ``repr`` so a logged config does not print it.
     """
 
+    tool_rules_session_id: str | None = None
+    """The session the run's rules mark is scoped to, instead of the tenant.
+
+    Left ``None``, every session of a tenant shares one mark, and so the head
+    of the cached prompt. A host that runs everything under one tenant and
+    still wants each session's mark its own names the session here; derived
+    under :attr:`tool_rules_mark_key` like the tenant's, it is the same in
+    every process that holds the key. It need not be this run's own
+    :attr:`session_id`: a fork that carries its source's history also carries
+    rules given under its source's mark, and names the source's session to
+    keep that mark and the prompt's bytes with it.
+    """
+
     trimmed_tool_result_ids: tuple[str, ...] = ()
     """Tool results an earlier run of the same session cut to their head in its requests.
 
@@ -836,6 +850,9 @@ class QueryEngine:
             "tools",
             "events",
             "hooks",
+            # The host's safety policies are its standing choice, not a turn's
+            # allowance; the dispatcher a re-arm drops is rebuilt from them.
+            "tool_safety_policies",
             "skills",
             "blobs",
             "lifecycle_hooks",
@@ -994,6 +1011,7 @@ class QueryEngine:
         provider_chain: IProviderChain | None = None,
         background_pool: IBackgroundTaskPool | None = None,
         lifecycle_hooks: ILifecycleRegistry | None = None,
+        tool_safety_policies: Sequence[IToolSafetyPolicy] | None = None,
     ) -> None:
         self.config = config
         self.llm: ILLMProvider = llm_provider
@@ -1011,6 +1029,15 @@ class QueryEngine:
         # The lifecycle seam. ``None`` is a host that registered nothing, and
         # the loop's coordinates then cost one attribute read apiece.
         self.lifecycle_hooks: ILifecycleRegistry | None = lifecycle_hooks
+        # The policies the tool permission gate runs on each call. ``None`` is
+        # the core's defaults, an empty tuple is none, and a sequence is
+        # exactly those. Taken here so the dispatcher the run builds is the
+        # core's own: a host that built one itself to install its policies
+        # lost the run's error counter, the tool roles and the resilience
+        # classifier, and every parameter the dispatcher gains after it.
+        self.tool_safety_policies: tuple[IToolSafetyPolicy, ...] | None = (
+            None if tool_safety_policies is None else tuple(tool_safety_policies)
+        )
         self.skills = skill_store
         self.blobs = blob_store
 
@@ -1672,8 +1699,12 @@ class QueryEngine:
         self._tool_group_rules_given: set[str] = set()
         # The mark genuine rules carry in their heading, named in the
         # catalogue, so rules a web page imitates can be told apart. Scoped to
-        # the tenant, so its sessions share the head of the cached prompt.
-        self._tool_rules_mark = tool_rules_mark(config.tenant_id, key=config.tool_rules_mark_key)
+        # the tenant, so its sessions share the head of the cached prompt,
+        # unless the host scopes it to a session.
+        self._tool_rules_mark = tool_rules_mark(
+            tool_rules_scope(config.tenant_id, config.tool_rules_session_id),
+            key=config.tool_rules_mark_key,
+        )
         # Set where the cached prefix starts over, so the next decision writes
         # the loaded tools' rules into the catalogue again.
         self._catalogue_takes_loaded_rules = False

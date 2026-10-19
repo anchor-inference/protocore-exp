@@ -81,9 +81,27 @@ All notable changes to this project are recorded here. The format follows
   `soft_stop.enter` takes the verdict as `failure=`, and
   `soft_stop.FAILING_CAUSES` / `soft_stop.outcome_of` name which wind-down
   causes are failures.
+- **`QueryEngine(tool_safety_policies=...)`** sets the safety policies the
+  tool permission gate runs: `None` for the core's default stack, `[]` for
+  none, a sequence for exactly those. The engine builds the dispatcher around
+  them with the run's tool-error counter, the tool roles and the resilience
+  classifier. A host that replaced the engine's dispatcher to install its own
+  policies built it without those three, and lost the error count, role-aware
+  transport-down detection and classification from every run. A re-arm keeps
+  the policies. See `docs/extending.md`.
+- **`QueryEngineConfig.tool_rules_session_id`** scopes the rules mark to a
+  session instead of the tenant, derived under `tool_rules_mark_key` like the
+  tenant's, so a host that runs every session under one tenant gives each its
+  own mark, the same in every process that holds the key, and a fork names its
+  source's session to keep its source's mark. `tool_rules_scope(tenant_id,
+  session_id=None)` in `protocore.runtime.tool_deferral` is the scope the mark
+  is derived from. Left unset, the mark is the tenant's, as before.
 
 ### Changed
 
+- **`ToolPermissionGate(policies=[])` installs no policy.** An empty list read
+  as "use the defaults", so a host that passed one to turn the shell deny list
+  off still had it. Only `None` means the defaults now.
 - **A group's rules join the catalogue in the request after the load.** The
   catalogue took a group loaded mid-run only at the next run's first decision,
   so the system prompt changed one run after the tool list did and a session

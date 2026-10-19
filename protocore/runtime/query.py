@@ -12927,13 +12927,20 @@ def _ensure_tool_dispatcher(engine: QueryEngine) -> ToolDispatcher:
  so every dispatch error path increments the active run's error count. A run
  wired without one gets a counter-less dispatcher: no telemetry, behaviour
  unchanged.
+
+ The gate runs the safety policies the engine was constructed with
+ (``QueryEngine(tool_safety_policies=...)``): ``None`` for the core's
+ defaults, an empty sequence for none.
  """
     existing = getattr(engine, "_tool_dispatcher", None)
     if isinstance(existing, ToolDispatcher):
         return existing
     dispatcher = ToolDispatcher(
         registry=engine.tools,
-        permission_gate=ToolPermissionGate(roles=engine.config.tool_roles),
+        permission_gate=ToolPermissionGate(
+            policies=engine.tool_safety_policies,
+            roles=engine.config.tool_roles,
+        ),
         hook_manager=engine.hooks,
         tool_error_counter=engine.run_state.tool_error_counter,
         roles=engine.config.tool_roles,

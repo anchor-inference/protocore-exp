@@ -146,10 +146,29 @@ agent-visible verb names for cross-backend uniformity; see
 [`tools.md`](./tools.md).
 
 **Extra safety policies** are also a `Protocol` seam: implement
-`IToolSafetyPolicy` and register it on the gate via `register_policy(...)`
-(`runtime/tool_permission.py`) — the core gate API stays frozen while the policy
-stack grows at runtime (this is how `HttpDnsAllowlistPolicy` and
-`WorkspacePathPolicy` are added; they are **not** in the default stack).
+`IToolSafetyPolicy` (`runtime/tool_permission.py`) and hand the engine the
+policies its runs enforce:
+
+```python
+from protocore.runtime.tool_permission import ShellSafetyPolicyAdapter
+
+engine = QueryEngine(
+    config=config,
+    ...,
+    # The core's shell deny list, then the host's own checks after it.
+    tool_safety_policies=[ShellSafetyPolicyAdapter(roles=config.tool_roles), my_policy],
+)
+```
+
+`None` (the default) keeps the core's stack, a shell deny list for tools with
+the `runs_shell` role; an empty list installs no policy, for a host whose
+sandbox is the boundary; a list is exactly those policies, in that order, so a
+host that wants the deny list as well names it. The engine builds the tool
+dispatcher around them itself, with the run's tool-error counter, the tool
+roles and the resilience classifier, so a host never constructs a dispatcher
+to install its policies. `HttpDnsAllowlistPolicy` and `WorkspacePathPolicy` are
+provided this way too; they are **not** in the default stack. A gate built by
+hand still takes `register_policy(...)`.
 
 **Rule of thumb:** if your code has a database driver, an HTTP client, a wire
 format, or any I/O, it belongs in an adapter behind a `Protocol` — not in

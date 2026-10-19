@@ -134,9 +134,10 @@ one policy:
   the core does not know where to look.
 
 `HttpDnsAllowlistPolicy` and `WorkspacePathPolicy` are provided but **not** in
-the default stack; the host stacks them on at runtime via `register_policy`,
-which keeps the core API frozen. The gate is always on. The `pre_tool_use`
-coordinate is the highest-leverage seam for an LLM-as-policy gate.
+the default stack; the host passes the stack its runs enforce as
+`QueryEngine(tool_safety_policies=...)` — `None` for the default above, `[]`
+for none, a list for exactly those (see [`extending.md`](./extending.md)).
+The gate is always on. The `pre_tool_use` coordinate is the highest-leverage seam for an LLM-as-policy gate.
 
 See the [Permission gate](architecture.md#dispatch-roles-the-canonical-result-and-pairing-repair) section for the
 gate's place in the dispatch flow and the side-effect class map.
@@ -567,6 +568,15 @@ exactly as secret as the key:
   forge rules — but it changes with the worker and the restart, and the
   prompt changes with it.
 
+**Scoped to a session.** A host that runs every session under one tenant and
+wants each session's mark its own sets `QueryEngineConfig.tool_rules_session_id`.
+The mark is then an HMAC of `tool_rules_scope(tenant_id, session_id)` under the
+same key — distinct per session, and the same in every process that holds the
+key. The session named need not be the run's own: a fork that carries its
+source's history also carries rules given under its source's mark, and names
+the source's session to keep it, and the prompt's bytes with it. Left `None`,
+the scope is the tenant id and the mark is the tenant's, as above.
+
 The snapshot carries the mark (`tool_group_rules_mark`), so a resumed run keeps
 the mark its history's rules were given with, whichever process picks it up
 and whatever the key is now. The loop stamps it as
@@ -909,9 +919,10 @@ repeated call with a side effect applies that effect twice.
   register the resulting `ToolDefinition` with the `IToolRegistry`.
 - **Control visibility:** set `visible` / `blocked` / `pinned` on a
   `ToolVisibilityPolicy`.
-- **Add a safety check:** implement `IToolSafetyPolicy` and register it with
-  `ToolPermissionGate.register_policy` — it evaluates after the defaults; the
-  core gate stays frozen.
+- **Add a safety check:** implement `IToolSafetyPolicy` and pass it in
+  `QueryEngine(tool_safety_policies=...)`, after `ShellSafetyPolicyAdapter` if
+  the run should keep the shell deny list; the engine builds the gate around
+  them.
 - **Declare what it does:** add the tool's `ToolRole`s and argument slots to the
   `ToolRoleMap` you pass as `QueryEngineConfig.tool_roles`. A tool the map does
   not describe still runs; what it loses is every behaviour that depends on

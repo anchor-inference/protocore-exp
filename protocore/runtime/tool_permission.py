@@ -424,8 +424,11 @@ class ToolPermissionGate:
         roles: ToolRoleMap = EMPTY_TOOL_ROLE_MAP,
     ) -> None:
         self._roles = roles
+        # ``None`` is the defaults and an empty list is none. An ``or`` here
+        # once read the two alike, so a host that passed ``[]`` to turn the
+        # shell deny list off got it back without being told.
         self._policies: list[IToolSafetyPolicy] = list(
-            policies or self._default_policies(roles)
+            self._default_policies(roles) if policies is None else policies
         )
         self._side_effect_map: dict[str, str] = dict(side_effect_map or {})
 
