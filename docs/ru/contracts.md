@@ -280,6 +280,46 @@ value-объекты.
 - **`IProviderChain`** — не тип запроса/ответа; курсор failover, который
   `QueryEngine` перепривязывает на `self.llm`, когда mid-stream провайдер падает.
 
+### Сбои провайдера и исход прогона
+
+- **`ProviderFailure`** (`contracts/llm.py`, замороженный) — вердикт, который
+  адаптер прикрепляет к поднимаемой им ошибке провайдера:
+  `LLMProviderError(message, classified=ProviderFailure(...))`. Поля:
+  `reason` (`ProviderFailureReason`), `retryable`, `should_fallback`,
+  `retry_after_seconds`, `provider_message`. Цикл читает его, чтобы выбрать
+  между следующим провайдером цепочки, ещё одной попыткой на том же,
+  сворачиванием и терминальным сбоем. Ошибка без вердикта сохраняет умолчание
+  класса для `retryable` и никогда не сдвигает цепочку.
+- **`ProviderFailureReason`** (`StrEnum`) — `auth` · `auth_permanent` ·
+  `billing` · `budget` · `connection` · `context_overflow` · `format_error` ·
+  `image_too_large` · `llama_cpp_grammar_pattern` · `long_context_tier` ·
+  `model_not_found` · `oauth_long_context_beta_forbidden` · `overloaded` ·
+  `payload_too_large` · `provider_policy_blocked` · `rate_limit` ·
+  `server_error` · `thinking_signature` · `timeout` · `unknown`. Что цикл
+  делает с каждой причиной — три публичных набора в том же модуле:
+  `PROVIDER_ADVANCE_REASONS` (соседний провайдер может справиться; включает
+  `connection`), `PERMANENT_FAILURE_REASONS` (тот же запрос снова не пройдёт) и
+  `SURFACE_INDEPENDENT_FAILURE_REASONS` (сужение набора инструментов при
+  сворачивании не поможет). `budget` — лимит расходов, который соблюдает
+  **хост**: он постоянный, никогда не сдвигает цепочку и не сворачивает прогон.
+- **`classify_transport_exception(exc)`** — вердикт для сбоя, при котором до
+  эндпоинта вообще не достучаться (отказ, сброс, недоступность, неразрешимое
+  имя: `connection`; таймаут: `timeout`), найденный на самом исключении или
+  ниже по цепочке причин, либо `None`. **`provider_failure_of(exc)`** читает
+  типизированный вердикт с любой поднятой ошибки, перенося на `ProviderFailure`
+  объект вердикта собственного типа адаптера.
+- **`RunOutcome`** / **`RunCause`** (`contracts/outcome.py`) — каждый
+  терминальный `message_stop` несёт `outcome` (`completed` · `failed` ·
+  `stopped` · `wound_down`) и `cause` (JSON-форму `RunCause`: `kind`, `detail` и
+  `failure` — `ProviderFailure`, когда прогон закончил сбой провайдера; `None`
+  для прогона, который просто завершился). Прогон, свёрнутый из-за сбоя
+  провайдера (`provider_error`) или отсутствия прогресса модели
+  (`model_no_progress`), заканчивается `failed`, даже если его закрывающий ход
+  написал текст; прогон, свёрнутый по выданному ему пределу (ходы, вызовы
+  инструментов, выходные токены, время), заканчивается `wound_down`. Читаются
+  обратно через `RunOutcome(payload["outcome"])` и
+  `RunCause.model_validate(payload["cause"])`.
+
 ### Входящий трафик, блобы, компакция
 
 - **`AgentEnvelope`** — единственный кросс-компонентный контракт входящего
@@ -404,6 +444,57 @@ value-объекты.
 4. Сконструируйте `QueryEngine` со своими адаптерами и управляйте им через
    `async for evt in engine.run(message)` или поднимите сохранённый прогон
    через `async for evt in resume(engine, snapshot)`.
+
+### Как сообщить о сбое провайдера
+
+Цикл никогда не смотрит на код статуса или тело ответа: это делает адаптер, и
+он сообщает, что нашёл, прикрепляя `ProviderFailure` к поднимаемой ошибке. Без
+него мёртвый эндпоинт заканчивает прогон, даже если следующий провайдер цепочки
+здоров, а `Retry-After` сервера так и не будет замечен.
+
+```python
+from protocore.contracts.llm import (
+    LLMProviderError,
+    LLMRateLimitError,
+    ProviderFailure,
+    ProviderFailureReason,
+    classify_transport_exception,
+)
+
+try:
+    response = await client.post(url, json=body)
+except Exception as exc:
+    failure = classify_transport_exception(exc)  # отказ / сброс / таймаут
+    if failure is None:
+        raise
+    raise LLMProviderError(str(exc), classified=failure) from exc
+
+if response.status_code == 429:
+    raise LLMRateLimitError(
+        response.text,
+        classified=ProviderFailure(
+            reason=ProviderFailureReason.rate_limit,
+            retryable=True,
+            retry_after_seconds=parse_retry_after(response.headers),
+            provider_message=response.text,
+        ),
+    )
+```
+
+- `retryable` вердикта задаёт собственный флаг ошибки, если вызов явно не
+  передал `retryable=`, а цикл читает флаг ошибки первым; держите их согласными.
+- `retry_after_seconds` удлиняет паузу перед следующей попыткой на том же
+  эндпоинте, но не дальше `llm_transient_error_retry_backoff_max_seconds`.
+- `should_fallback=True` говорит, что форма структурированного вывода запроса
+  отклонена и prompted JSON может пройти; его читают только стратегии с таким
+  запасным путём.
+- Лимит расходов, который соблюдает хост, сообщается как `reason=budget`,
+  `retryable=False`: прогон сразу завершается сбоем, а его терминальный
+  `cause.failure` называет лимит, так что никому не нужно сопоставлять слова в
+  сообщении.
+- `protocore.conformance.assert_adapter_failure(exc)` проверяет в собственных
+  тестах адаптера, что ошибка несёт вердикт и оба флага согласны, и возвращает
+  вердикт для дальнейших проверок.
 
 Механика расширения рантайма — какой шов выбрать (протокол vs хук vs RC-тоггл vs
 секция промпта) и жёсткое правило «не модифицировать структуру цикла» — описана

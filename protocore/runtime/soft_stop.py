@@ -41,6 +41,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
+from protocore.contracts.llm import ProviderFailure
+from protocore.contracts.outcome import RunCause, RunOutcome
 from protocore.contracts.tool_registry import ToolVisibilityPolicy
 from protocore.contracts.types import (
     SYNTHETIC_RECOVERY_METADATA_KEY,
@@ -89,6 +91,20 @@ CAUSES: Final[frozenset[str]] = frozenset(
         CAUSE_MODEL_NO_PROGRESS,
     }
 )
+
+#: Causes after which a wound-down run has FAILED rather than reached a bound.
+#: A budget the run spent is a limit it was given and used; a provider that
+#: refused it or a model that went nowhere is a run that did not do its job,
+#: and the closing turn's prose is a report on why the work stopped. Stating
+#: that on the terminal event spares every host from reclassifying it.
+FAILING_CAUSES: Final[frozenset[str]] = frozenset(
+    {CAUSE_PROVIDER_ERROR, CAUSE_MODEL_NO_PROGRESS}
+)
+
+
+def outcome_of(cause_name: str) -> RunOutcome:
+    """The outcome of a run that completed its wind-down for ``cause_name``."""
+    return RunOutcome.failed if cause_name in FAILING_CAUSES else RunOutcome.wound_down
 
 
 # ---- stages ---------------------------------------------------------------
@@ -250,7 +266,13 @@ def notification_text(engine: QueryEngine, *, cause_name: str) -> str:
     return template.replace("{cause}", cause_name)
 
 
-def enter(engine: QueryEngine, *, cause_name: str, detail: str = "") -> list[TurnEvent]:
+def enter(
+    engine: QueryEngine,
+    *,
+    cause_name: str,
+    detail: str = "",
+    failure: ProviderFailure | None = None,
+) -> list[TurnEvent]:
     """Start the wind-down. Idempotent — a second call returns no events.
 
     Appends the notification to history and narrows the surface, emitting the
@@ -263,6 +285,10 @@ def enter(engine: QueryEngine, *, cause_name: str, detail: str = "") -> list[Tur
     and nowhere else: the model is told the shape of the stop by the notice,
     while a host that has to SHOW the operator why a run ended needs the
     original message, and reconstructing it from a log is not showing it.
+
+    ``failure`` is the provider's verdict when a provider failure is the cause.
+    It is kept with the cause and stated on the terminal event, so a host that
+    reports the run does not have to parse ``detail`` to learn what failed.
     """
     if is_armed(engine):
         return []
@@ -270,6 +296,7 @@ def enter(engine: QueryEngine, *, cause_name: str, detail: str = "") -> list[Tur
         raise ValueError(f"unknown soft-stop cause: {cause_name!r}")
 
     engine._soft_stop_cause = cause_name
+    engine._run_cause = RunCause(kind=cause_name, detail=detail, failure=failure)
     engine._soft_stop_stage = STAGE_NOTIFIED
     _append_notice(engine, cause_name=cause_name)
 
@@ -409,6 +436,7 @@ __all__ = [
     "CAUSE_OUTPUT_TOKEN_BUDGET",
     "CAUSE_PROVIDER_ERROR",
     "CAUSE_TOOL_CALL_BUDGET",
+    "FAILING_CAUSES",
     "NO_TOOL_SENTINEL",
     "REASON_FINALIZED",
     "REASON_NOTIFIED",
@@ -425,6 +453,7 @@ __all__ = [
     "is_armed",
     "is_enabled",
     "leave",
+    "outcome_of",
     "restore",
     "restricted_policy",
     "stage",

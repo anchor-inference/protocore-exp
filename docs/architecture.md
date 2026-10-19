@@ -701,7 +701,8 @@ already has — and two rules keep the last of them honest.
   `llm_transient_error_retry_max_attempts` (2) with
   `llm_transient_error_retry_backoff_base_seconds` (1.0) doubling up to
   `llm_transient_error_retry_backoff_max_seconds` (8.0), a server-stated
-  `Retry-After` taking precedence within that ceiling. The streak resets on any
+  `Retry-After` (the verdict's `retry_after_seconds`) taking precedence within
+  that ceiling. The streak resets on any
   clean stream, so the bound is per consecutive-failure streak rather than per
   run. A run that was cancelled, or whose wall-clock budget leaves room only to
   finalise, starts no further attempt; the backoff itself waits on the stop
@@ -728,6 +729,14 @@ already has — and two rules keep the last of them honest.
   reached its budget and a model reads that literally; and its `state_changed`
   events carry `soft_stop_detail` — the upstream's own message — so a host can
   show the operator why the run ended rather than reconstruct it from a log.
+- **The chain moves on a verdict, and the outcome says what happened.** Whether
+  a failure may move the chain is the adapter's `ProviderFailure` attached to
+  the error, tested against `PROVIDER_ADVANCE_REASONS`; a refused or reset
+  connection (`connection`) is in that set, an error with no verdict is not. A
+  run wound down for `provider_error` or `model_no_progress` states
+  `outcome="failed"` on its terminal `message_stop`, with the verdict in
+  `cause.failure`, even when the closing turn wrote prose (see
+  [`contracts.md`](contracts.md#provider-failures-and-the-runs-outcome)).
 
 ### The run snapshot: schema version and upcasters
 

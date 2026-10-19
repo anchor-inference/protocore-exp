@@ -37,7 +37,7 @@ from typing import Any
 SNAPSHOT_SCHEMA_KEY = "schema_version"
 
 #: The schema version this build writes and can read after upcasting.
-SNAPSHOT_SCHEMA_VERSION = 7
+SNAPSHOT_SCHEMA_VERSION = 8
 
 #: Where the run's own state sits inside the snapshot payload: the tree's
 #: cumulative work ledger and the capacity of its concurrency budget, the two
@@ -402,6 +402,24 @@ def _v6_to_v7(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 UPCASTERS.register(6, _v6_to_v7)
+
+
+def _v7_to_v8(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Version 8 keeps why the run is winding down, with the provider's verdict.
+
+    Version 7 kept the wind-down's cause as a bare name. Version 8 adds
+    ``run_cause``: that name, the detail the cause gave, and the provider's
+    verdict when a provider failure started the wind-down, so a run resumed
+    while winding down can still say what failed it when it ends. A version 7
+    payload recorded no verdict, so the lift says exactly that; the terminal
+    event then names the cause without one, as it would have before.
+    """
+    lifted = dict(snapshot)
+    lifted.setdefault("run_cause", None)
+    return lifted
+
+
+UPCASTERS.register(7, _v7_to_v8)
 
 
 def migrate_snapshot(

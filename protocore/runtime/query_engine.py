@@ -68,6 +68,12 @@ from protocore.contracts.observability import (
     RequestManifest,
     read_manifest_schema_version,
 )
+from protocore.contracts.outcome import (
+    RUN_CAUSE_FIELD,
+    RUN_OUTCOME_FIELD,
+    RunCause,
+    RunOutcome,
+)
 from protocore.contracts.prompts import IPromptTemplateProvider
 from protocore.contracts.resilience import IResilienceClassifier
 from protocore.contracts.run_state import RunScopedState
@@ -93,6 +99,7 @@ from protocore.contracts.tool_roles import (
 from protocore.contracts.types import (
     Message,
     MessageRole,
+    StopReason,
     ToolCall,
     ToolPrecondition,
     ToolResultBlock,
@@ -1388,6 +1395,10 @@ class QueryEngine:
         # resume hands the model back the surface the stop just took away.
         self._soft_stop_cause: str | None = None
         self._soft_stop_stage: str = ""
+        # Why the run is ending when it is not simply completing: the wind-down
+        # cause with the provider's verdict, or the failure it went terminal on.
+        # Stated on the terminal ``message_stop`` as the run's ``cause``.
+        self._run_cause: RunCause | None = None
         # Session-scoped background commands, owned by the host because they
         # outlive the run that spawned them. ``None`` is a run that was never
         # given one; a run resumed on a fresh process is given a pool that has
@@ -2067,6 +2078,14 @@ class QueryEngine:
         every wind-down looks the same from outside, and "the runs are stopping
         early" is not a question anyone can answer.
 
+        And every terminal stop carries the run's ``outcome`` with its typed
+        ``cause`` (:mod:`protocore.contracts.outcome`). A run wound down because
+        the provider failed or the model made no progress ends ``completed``
+        with a closing paragraph, and consumers were reclassifying it as failed
+        themselves, telling their own spend cap from a vendor's refusal by the
+        words in a detail string. The outcome says it once, here, and the cause
+        carries the provider's verdict when there is one.
+
         Only terminal stops are stamped. ``stop_reason="tool_use"`` closes one
         assistant round mid-run, and a consumer that latched a mid-run "no
         answer yet" would read it as the run's verdict.
@@ -2080,7 +2099,34 @@ class QueryEngine:
         windup_cause = _soft_stop.cause(self)
         if windup_cause is not None:
             payload["soft_stop_cause"] = windup_cause
+        outcome, cause = self._run_outcome(payload.get("stop_reason"), windup_cause)
+        payload[RUN_OUTCOME_FIELD] = outcome.value
+        payload[RUN_CAUSE_FIELD] = None if cause is None else cause.model_dump(mode="json")
         return event.model_copy(update={"payload": payload})
+
+    def _run_outcome(
+        self, stop_reason: object, windup_cause: str | None
+    ) -> tuple[RunOutcome, RunCause | None]:
+        """Decide the run's outcome from how its last turn stopped.
+
+        A stop and a failure outrank the wind-down: a run cancelled or failed
+        while winding down ended that way, not by the bound it was closing on.
+        """
+        from protocore.runtime import soft_stop as _soft_stop
+
+        if stop_reason == StopReason.cancelled.value or self.state is LoopState.CANCELLED:
+            return RunOutcome.stopped, RunCause(kind=StopReason.cancelled.value)
+        if stop_reason == StopReason.error.value or self.state is LoopState.FAILED:
+            return RunOutcome.failed, self._run_cause or RunCause(kind=StopReason.error.value)
+        if windup_cause is not None:
+            recorded = self._run_cause
+            cause = (
+                recorded
+                if recorded is not None and recorded.kind == windup_cause
+                else RunCause(kind=windup_cause)
+            )
+            return _soft_stop.outcome_of(windup_cause), cause
+        return RunOutcome.completed, None
 
     def stop(self) -> None:
         """Request graceful stop. The loop checks ``_stop_requested`` between phases.
@@ -3067,6 +3113,11 @@ class QueryEngine:
             # and the run carries on working past the bound it hit.
             "soft_stop_cause": self._soft_stop_cause,
             "soft_stop_stage": self._soft_stop_stage,
+            # With it the cause's provider verdict, so a run resumed while
+            # winding down still reports what failed it when it ends.
+            "run_cause": (
+                None if self._run_cause is None else self._run_cause.model_dump(mode="json")
+            ),
             # Whether the user has been answered. Derived, but persisted so a
             # consumer reading the snapshot does not have to re-derive the
             # run-scoping rule to find out.
@@ -3831,6 +3882,12 @@ class QueryEngine:
         )
         restored_stage = snapshot.get("soft_stop_stage")
         self._soft_stop_stage = restored_stage if isinstance(restored_stage, str) else ""
+        restored_run_cause = snapshot.get("run_cause")
+        self._run_cause = (
+            RunCause.model_validate(restored_run_cause)
+            if isinstance(restored_run_cause, dict)
+            else None
+        )
         from protocore.runtime import soft_stop as _soft_stop
 
         _soft_stop.restore(self)

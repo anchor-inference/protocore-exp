@@ -33,15 +33,18 @@ reader has already seen.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any, Final
+from typing import Any
 
 from protocore.contracts.llm import (
+    PERMANENT_FAILURE_REASONS,
+    SURFACE_INDEPENDENT_FAILURE_REASONS,
     LLMContextWindowExceeded,
     LLMError,
     LLMProviderError,
     LLMRateLimitError,
     LLMStreamIdleError,
     LLMTimeoutError,
+    provider_failure_of,
 )
 from protocore.contracts.turn_policy import (
     TurnContext,
@@ -369,6 +372,7 @@ class ProviderFailurePolicy:
                 engine,
                 cause=_soft_stop.CAUSE_PROVIDER_ERROR,
                 detail=f"{type(exc).__name__}: {exc}",
+                failure=provider_failure_of(exc),
             )
             if wind_down_when_stuck and self._produced_output(engine)
             else []
@@ -472,51 +476,9 @@ class ProviderFailurePolicy:
         turn.outcome.reason = INTERNAL_ERROR_KIND
 
 
-#: Classified reasons that name a permanent answer. An adapter that attaches
-#: one of these has already said the request will not succeed by being sent
-#: again; the class default of the exception it raised must not overrule it.
-_PERMANENT_FAILURE_REASONS: Final[frozenset[str]] = frozenset(
-    {
-        "auth",
-        "auth_permanent",
-        "billing",
-        "context_overflow",
-        "format_error",
-        "image_too_large",
-        "llama_cpp_grammar_pattern",
-        "long_context_tier",
-        "model_not_found",
-        "oauth_long_context_beta_forbidden",
-        "payload_too_large",
-        "provider_policy_blocked",
-        "thinking_signature",
-    }
-)
-
-
-#: Classified reasons of a permanent refusal that the wind-down's request would
-#: meet again. The wind-down keeps the history and the endpoint and changes only
-#: the tool surface (down to the finalizing tool), so a refusal about the
-#: account, the model, a content policy or something already in the history is
-#: not rescued by it. Any other permanent reason — a malformed or rejected tool
-#: schema, a request or grammar the full surface made too large — may be.
-_SURFACE_INDEPENDENT_REASONS: Final[frozenset[str]] = frozenset(
-    {
-        "auth",
-        "auth_permanent",
-        "billing",
-        "image_too_large",
-        "model_not_found",
-        "oauth_long_context_beta_forbidden",
-        "provider_policy_blocked",
-        "thinking_signature",
-    }
-)
-
-
 def _wind_down_may_help(exc: BaseException) -> bool:
     """Whether a permanent refusal could be caused by the tool surface the wind-down removes."""
-    return _classified_reason(exc) not in _SURFACE_INDEPENDENT_REASONS
+    return _classified_reason(exc) not in SURFACE_INDEPENDENT_FAILURE_REASONS
 
 
 def _classified_reason(exc: BaseException) -> str:
@@ -551,7 +513,7 @@ def _says_retryable(exc: LLMError) -> bool:
     flag = getattr(classified, "retryable", None) if classified is not None else None
     if isinstance(flag, bool):
         return flag
-    return _classified_reason(exc) not in _PERMANENT_FAILURE_REASONS
+    return _classified_reason(exc) not in PERMANENT_FAILURE_REASONS
 
 
 __all__ = ["ProviderFailurePolicy"]

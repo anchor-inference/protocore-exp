@@ -70,6 +70,8 @@ from protocore.contracts.llm import (
     LLMStreamEvent,
     ProviderDelta,
     ProviderDeltaKind,
+    ProviderFailure,
+    ProviderFailureReason,
 )
 from protocore.contracts.memory import (
     DEFAULT_RECALL_SCOPES,
@@ -99,6 +101,7 @@ from protocore.contracts.middleware import (
     RegistrationKind,
 )
 from protocore.contracts.observability import CacheObserverProtocol
+from protocore.contracts.outcome import RunCause, RunOutcome
 from protocore.contracts.prompts import (
     IPromptTemplateProvider,
     PromptTemplateError,
@@ -305,6 +308,8 @@ __all__ = [
     "PromptTemplateValidationError",
     "ProviderDelta",
     "ProviderDeltaKind",
+    "ProviderFailure",
+    "ProviderFailureReason",
     "RegistrationKind",
     "ReleaseDecision",
     "RequirementsManifest",
@@ -314,7 +319,9 @@ __all__ = [
     "ResilienceErrorClass",
     "RetryBudgetState",
     "Run",
+    "RunCause",
     "RunNotFoundError",
+    "RunOutcome",
     "RunState",
     "RunStatus",
     "RunStoreError",

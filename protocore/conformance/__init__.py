@@ -24,6 +24,7 @@ a failure rather than a silent skip.
 """
 from __future__ import annotations
 
+from protocore.conformance.provider_failure import assert_adapter_failure
 from protocore.conformance.request_manifest import RequestManifestSinkConformance
 from protocore.conformance.suite import (
     ContractSuite,
@@ -102,6 +103,7 @@ __all__ = [
     "ToolTransportConformance",
     "WorkPoolConformance",
     "WorkspaceConformance",
+    "assert_adapter_failure",
     "binds_a_subject",
     "bound_contracts",
     "bound_suites",

@@ -61,6 +61,7 @@ from protocore.contracts.interrupt import (
     plan_resolution,
 )
 from protocore.contracts.llm import (
+    PROVIDER_ADVANCE_REASONS,
     CacheBreakpoint,
     LLMContextWindowExceeded,
     LLMError,
@@ -72,6 +73,9 @@ from protocore.contracts.llm import (
     LLMTimeoutError,
     ProviderDelta,
     ProviderDeltaKind,
+    ProviderFailure,
+    ProviderFailureReason,
+    provider_failure_of,
 )
 from protocore.contracts.middleware import (
     ILifecycleRegistry,
@@ -83,6 +87,7 @@ from protocore.contracts.observability import (
     build_request_manifest,
     constants_digest,
 )
+from protocore.contracts.outcome import RunCause
 from protocore.contracts.run_state import RunScopedState
 from protocore.contracts.skills import (
     ISkillStore,
@@ -313,7 +318,11 @@ _logger = get_logger(__name__)
 
 
 def _enter_soft_stop(
-    engine: QueryEngine, *, cause: str, detail: str = ""
+    engine: QueryEngine,
+    *,
+    cause: str,
+    detail: str = "",
+    failure: ProviderFailure | None = None,
 ) -> list[TurnEvent]:
     """Begin the run wind-down for ``cause``. The ONE entry point.
 
@@ -336,7 +345,7 @@ def _enter_soft_stop(
         return []
     if _soft_stop.is_armed(engine):
         return []
-    events = _soft_stop.enter(engine, cause_name=cause, detail=detail)
+    events = _soft_stop.enter(engine, cause_name=cause, detail=detail, failure=failure)
     if events:
         # The terminal-only guard shares this latch with the voluntary-finish
         # contract repair: it is what makes a blocked non-terminal dispatch
@@ -2883,54 +2892,6 @@ async def _emit_dispatch_cancel_teardown(
     )
 
 
-#: Failure classes a DIFFERENT provider could plausibly serve. Each names a
-#: property of the row that failed — its quota, its capacity, its key, its
-#: balance, its catalogue — and never a property of the request, so the next row
-#: gets a real chance rather than reproducing the same failure at a second
-#: vendor's expense.
-#:
-#: Everything absent from this set keeps the recovery it already has, and the
-#: omissions are the load-bearing part. A prompt that overflows the window is
-#: fixed by compaction, which advancing would skip; an oversized body is fixed
-#: by compressing it; a malformed request is fixed by the structured-output
-#: ladder; an invalid reasoning payload is CAUSED by a model swap, so swapping
-#: again compounds it; a policy refusal re-routed to a vendor that might accept
-#: the content is a compliance decision and not a default. An unclassified
-#: failure is excluded on principle — advancing on an error nobody has
-#: characterised turns one broken run into N provider calls and N bills.
-#:
-#: Compared as plain strings against the verdict the adapter layer attaches to
-#: the raised error. The taxonomy itself lives above core and core must not
-#: import it; a string comparison keeps the boundary intact and still fails
-#: closed, since a reason spelled differently simply is not in the set.
-_PROVIDER_ADVANCE_REASONS: frozenset[str] = frozenset(
-    {
-        "auth",
-        "auth_permanent",
-        "billing",
-        "model_not_found",
-        "overloaded",
-        "rate_limit",
-        "server_error",
-        "timeout",
-    }
-)
-
-
-@dataclass(frozen=True, slots=True)
-class _IdleStreamVerdict:
-    """Core's own verdict on a stream that stopped speaking.
-
-    The provider adapters pin their classification onto the errors they raise
-    and core reads it duck-typed, without naming the taxonomy. The idle
-    watchdog lives in core, so nothing above it can classify what it raises and
-    core has to supply the verdict itself — in the same shape, so the reader
-    below stays one function.
-    """
-
-    reason: str = "timeout"
-
-
 def _classified_failure_reason(exc: BaseException) -> str:
     """The adapter's verdict on ``exc``, or ``""`` when it carries none.
 
@@ -2960,11 +2921,13 @@ def _reason_permits_provider_advance(exc: BaseException) -> bool:
     Everything else is a :class:`LLMProviderError`, which is the adapters'
     catch-all: a 503 and a policy refusal reach this branch as the same Python
     type. Only the attached verdict separates them, so an unclassified one does
-    not advance.
+    not advance. Which verdicts advance is
+    :data:`~protocore.contracts.llm.PROVIDER_ADVANCE_REASONS`, compared by value
+    so an adapter's own taxonomy spelled the same way still counts.
     """
     if isinstance(exc, LLMRateLimitError | LLMTimeoutError):
         return True
-    return _classified_failure_reason(exc) in _PROVIDER_ADVANCE_REASONS
+    return _classified_failure_reason(exc) in PROVIDER_ADVANCE_REASONS
 
 
 async def _advance_provider_chain(
@@ -5908,7 +5871,9 @@ async def _iter_with_idle_watchdog(
             # stream that stopped speaking is a statement about the endpoint,
             # exactly like a timeout, so it is classified as one and the next
             # provider gets its turn.
-            object.__setattr__(idle_error, "classified", _IdleStreamVerdict())
+            idle_error.classified = ProviderFailure(
+                reason=ProviderFailureReason.timeout, retryable=True
+            )
             raise idle_error from exc
 
         now = loop.time()
@@ -6064,6 +6029,12 @@ async def _emit_llm_terminal(
         should_fallback = getattr(classified, "should_fallback", None)
         if should_fallback is not None:
             error_payload["should_fallback"] = bool(should_fallback)
+    # Recorded for the terminal stamp, which states the run's outcome and
+    # cause; replaces whatever a wind-down recorded, since this failure is the
+    # one the run ended on.
+    engine._run_cause = RunCause(
+        kind=kind, detail=str(exc), failure=provider_failure_of(exc)
+    )
     yield TurnEvent(
         type=EventType.ERROR,
         run_id=engine.config.run_id,

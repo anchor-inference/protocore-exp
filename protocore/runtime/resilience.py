@@ -132,12 +132,16 @@ _LLM_REASON_TO_CLASS: dict[str, ResilienceErrorClass] = {
     "overloaded": ResilienceErrorClass.transient_retryable,
     "server_error": ResilienceErrorClass.transient_retryable,
     "timeout": ResilienceErrorClass.timeout_rebuild,
+    # A connection that was refused or reset is a dead socket, rebuilt before
+    # the retry, exactly as the stdlib ``ConnectionError`` family is below.
+    "connection": ResilienceErrorClass.timeout_rebuild,
     "context_overflow": ResilienceErrorClass.context_overflow,
     "payload_too_large": ResilienceErrorClass.payload_too_large,
     "image_too_large": ResilienceErrorClass.payload_too_large,
     "auth": ResilienceErrorClass.deterministic_abort,
     "auth_permanent": ResilienceErrorClass.deterministic_abort,
     "billing": ResilienceErrorClass.deterministic_abort,
+    "budget": ResilienceErrorClass.deterministic_abort,
     "model_not_found": ResilienceErrorClass.deterministic_abort,
     "provider_policy_blocked": ResilienceErrorClass.deterministic_abort,
     "format_error": ResilienceErrorClass.deterministic_abort,

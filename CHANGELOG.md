@@ -45,6 +45,42 @@ All notable changes to this project are recorded here. The format follows
   above the count and compacted a third of a window that was still free.
   `ContextManager.needs_compaction` and `needs_emergency_compaction` take the
   measured size as `current_tokens`.
+- **`ProviderFailure`, the typed verdict on a provider failure
+  (`protocore.contracts.llm`).** A frozen model with `reason`
+  (`ProviderFailureReason`), `retryable`, `should_fallback`,
+  `retry_after_seconds` and `provider_message`, attached as
+  `LLMProviderError(message, classified=ProviderFailure(...))`; every
+  `LLMError` now takes `classified=`. The loop has always read these fields by
+  name off a `classified` attribute, and nothing published them, so an adapter
+  author had to read the loop to learn them. What the loop does with each
+  reason is three public sets drawn from the enum:
+  `PROVIDER_ADVANCE_REASONS`, `PERMANENT_FAILURE_REASONS` and
+  `SURFACE_INDEPENDENT_FAILURE_REASONS`. Two reasons are new: `connection` (the
+  endpoint could not be reached) and `budget` (a spend cap the host enforces).
+  `ProviderFailure` and `ProviderFailureReason` are re-exported from
+  `protocore.contracts`. See "Reporting a provider failure" in
+  `docs/contracts.md`.
+- **`classify_transport_exception(exc)` and `provider_failure_of(exc)`.** The
+  first gives an adapter the verdict for a refused, reset, aborted or
+  unreachable connection, an unresolvable name (`connection`) or a timeout
+  (`timeout`), found on the exception or down its cause chain, so an HTTP
+  client's own wrapper type is classified too; it returns `None` for anything
+  else. The second reads the typed verdict back from any raised error, lifting
+  an adapter's own verdict object onto `ProviderFailure`.
+- **`protocore.conformance.assert_adapter_failure(exc)`** checks, in an
+  adapter's own tests, that a raised error is an `LLMError` carrying a
+  `ProviderFailure` whose `retryable` agrees with the error's flag.
+- **Every terminal `message_stop` carries `outcome` and `cause`.**
+  `outcome` is a `RunOutcome` (`completed`, `failed`, `stopped`,
+  `wound_down`); `cause` is the JSON form of a `RunCause` (`kind`, `detail`,
+  and `failure`, the `ProviderFailure` when a provider failure ended the run),
+  or `None` for a run that simply completed. Both live in the new
+  `protocore.contracts.outcome` and are re-exported from `protocore.contracts`.
+  A host tells its own spend cap from a vendor's refusal by
+  `cause.failure.reason == "budget"` instead of matching words in a detail.
+  `soft_stop.enter` takes the verdict as `failure=`, and
+  `soft_stop.FAILING_CAUSES` / `soft_stop.outcome_of` name which wind-down
+  causes are failures.
 
 ### Changed
 
@@ -60,6 +96,38 @@ All notable changes to this project are recorded here. The format follows
   loaded as part of a whole group still one entry with it; names come back
   before `loaded_tool_groups`, which swapped a group loaded before a single
   tool and moved the tool list.
+- **A wind-down for `provider_error` or `model_no_progress` reports
+  `outcome="failed"`,** with the cause's detail and the provider's verdict,
+  even when the closing turn wrote prose; a wind-down for a bound the run was
+  given reports `wound_down`. Nothing else about such a run changes: its
+  `status`, `stop_reason`, `has_final_answer` and `soft_stop_cause` are what
+  they were, so a consumer that wants the old reading keeps reading those and
+  ignores the two new fields.
+- **`LLMError(..., classified=verdict)` sets the error's `retryable` from the
+  verdict** unless the raise passes `retryable=` as well, which still wins.
+  The error's flag is what every reader sees first, and the provider-failure
+  policy treats a `False` there as final, so a class default (`False` on a bare
+  `LLMError`, `True` on `LLMProviderError`) must not contradict the verdict the
+  error was raised with. Raising without `classified=` is unchanged.
+- **`LLMError.classified` is a declared attribute typed
+  `ProviderFailure | None`.** Attaching a verdict object of another type after
+  construction still works at run time (the loop reads the fields by name), but
+  a type checker now flags the assignment; attach a `ProviderFailure` instead,
+  or keep the old object and silence the check at that line.
+- **The snapshot schema is version 8.** It adds `run_cause`, the wind-down's
+  cause with the provider's verdict, so a run resumed while winding down still
+  reports what failed it. A version 7 payload is lifted with `run_cause: null`.
+  A build that reads at most version 7 refuses a version 8 snapshot, as with
+  every version bump: roll forward, not back.
+- **The private reason sets are gone.** `query._PROVIDER_ADVANCE_REASONS`,
+  `provider_failure._PERMANENT_FAILURE_REASONS` and
+  `provider_failure._SURFACE_INDEPENDENT_REASONS` are replaced by the public
+  sets in `protocore.contracts.llm`, and the idle watchdog attaches a
+  `ProviderFailure(reason="timeout")` instead of a private verdict type. The
+  sets compare by value, so a verdict whose reason is a plain string is still
+  matched.
+- **The resilience map knows the two new reasons:** `connection` is
+  `timeout_rebuild` and `budget` is `deterministic_abort`.
 
 ### Fixed
 
@@ -97,6 +165,19 @@ All notable changes to this project are recorded here. The format follows
   result a few characters over the head was cut and given a pointer longer
   than what was removed. A result counts only for what the cut really saves,
   the pointer and the carried lines paid for.
+- **A refused or reset connection moves the run to the next provider.** It
+  used to reach the loop with no verdict, or with one the advance set did not
+  name, so a dead endpoint ended the run even when a healthy fallback was
+  configured. A verdict with `reason="connection"` now advances the chain; an
+  error with no verdict still does not, on principle. An adapter that wants a
+  connection failure to stay on the current provider attaches a reason outside
+  `PROVIDER_ADVANCE_REASONS` (for instance `unknown`) or no verdict.
+- **A spend cap the host enforces ends the run at once.** Reported as
+  `reason="budget"`, it is permanent, never moves the chain and never winds
+  down, because every rung and every narrowed request meets the same cap.
+  Before, a reason the core did not know, with `retryable=False`, was wound
+  down once the run had produced anything, and the closing turn was refused by
+  the same cap.
 
 ## [2.0.0a25] - 2026-09-29
 

@@ -78,9 +78,11 @@ _RESET_ON_REARM: frozenset[str] = frozenset(
         # can only ever find it lowered; reset rather than preserved, because
         # a notice nobody consumed is not continuity the next turn needs.
         "_session_state_dirty",
-        # The wind-down and the finalisation latch it arms.
+        # The wind-down, the cause the run is ending on, and the finalisation
+        # latch the wind-down arms.
         "_soft_stop_cause",
         "_soft_stop_stage",
+        "_run_cause",
         "_terminal_only_active",
         # The terminal call forced after a delivered answer, and its bound:
         # both belong to the answer that armed them.

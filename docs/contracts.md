@@ -271,6 +271,45 @@ Three distinct run shapes — do not conflate them (see
 - **`IProviderChain`** — not a request/response type; the failover cursor
   `QueryEngine` rebinds onto `self.llm` when a mid-stream provider fails.
 
+### Provider failures and the run's outcome
+
+- **`ProviderFailure`** (`contracts/llm.py`, frozen) — the verdict an adapter
+  attaches to a provider error it raises:
+  `LLMProviderError(message, classified=ProviderFailure(...))`. Fields:
+  `reason` (a `ProviderFailureReason`), `retryable`, `should_fallback`,
+  `retry_after_seconds`, `provider_message`. The loop reads it to choose between
+  the next provider on the chain, another attempt on the same one, the
+  wind-down and a terminal failure. An error raised without a verdict keeps the
+  class default for `retryable` and never moves the chain.
+- **`ProviderFailureReason`** (`StrEnum`) — `auth` · `auth_permanent` ·
+  `billing` · `budget` · `connection` · `context_overflow` · `format_error` ·
+  `image_too_large` · `llama_cpp_grammar_pattern` · `long_context_tier` ·
+  `model_not_found` · `oauth_long_context_beta_forbidden` · `overloaded` ·
+  `payload_too_large` · `provider_policy_blocked` · `rate_limit` ·
+  `server_error` · `thinking_signature` · `timeout` · `unknown`. What the loop
+  does with each is three public sets in the same module:
+  `PROVIDER_ADVANCE_REASONS` (a sibling provider may serve it; includes
+  `connection`), `PERMANENT_FAILURE_REASONS` (the same request will not succeed
+  again) and `SURFACE_INDEPENDENT_FAILURE_REASONS` (narrowing the tool surface
+  in a wind-down will not get past it). `budget` is a spend cap the **host**
+  enforces: it is permanent, never moves the chain and never winds down.
+- **`classify_transport_exception(exc)`** — the verdict for a failure to reach
+  the endpoint at all (refused, reset, unreachable, unresolvable: `connection`;
+  timed out: `timeout`), found on the exception or down its cause chain, or
+  `None`. **`provider_failure_of(exc)`** reads the typed verdict back from any
+  raised error, lifting a verdict object of an adapter's own type onto
+  `ProviderFailure`.
+- **`RunOutcome`** / **`RunCause`** (`contracts/outcome.py`) — every terminal
+  `message_stop` carries `outcome` (`completed` · `failed` · `stopped` ·
+  `wound_down`) and `cause` (the JSON form of a `RunCause`: `kind`, `detail`,
+  and `failure`, the `ProviderFailure` when a provider failure ended the run;
+  `None` for a run that simply completed). A run wound down because the
+  provider failed (`provider_error`) or the model made no progress
+  (`model_no_progress`) ends `failed` even when its closing turn wrote prose; a
+  run wound down by a bound it was given (turns, tool calls, output tokens,
+  wall clock) ends `wound_down`. Read back with `RunOutcome(payload["outcome"])`
+  and `RunCause.model_validate(payload["cause"])`.
+
 ### Ingress, blobs, compaction
 
 - **`AgentEnvelope`** — the single cross-component ingress contract
@@ -390,6 +429,57 @@ To bind the core to a host:
 4. Construct a `QueryEngine` with your adapters and drive it with
    `async for evt in engine.run(message)`, or pick a stored run back up with
    `async for evt in resume(engine, snapshot)`.
+
+### Reporting a provider failure
+
+The loop never inspects a status code or a response body: the adapter does,
+and says what it found by attaching a `ProviderFailure` to the error it raises.
+Without one, a dead endpoint ends the run even when the next provider on the
+chain is healthy, and a server's `Retry-After` is never seen.
+
+```python
+from protocore.contracts.llm import (
+    LLMProviderError,
+    LLMRateLimitError,
+    ProviderFailure,
+    ProviderFailureReason,
+    classify_transport_exception,
+)
+
+try:
+    response = await client.post(url, json=body)
+except Exception as exc:
+    failure = classify_transport_exception(exc)  # refused / reset / timed out
+    if failure is None:
+        raise
+    raise LLMProviderError(str(exc), classified=failure) from exc
+
+if response.status_code == 429:
+    raise LLMRateLimitError(
+        response.text,
+        classified=ProviderFailure(
+            reason=ProviderFailureReason.rate_limit,
+            retryable=True,
+            retry_after_seconds=parse_retry_after(response.headers),
+            provider_message=response.text,
+        ),
+    )
+```
+
+- `retryable` on the verdict sets the error's own flag unless the raise passes
+  `retryable=` explicitly, and the loop reads the error's flag first; keep the
+  two in agreement.
+- `retry_after_seconds` lengthens the backoff before the next attempt on the
+  same endpoint, never past `llm_transient_error_retry_backoff_max_seconds`.
+- `should_fallback=True` says the structured-output form of the request was
+  refused and prompted JSON may be answered; only strategies with such a
+  fallback read it.
+- A spend cap the host enforces is reported as `reason=budget`,
+  `retryable=False`: the run fails at once and its terminal `cause.failure`
+  names the cap, so nobody has to match words in a message.
+- `protocore.conformance.assert_adapter_failure(exc)` checks, in the adapter's
+  own tests, that an error carries a verdict and that the two flags agree, and
+  returns the verdict for further assertions.
 
 The mechanics of extending the runtime — which seam to choose (protocol vs hook
 vs RC toggle vs prompt section) and the hard "do not modify the loop structure"
