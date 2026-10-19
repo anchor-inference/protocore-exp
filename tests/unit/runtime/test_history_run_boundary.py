@@ -557,6 +557,14 @@ _WHOLE_HISTORY_BY_DESIGN: dict[str, _Declaration] = {
         reason="records the messages one tier is taking out of the window",
         claim=_Claim.NOT_THE_TRANSCRIPT,
     ),
+    "protocore/providers/openai_compat/wire.py::messages_to_wire": _Declaration(
+        reason="renders the messages of one request the loop already assembled",
+        claim=_Claim.NOT_THE_TRANSCRIPT,
+    ),
+    "protocore/providers/openai_compat/wire.py::_allowed_image_positions": _Declaration(
+        reason="counts the images of one request the loop already assembled",
+        claim=_Claim.NOT_THE_TRANSCRIPT,
+    ),
     # --- building the seed, from messages the caller supplies ---------------
     "protocore/runtime/context/session_memory.py::_serialize_turns": _whole(
         "renders the turns it is handed; it reaches no engine"

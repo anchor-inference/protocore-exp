@@ -1,0 +1,13 @@
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-4","object":"chat.completion.chunk","model":"model-o","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning":"Planning the answer."},"finish_reason":null}]}
+
+data: {"id":"gen-4","object":"chat.completion.chunk","model":"model-o","choices":[{"index":0,"delta":{"content":"","reasoning_details":[{"type":"reasoning.encrypted","data":"opaque-blob-1","id":"rs_1","format":"vendor-v1","index":0}]},"finish_reason":null}]}
+
+data: {"id":"gen-4","object":"chat.completion.chunk","model":"model-o","choices":[{"index":0,"delta":{"content":"Answer."},"finish_reason":"stop"}]}
+
+data: {"id":"gen-4","object":"chat.completion.chunk","model":"model-o","choices":[{"index":0,"delta":{"content":""},"finish_reason":null}],"usage":{"prompt_tokens":300,"completion_tokens":25,"total_tokens":325,"cost":0.00042,"prompt_tokens_details":{"cached_tokens":256},"completion_tokens_details":{"reasoning_tokens":18}}}
+
+data: [DONE]
