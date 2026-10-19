@@ -270,6 +270,34 @@ Three distinct run shapes — do not conflate them (see
   optional `AttemptLedger` snapshot), with structural caps from
   `protocore.constants`.
 
+#### Writing a session's history off the loop
+
+The engine hands its working history to the store through
+`runtime/history_persist.py`: `persist_history_delta(engine, delta)` with only
+what changed, and **returning is the store's promise that the write landed**.
+A store that would rather not make every round wait for its database uses
+`OrderedHistoryPersister(write)`, where `write` is an `async` callable given
+the `HistoryDelta`:
+
+```python
+persister = OrderedHistoryPersister(store.write_history)
+persister.attach(engine)
+...
+await persister.flush()   # at a terminal state, before handing the session on
+```
+
+- Writes run one at a time, in hand-over order, off the caller's stack.
+- A write that raises or is cancelled calls
+  `engine.forget_persisted_history()` at once; every write still queued —
+  appends handed over before the failure was known included — is written whole
+  instead, from the engine's live history, and if nothing else is queued one
+  repair write is. A repair that fails is not repeated.
+- **Durability:** a hand-over returning means *queued*. `flush()` returning
+  means everything handed over before it landed; it raises
+  `HistoryPersistError` (cause: the store's exception) while the store is
+  behind. Queued writes are process-local, so a crash before the flush loses
+  them, and the next run's first hand-over is a rewrite.
+
 ### LLM request / response
 
 - **`LLMRequest`** — the request the loop assembles for `ILLMProvider`

@@ -130,6 +130,17 @@ All notable changes to this project are recorded here. The format follows
   `None`, so stored records without it still load. The `Remember` result's
   metadata also names the stored `kind`, and `provenance` when the record has
   one.
+- **`OrderedHistoryPersister`** (`protocore.runtime.history_persist`) defers
+  a store's history writes off the loop without losing their order or the
+  promise the hand-over makes. Given an `async` write of a `HistoryDelta`, it
+  runs one write at a time in hand-over order; a write that raises or is
+  cancelled calls `engine.forget_persisted_history()` at once, every write
+  still queued is written whole from the engine's live history, and one repair
+  write is queued if nothing else is. `flush()` is the durability barrier —
+  once it returns, everything handed over before it landed — and raises
+  `HistoryPersistError` while the store is behind; `cancel()` is for a
+  shutdown that cannot wait. `attach(engine)` installs it. A store that writes
+  inside the hand-over is unaffected.
 
 ### Changed
 

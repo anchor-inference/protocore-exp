@@ -1191,6 +1191,10 @@ the matching RC field says otherwise.
   way its messages do not show, such as a compaction checkpoint. Not in the
   snapshot: a run picked up on another process cannot know what the store took
   from the one before it, so its first hand-over rewrites.
+  `OrderedHistoryPersister` is the deferred store written once: writes queued
+  off the loop and run in hand-over order, the promise taken back from inside
+  a failed write, the history written whole until a write lands, and `flush()`
+  as the durability barrier (`HistoryPersistError` while the store is behind).
 - `runtime/tool_surface.py` — the advertised tool surface, named rather than
   quoted. `read_tool_surface` serialises and digests the definitions;
   `tool_surface_tokens` costs them once per digest instead of once per LLM
