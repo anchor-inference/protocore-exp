@@ -259,6 +259,67 @@ available context size (N tokens)»).
   ошибку вызова. `FailureObservation` хранит только заголовки повтора, так что
   не может сохранить учётные данные, которые вернул прокси.
 
+## Бюджет расходов и цены
+
+Цикл считает токены; деньги считает хост. Адаптер даёт этому решению одно
+место (`protocore.providers.spend`, чистый Python):
+
+```python
+from protocore.providers.spend import ModelPricing, SpendRefused
+
+prices = {"model-a": ModelPricing(input=0.30, output=1.20, cached_input=0.03)}
+
+class DailyCap:
+    async def reserve(self, estimate):          # перед каждым вызовом
+        if spent_today() + (estimate.cost_usd or 0) > CAP:
+            raise SpendRefused("daily cap reached", retry_after_seconds=until_midnight())
+        return hold(estimate)                   # id резерва или None
+    async def settle(self, reservation, settlement):   # вызов сообщил расход
+        book(reservation, settlement.cost_usd, complete=settlement.complete)
+    async def release(self, reservation, *, outcome, detail):  # расхода не пришло
+        drop_or_keep(reservation, outcome)
+
+provider = OpenAICompatibleProvider(spec, admission=DailyCap(), pricing=prices.get)
+```
+
+- `reserve(SpendEstimate)` спрашивается перед каждым вызовом (поток, текст,
+  структурированный) с эндпоинтом, моделью, назначением, оценкой размера
+  промпта, потолком вывода, верхней границей цены в `cost_usd` (когда цены
+  модели известны) и контекстом наблюдаемости запроса. Исключение
+  `SpendRefused` отказывает в вызове: ничего не отправляется, а цикл видит
+  `LLMProviderError` с `ProviderFailure` причины `budget` — каждая ступень
+  цепочки упирается в тот же потолок, поэтому ничто его не повторяет и не
+  обходит. `None` означает, что вызов не нужно учитывать.
+- За резервом следует ровно один из `settle` и `release`. `settle(id,
+  SpendSettlement)` несёт нормализованный расход, сырой расход, `cost_usd`
+  (собственный `cost` сервера, иначе цену по таблице) и `complete`, равный
+  `False`, когда сервер не сообщил ни одного счётчика токенов: вызов мог быть
+  оплачен, так что хост обычно оставляет резерв потраченным. Он выполняется до
+  дельты `usage`, потому что цикл может перестать читать на `finish`.
+- `release(id, outcome=..., detail=...)` сообщает, что вызов кончился без
+  расхода: `SpendEnd.refused`, когда сервер ответил 4xx или 5xx (обычно не
+  оплачивается), `SpendEnd.interrupted`, когда запрос ушёл и не закончился —
+  оборванный поток, тайм-аут первого байта, вызывающий перестал читать (вывод
+  мог уже быть сгенерирован).
+
+Упавший `settle` или `release` пишется в лог и никогда не заменяет
+собственный результат или ошибку вызова. Переопределите
+`estimate_spend(request, body, purpose)`, чтобы оценивать промпт точно; по
+умолчанию это оценка ядра для сообщений и инструментов в том виде, в каком
+они уходят на провод, — ей достаточно ошибаться в большую сторону.
+
+`ModelPricing(input, output, cached_input=None, cache_write=None,
+reasoning=None)` хранит доллары США за миллион токенов. `cost(usage)`
+оценивает свежий ввод, чтение кэша, запись в кэш, видимый вывод и
+рассуждения каждый по своей ставке, читая ключи, которые сообщает адаптер
+(`input_tokens` — весь промпт вместе с кэшем; `output_tokens` включает
+`reasoning_tokens`). Не указанная цена кэша равна цене ввода, а не указанная
+цена рассуждений — цене вывода, так что пропущенное число никогда не делает
+токены бесплатными. `estimate(prompt_tokens=, max_output_tokens=)` — верхняя
+граница: ни одного попадания в кэш, весь потолок вывода по более дорогой
+ставке. С `pricing=` расход без цены от сервера получает `cost_usd` из
+таблицы — в дельте `usage` и в `LLMResponse.usage.response_cost_usd`.
+
 ## Точный подсчёт токенов
 
 С `EndpointSpec(tokenize=TokenizeDialect.vllm)` или

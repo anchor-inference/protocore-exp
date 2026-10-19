@@ -15,4 +15,6 @@ package holds implementations a host can use as they are or subclass:
 * :mod:`protocore.providers.text_tool_calls` — a guard that recovers tool calls
   a model wrote as reply text, with pluggable markups (DSML first). Pure
   Python; the reference adapter applies it per endpoint.
+* :mod:`protocore.providers.spend` — :class:`~protocore.providers.spend.ModelPricing`
+  and the spend admission hook a host enforces a budget through. Pure Python.
 """

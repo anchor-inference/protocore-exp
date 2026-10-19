@@ -163,6 +163,21 @@ All notable changes to this project are recorded here. The format follows
   sending a `progress` delta for each held piece and reporting the turn as
   `tool_use`. The default is empty, which passes text through exactly as
   before. See `docs/providers.md`.
+- **A spend admission hook and per-model prices
+  (`protocore.providers.spend`).** `ISpendAdmission` is asked before every
+  call (`reserve`, with a `SpendEstimate`: endpoint, model, purpose, the
+  estimated prompt, the output cap and an upper-bound cost) and told how it
+  ended: `settle` with the reported usage and cost, or `release` with
+  `SpendEnd.refused` (the server answered 4xx/5xx) or
+  `SpendEnd.interrupted` (sent and never finished: a broken stream, a
+  first-byte timeout, a caller that stopped reading). Raising `SpendRefused`
+  refuses the call before anything is sent, and the loop sees a `budget`
+  `ProviderFailure` that nothing retries. `ModelPricing(input, output,
+  cached_input, cache_write, reasoning)` prices a usage report
+  (`cost(usage)`) and gives the upper bound a reservation needs
+  (`estimate(...)`); an omitted rate falls back to the one that cannot
+  undercharge. The reference adapter takes `admission=` and `pricing=`;
+  without them it behaves as before. See `docs/providers.md`.
 
 ### Changed
 

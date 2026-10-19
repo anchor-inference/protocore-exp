@@ -258,6 +258,67 @@ Three points are meant to be overridden or passed in:
   `FailureObservation` keeps only the retry headers, so it cannot store a
   credential a proxy echoed back.
 
+## Spend budgets and prices
+
+The loop budgets tokens; money is the host's to budget. The adapter gives that
+decision one place to happen (`protocore.providers.spend`, pure Python):
+
+```python
+from protocore.providers.spend import ModelPricing, SpendRefused
+
+prices = {"model-a": ModelPricing(input=0.30, output=1.20, cached_input=0.03)}
+
+class DailyCap:
+    async def reserve(self, estimate):          # before every call
+        if spent_today() + (estimate.cost_usd or 0) > CAP:
+            raise SpendRefused("daily cap reached", retry_after_seconds=until_midnight())
+        return hold(estimate)                   # a reservation id, or None
+    async def settle(self, reservation, settlement):   # the call reported usage
+        book(reservation, settlement.cost_usd, complete=settlement.complete)
+    async def release(self, reservation, *, outcome, detail):  # no usage came
+        drop_or_keep(reservation, outcome)
+
+provider = OpenAICompatibleProvider(spec, admission=DailyCap(), pricing=prices.get)
+```
+
+- `reserve(SpendEstimate)` is asked before each call (stream, text,
+  structured) with the endpoint, model, purpose, the estimated prompt size,
+  the output cap, the pricing's upper bound in `cost_usd` (when the model's
+  prices are known) and the request's observability context. Raising
+  `SpendRefused` refuses the call: nothing is sent, and the loop sees
+  `LLMProviderError` with a `budget` `ProviderFailure` — every rung meets the
+  same cap, so nothing retries it or moves past it. Returning `None` means
+  the call needs no accounting.
+- Exactly one of `settle` and `release` follows a reservation. `settle(id,
+  SpendSettlement)` carries the normalised usage, the raw usage, `cost_usd`
+  (the server's own `cost`, else the pricing's price) and `complete`, which is
+  `False` when the server reported no token counts: the call may still have
+  been billed, so a host usually keeps the reservation as spent. It runs
+  before the `usage` delta is yielded, because the loop may stop reading at
+  `finish`.
+- `release(id, outcome=..., detail=...)` says the call ended without usage:
+  `SpendEnd.refused` when the server answered with a 4xx or 5xx (usually not
+  billed), `SpendEnd.interrupted` when it was sent and never finished — a
+  broken stream, a first-byte timeout, a caller that stopped reading (output
+  may already have been generated).
+
+A failing `settle` or `release` is logged and never replaces the call's own
+result or error. Override `estimate_spend(request, body, purpose)` to estimate
+the prompt exactly; the default is the core's estimate of the messages and
+tools as they go on the wire, which only has to err high.
+
+`ModelPricing(input, output, cached_input=None, cache_write=None,
+reasoning=None)` holds US dollars per million tokens. `cost(usage)` prices
+fresh input, cache reads, cache writes, visible output and reasoning each at
+its own rate, reading the keys the adapter reports (`input_tokens` is the
+whole prompt, cache included; `output_tokens` includes `reasoning_tokens`).
+An omitted cache price is the input price and an omitted reasoning price the
+output price, so a missing number never makes tokens free.
+`estimate(prompt_tokens=, max_output_tokens=)` is the upper bound: no cache
+hit, the whole output cap spent at the dearer output rate. With `pricing=`
+given, a usage report without a server-stated cost gets `cost_usd` from the
+table, on the `usage` delta and on `LLMResponse.usage.response_cost_usd`.
+
 ## Exact token counts
 
 With `EndpointSpec(tokenize=TokenizeDialect.vllm)` or
