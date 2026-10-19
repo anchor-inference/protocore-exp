@@ -421,6 +421,25 @@ without. The call sits on the hot path, so a provider that gathers from slow
 sources caches per turn (key on `turn_id`). The planner call and the
 summariser are not given it.
 
+### Choose each turn's reasoning effort
+
+**Use when** one session should not run every message at one effort: "thanks"
+does not need what a refactoring needs. Implement
+`IReasoningEffortClassifier` (`contracts/reasoning_effort.py`) and pass it as
+`QueryEngineConfig.reasoning_effort_classifier`. Once per turn, after
+`user_prompt_submit` has admitted it and before the first request, the core
+calls `choose_effort(EffortRequest(...))` with the newest user message, the
+model and the base effort (`QueryEngineConfig.reasoning_effort`), and runs the
+turn at the effort returned. A `state_changed` event with reason
+`reasoning_effort_chosen` says what was chosen. `None` keeps the base; a value
+outside the core's efforts and an exception are logged and ignored. A live
+effort (`apply_live_controls`) is the user's standing choice: it wins, and the
+classifier is not asked while it is in force. The loop's temporary lower
+effort after a reasoning cut-off still wins for the requests it covers. The
+choice is per turn — a re-armed engine asks again — and a snapshot carries it,
+so a resumed turn does not ask twice. The user's message waits behind the
+call: bound the classifier's latency yourself.
+
 ---
 
 ### Substitute a turn policy

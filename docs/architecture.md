@@ -331,6 +331,7 @@ governing `LoopConstants` field(s) and their safe/off default.
 | Session work pool (background commands + child runs) | `contracts/background.py` | none in core; the pool is injected | Yes (`ensure_session_attached`, `drain_wakes`) | Yes |
 | Request manifest | `contracts/observability.py`, `runtime/query.py::build_llm_request` | none — a run records when `QueryEngineConfig.request_manifest_sink` is bound | Yes when a sink is bound | Yes |
 | Turn context (volatile request suffix) | `contracts/turn_context.py`, `runtime/query.py::_with_turn_context` | none — appended when `QueryEngineConfig.turn_context_provider` is bound | Yes when a provider is bound | Yes |
+| Per-turn reasoning effort | `contracts/reasoning_effort.py`, `runtime/query.py::_classify_reasoning_effort` | none — asked when `QueryEngineConfig.reasoning_effort_classifier` is bound | Yes when a classifier is bound | Yes |
 | Conformance suites | `protocore/conformance/*` | n/a (a test-time package, `protocore[testing]`) | No — the host runs them against its own adapters | Yes |
 | Universal resilience layer | `contracts/resilience.py`, `runtime/resilience.py` | `resilience_enabled` = `False`; the transport attempt count is a host knob | Ledger/band: Yes; transport wrapper: host-only | Yes |
 | Failure classification | `contracts/resilience.py::IResilienceClassifier`, `runtime/error_kinds.py` | none — the classifier is `QueryEngineConfig.resilience_classifier`; unbound means no wording is recognised | Yes | Yes |

@@ -315,6 +315,7 @@ protocore (чистое ядро, ноль импортов вверх)
 | Session work pool (фоновые команды + дочерние прогоны) | `contracts/background.py` | в ядре нет; пул инъецируется | Yes (`ensure_session_attached`, `drain_wakes`) | Yes |
 | Request manifest | `contracts/observability.py`, `runtime/query.py::build_llm_request` | нет — прогон записывает, когда привязан `QueryEngineConfig.request_manifest_sink` | Yes, когда приёмник привязан | Yes |
 | Turn context (volatile request suffix) | `contracts/turn_context.py`, `runtime/query.py::_with_turn_context` | нет — добавляется, когда привязан `QueryEngineConfig.turn_context_provider` | Yes, когда провайдер привязан | Yes |
+| Per-turn reasoning effort | `contracts/reasoning_effort.py`, `runtime/query.py::_classify_reasoning_effort` | нет — спрашивается, когда привязан `QueryEngineConfig.reasoning_effort_classifier` | Yes, когда классификатор привязан | Yes |
 | Conformance suites | `protocore/conformance/*` | n/a (пакет времени тестов, `protocore[testing]`) | No — хост гоняет их против собственных адаптеров | Yes |
 | Universal resilience layer | `contracts/resilience.py`, `runtime/resilience.py` | `resilience_enabled` = `False`; the transport attempt count is a host knob | Ledger/band: Yes; transport wrapper: host-only | Yes |
 | Failure classification | `contracts/resilience.py::IResilienceClassifier`, `runtime/error_kinds.py` | нет — классификатор приходит как `QueryEngineConfig.resilience_classifier`; если он не привязан, ни одна формулировка не распознаётся | Yes | Yes |

@@ -29,6 +29,7 @@ from protocore.contracts.memory import IMemory, IMemoryContentScanner
 from protocore.contracts.middleware import ILifecycleRegistry
 from protocore.contracts.observability import CacheObserverProtocol
 from protocore.contracts.prompts import IPromptTemplateProvider
+from protocore.contracts.reasoning_effort import IReasoningEffortClassifier
 from protocore.contracts.resilience import (
     ClassifiedLike,
     IResilienceClassifier,
@@ -160,6 +161,12 @@ class ClassifiedErrorConformance(ContractSuite):
     protocol = ClassifiedLike
 
 
+class ReasoningEffortClassifierConformance(ContractSuite):
+    """The chooser of each turn's reasoning effort."""
+
+    protocol = IReasoningEffortClassifier
+
+
 class ResilienceClassifierConformance(ContractSuite):
     """The host's verdict on what kind of failure a message describes."""
 
@@ -262,6 +269,7 @@ SUITES: tuple[type[ContractSuite], ...] = (
     CacheObserverConformance,
     PromptTemplateProviderConformance,
     ClassifiedErrorConformance,
+    ReasoningEffortClassifierConformance,
     ResilienceClassifierConformance,
     ToolTransportConformance,
     RequestManifestSinkConformance,

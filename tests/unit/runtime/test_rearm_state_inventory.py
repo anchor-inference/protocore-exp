@@ -128,6 +128,11 @@ _RESET_ON_REARM: frozenset[str] = frozenset(
         "_empty_completion_redrive_count",
         "_reasoning_recovery_thinking_enabled",
         "_reasoning_recovery_effort",
+        # The effort the host's classifier chose for one turn, from the message
+        # that opened it. The next turn opens with another message and is
+        # sorted again.
+        "_classified_reasoning_effort",
+        "_reasoning_effort_classified",
         # Fire-once report that the session's background pool cannot speak for
         # the session. A run re-armed onto a pool that is still detached is
         # entitled to be told again.

@@ -88,6 +88,7 @@ from protocore.contracts.observability import (
     constants_digest,
 )
 from protocore.contracts.outcome import RunCause
+from protocore.contracts.reasoning_effort import EffortRequest
 from protocore.contracts.run_state import RunScopedState
 from protocore.contracts.skills import (
     ISkillStore,
@@ -2415,6 +2416,10 @@ async def _drive_turn(engine: QueryEngine) -> AsyncIterator[TurnEvent]:
         )
         return
 
+    chosen_effort = await _classify_reasoning_effort(engine)
+    if chosen_effort is not None:
+        yield chosen_effort
+
     # ── 4. Build context bundle ──────────────────────────────────────
     # ``effective_tool_policy`` (read inside) applies the RC core tool-surface
     # floor; the builder holds back deferred groups and appends discovered
@@ -2903,6 +2908,73 @@ async def _run_compaction(
         compacting_from,
         LoopState.RUNNING,
         reason="compaction_completed",
+    )
+
+
+async def _classify_reasoning_effort(engine: QueryEngine) -> TurnEvent | None:
+    """Ask the host's classifier for this turn's effort, once, and say what it chose.
+
+    Not asked while a live effort is in force — that is the user's standing
+    choice and would win anyway — nor a second time in one turn, a resumed one
+    included. An answer that is not one of the core's efforts, and a classifier
+    that raises, leave the turn at the effort it had.
+    """
+    from protocore.runtime.query_engine import REASONING_EFFORTS
+
+    classifier = engine.config.reasoning_effort_classifier
+    if (
+        classifier is None
+        or engine._reasoning_effort_classified
+        or engine._live_reasoning_effort is not None
+    ):
+        return None
+    engine._reasoning_effort_classified = True
+    base = engine.config.reasoning_effort
+    try:
+        chosen = await classifier.choose_effort(
+            EffortRequest(
+                tenant_id=engine.config.tenant_id,
+                run_id=engine.config.run_id,
+                session_id=engine.config.session_id,
+                turn_id=engine.turn_id(),
+                model=engine.effective_model_name,
+                message=engine.latest_user_message,
+                base_effort=base,
+            )
+        )
+    except Exception as exc:
+        _logger.warning(
+            "reasoning effort classifier failed for run=%s (err=%s); the turn "
+            "runs at %s",
+            engine.config.run_id,
+            exc,
+            base,
+        )
+        return None
+    if chosen is None:
+        return None
+    if chosen not in REASONING_EFFORTS:
+        _logger.warning(
+            "reasoning effort classifier chose %r for run=%s, which is not one "
+            "of %s; the turn runs at %s",
+            chosen,
+            engine.config.run_id,
+            ", ".join(REASONING_EFFORTS),
+            base,
+        )
+        return None
+    engine._classified_reasoning_effort = chosen
+    return TurnEvent(
+        type=EventType.STATE_CHANGED,
+        run_id=engine.config.run_id,
+        payload={
+            "from": engine.state.value,
+            "to": engine.state.value,
+            "reason": "reasoning_effort_chosen",
+            "reasoning_effort": chosen,
+            "base_reasoning_effort": base,
+            "turn_id": engine.turn_id(),
+        },
     )
 
 

@@ -75,6 +75,7 @@ from protocore.contracts.outcome import (
     RunOutcome,
 )
 from protocore.contracts.prompts import IPromptTemplateProvider
+from protocore.contracts.reasoning_effort import IReasoningEffortClassifier
 from protocore.contracts.resilience import IResilienceClassifier
 from protocore.contracts.run_state import RunScopedState
 from protocore.contracts.runtime_constants import LoopConstants
@@ -474,6 +475,16 @@ class QueryEngineConfig:
 
     Where the manifest is kept, and for how long, is the host's decision. The
     core stores nothing, deletes nothing, and never reads a manifest back.
+    """
+    reasoning_effort_classifier: IReasoningEffortClassifier | None = None
+    """Optional chooser of each turn's reasoning effort.
+
+    Asked once per turn, after ``user_prompt_submit`` admits it and before the
+    first request, with the newest user message and the effort the turn would
+    otherwise run at. What it names runs the turn, below a live choice of
+    effort and above ``reasoning_effort``. See
+    :mod:`protocore.contracts.reasoning_effort`. Unset, the effort is chosen
+    as before.
     """
     turn_context_provider: ITurnContextProvider | None = None
     """Optional source of the volatile block appended to every request.
@@ -1403,6 +1414,11 @@ class QueryEngine:
         self._live_model_name: str | None = None
         self._live_thinking_enabled: bool | None = None
         self._live_reasoning_effort: str | None = None
+        # The effort the host's classifier chose for this turn, and whether it
+        # was asked. Per turn, so a re-arm drops both and the next turn asks
+        # again; a snapshot carries them, so a resumed turn does not.
+        self._classified_reasoning_effort: str | None = None
+        self._reasoning_effort_classified: bool = False
         self._token_estimate_calibration_baseline: float = (
             config.rc.token_estimate_calibration
         )
@@ -3136,6 +3152,8 @@ class QueryEngine:
             "live_model_name": self._live_model_name,
             "live_thinking_enabled": self._live_thinking_enabled,
             "live_reasoning_effort": self._live_reasoning_effort,
+            "classified_reasoning_effort": self._classified_reasoning_effort,
+            "reasoning_effort_classified": self._reasoning_effort_classified,
             "reasoning_length_cut_count": self._reasoning_length_cut_count,
             "reasoning_recovery_thinking_enabled": (
                 self._reasoning_recovery_thinking_enabled
@@ -3887,6 +3905,15 @@ class QueryEngine:
         self._live_reasoning_effort = (
             live_effort if isinstance(live_effort, str) else None
         )
+        classified_effort = snapshot.get("classified_reasoning_effort")
+        self._classified_reasoning_effort = (
+            classified_effort
+            if isinstance(classified_effort, str) and classified_effort in REASONING_EFFORTS
+            else None
+        )
+        self._reasoning_effort_classified = (
+            snapshot.get("reasoning_effort_classified") is True
+        )
         self._reasoning_length_cut_count = int(
             snapshot.get("reasoning_length_cut_count", 0)
         )
@@ -4090,7 +4117,11 @@ class QueryEngine:
     def effective_reasoning_effort(self) -> str:
         if self._reasoning_recovery_effort is not None:
             return self._reasoning_recovery_effort
-        return self._live_reasoning_effort or self.config.reasoning_effort
+        return (
+            self._live_reasoning_effort
+            or self._classified_reasoning_effort
+            or self.config.reasoning_effort
+        )
 
     def clear_reasoning_recovery_overrides(self) -> None:
         """Drop temporary reasoning controls without refunding retry budget."""

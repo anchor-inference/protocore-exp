@@ -152,6 +152,17 @@ All notable changes to this project are recorded here. The format follows
   the first history message that is not where it was, and a one-line
   `describe()`. Message bodies come from the manifest when inline or from the
   bodies the sink stored; a request's volatile suffix is left out.
+- **A per-turn reasoning-effort hook.**
+  `QueryEngineConfig.reasoning_effort_classifier` takes an
+  `IReasoningEffortClassifier` (`protocore.contracts.reasoning_effort`), asked
+  once per turn, after `user_prompt_submit` admits it, with an `EffortRequest`
+  carrying the newest user message and the base effort. The turn runs at the
+  effort it returns, announced by a `state_changed` event with reason
+  `reasoning_effort_chosen`; a live effort wins and suppresses the call, the
+  reasoning-recovery effort still wins for its requests, and an unknown value
+  or an exception is ignored. The choice is per turn (dropped on re-arm) and
+  carried in the snapshot (`classified_reasoning_effort`). Unset, the effort is
+  chosen as before.
 
 ### Changed
 
