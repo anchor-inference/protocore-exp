@@ -69,6 +69,7 @@ Python ≥ 3.12. Зависимости рантайма — `pydantic`, `jinja2
 
 ```bash
 pip install "protocore[testing]==2.0.0a25"   # прогнать conformance-наборы на своих адаптерах
+pip install "protocore[openai]==2.0.0a25"    # эталонный адаптер chat-completions
 ```
 
 `testing` добавляет только тест-раннер: `protocore.conformance` — это pytest-набор,
@@ -76,6 +77,11 @@ pip install "protocore[testing]==2.0.0a25"   # прогнать conformance-на
 контрактов (`pytest --pyargs protocore.conformance`). Ни линтера, ни проверки
 типов ядра в этот набор не входит — они нужны тому, кто правит ядро, а не тому,
 кто его использует.
+
+`openai` добавляет `httpx` для `protocore.providers.openai_compat` — эталонного
+адаптера для любого сервера с API OpenAI chat-completions (облачный вендор,
+шлюз, vLLM, SGLang, llama.cpp). Ядро его никогда не импортирует; см.
+[Провайдеры](docs/ru/providers.md).
 
 У оценки токенов есть и нативная реализация — отдельный дистрибутив
 `protocore-native`. Колёс для него на индексе пока нет, поэтому сейчас он
@@ -161,6 +167,7 @@ asyncio.run(main())
 | [Инструменты](docs/ru/tools.md) | лаконичная поверхность инструментов и gate доступа |
 | [Runtime-константы](docs/ru/runtime-constants.md) | модель конфигурации |
 | [Расширение ядра](docs/ru/extending.md) | адаптеры, hooks, переключатели, секции промпта |
+| [Провайдеры](docs/ru/providers.md) | эталонный адаптер chat-completions и цепочка провайдеров |
 | [Тестирование](docs/ru/testing.md) | запуск тестов и страж границы импортов |
 | [Глоссарий](docs/ru/glossary.md) | ключевые термины |
 

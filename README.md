@@ -64,6 +64,7 @@ Python ≥ 3.12. Runtime dependencies are `pydantic`, `jinja2`, and
 
 ```bash
 pip install "protocore[testing]==2.0.0a25"   # run the conformance suites against your adapters
+pip install "protocore[openai]==2.0.0a25"    # the reference chat-completions adapter
 ```
 
 `testing` adds a test runner and nothing more. `protocore.conformance` is a
@@ -71,6 +72,11 @@ pytest suite that ships inside the wheel, and a host points it at its own
 implementations of the contracts (`pytest --pyargs protocore.conformance`). The
 core's linter and type checker are deliberately not in it: those belong to
 someone changing the core, not to someone using it.
+
+`openai` adds `httpx` for `protocore.providers.openai_compat`, a reference
+adapter for any server that speaks the OpenAI chat-completions API (a hosted
+vendor, a gateway, vLLM, SGLang, llama.cpp). The core never imports it; see
+[Providers](docs/providers.md).
 
 Token estimation also has an optional native implementation, published as the
 separate distribution `protocore-native`. Wheels for it are not on the index
@@ -154,6 +160,7 @@ through what each event means and what to replace next.
 | [Tools](docs/tools.md) | the lean tool surface and the permission gate |
 | [Runtime constants](docs/runtime-constants.md) | the configuration model |
 | [Extending the core](docs/extending.md) | adapters, hooks, toggles, prompt sections |
+| [Providers](docs/providers.md) | the reference chat-completions adapter and the provider chain |
 | [Testing](docs/testing.md) | running the suite and the import-boundary guard |
 | [Glossary](docs/glossary.md) | key terms |
 
