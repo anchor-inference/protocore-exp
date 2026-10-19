@@ -710,6 +710,9 @@ class DispatchOutcome:
  canonical_content:
  The whole value the tool returned, when ``content`` is only a
  projection of it. ``None`` means the two are the same value.
+ A ``post_tool_use`` hook that rewrote the output leaves it ``None``,
+ together with ``canonical_ref`` and ``ui_payload``: the original must not
+ outlive the process.
  ui_payload:
  Structured detail for whoever is watching the run. Rides the result
  event and stops there — it never enters the transcript.
@@ -1997,10 +2000,10 @@ class ToolDispatcher:
         success = not tool_result.is_error
         # ``content`` from here on is the MODEL PROJECTION — the text that
         # will sit in the transcript. The canonical value is kept beside it
-        # and is never rewritten by anything below: the error paths, the
-        # consecutive-error cap and the PostToolUse hook all speak to the
-        # model, and a message written for the model is not the value the
-        # tool produced.
+        # and is not rewritten by the error paths or the consecutive-error
+        # cap: they speak to the model, and a message written for the model
+        # is not the value the tool produced. The one exception is a
+        # PostToolUse hook that rewrites the output, below.
         canonical_content = tool_result.content
         content = tool_result.model_content
         # What the parallel path's replay rebuilds a failed result's text from.
@@ -2158,6 +2161,19 @@ class ToolDispatcher:
         )
         if post_hook_fired is not None:
             yield post_hook_fired
+        if post_tool_output_modified:
+            # A rewriting hook exists so the original never leaves the
+            # process — a redactor is the usual one. Kept as the canonical
+            # value, the original rode the result block into the history,
+            # every snapshot and the request handed to the adapter, and an
+            # over-limit result wrote it to the blob store on entry. The
+            # hook's text becomes the value. A reference the tool stored
+            # itself and a UI payload are dropped as well: the hook never saw
+            # them, so nothing says they are clean. ``path`` stays — it names
+            # where the result came from, not what it said.
+            canonical_content = content
+            canonical_ref = None
+            ui_payload = None
 
         outcome_metadata: dict[str, Any] | None = result_metadata or None
         outcome_replay_message: str | None = None

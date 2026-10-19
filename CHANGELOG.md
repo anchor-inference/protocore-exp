@@ -66,6 +66,14 @@ All notable changes to this project are recorded here. The format follows
   hook that should only see successes returns `ALLOW` when `is_error` is true.
   `success` is still sent. A `MODIFY` on a failure replaces the error text
   everywhere it goes, as on a success.
+- **A `post_tool_use` hook that rewrites a result now replaces the tool's own
+  value, not only the transcript text.** The canonical value used to be kept
+  beside the projection whatever the hook did. After a `MODIFY` with a string
+  `tool_output` the result carries no `canonical_content`, no `canonical_ref`
+  the tool stored itself (the core cannot mask what it points at) and no
+  `ui_payload` (the hook is not shown it); `path` stays. A host that relies on
+  one of them surviving a rewrite has to mask it before the tool returns. A
+  hook that allows the result changes nothing.
 
 ### Fixed
 
@@ -81,6 +89,13 @@ All notable changes to this project are recorded here. The format follows
   unmasked text in the result's replay metadata; the parallel path keys its
   error streak on the original words, held in memory only. A hook that raises
   on a failure is logged and ignored, as on a success.
+- **The original of a result a `post_tool_use` hook rewrote no longer leaves
+  the process (security).** The rewritten text went to the model, but the
+  original stayed on the result block as `canonical_content`: in the history,
+  every snapshot and the request handed to the adapter, and a result over the
+  entry limit wrote the original to the blob store. A redaction hook masked
+  the transcript and left the secret beside it. The hook's text is now the
+  value everywhere, and the entry cap offloads that text.
 - **The compaction ledger no longer clips the operator's words.** Each quote
   was cut at 1,200 characters without a marker. A quote is now kept whole, the
   other sections of the ledger give up their room before it, and a quote that

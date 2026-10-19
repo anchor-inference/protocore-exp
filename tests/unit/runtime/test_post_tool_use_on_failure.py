@@ -512,3 +512,134 @@ async def test_a_parallel_failure_is_masked_and_asked_about_once(
         "Read",
         roles=engine.config.tool_roles,
     )
+
+
+# ----------------------------------------------------------------------
+# A rewritten success: the original leaves no copy outside the process
+# ----------------------------------------------------------------------
+
+
+def _durable_dump(engine: Any, runtime: dict[str, Any]) -> str:
+    """Everything a host would persist or send: history, snapshots, blobs."""
+    stream = runtime["events"]
+    blobs = runtime["blobs"]
+    parts = [_history_dump(engine), _dump(engine.snapshot())]
+    parts.extend(_dump(e) for events in stream._streams.values() for e in events)
+    parts.extend(data.decode("utf-8", "replace") for data, _meta in blobs._store.values())
+    return "\n".join(parts)
+
+
+async def _run_one_call(engine: Any, runtime: dict[str, Any], tool: MockTool) -> list[TurnEvent]:
+    runtime["tools"].register(tool)
+    llm = runtime["llm"]
+    llm.queue_tool_call_response(tool_call_id="call-ok", tool_name=tool.tool_name, tool_input={})
+    llm.queue_response(text="ok")
+    events: list[TurnEvent] = []
+    async for evt in engine.run(Message(role=MessageRole.user, content_blocks=[TextBlock(text="go")])):
+        events.append(evt)
+    return events
+
+
+def _result_block(engine: Any) -> ToolResultBlock:
+    (block,) = [b for m in engine.history for b in m.content_blocks if isinstance(b, ToolResultBlock)]
+    return block
+
+
+@pytest.mark.asyncio
+async def test_a_masked_success_leaves_no_original_in_history_snapshots_or_the_request(
+    engine_factory, in_memory_runtime
+) -> None:
+    engine = engine_factory()
+    engine.hooks = _RedactingHookManager()
+    tool = MockTool(
+        tool_name="Env",
+        response_content=f"OPENAI_API_KEY={_SECRET}",
+        response_ui_payload={"rows": [["OPENAI_API_KEY", _SECRET]]},
+    )
+    events = await _run_one_call(engine, in_memory_runtime, tool)
+
+    block = _result_block(engine)
+    assert block.content == f"OPENAI_API_KEY={_MASK}"
+    assert block.canonical_content is None
+    assert _SECRET not in _durable_dump(engine, in_memory_runtime)
+    for event in events:
+        assert _SECRET not in _dump(event.payload), event.type
+    assert _SECRET not in _dump(in_memory_runtime["llm"].calls[1])
+
+
+@pytest.mark.asyncio
+async def test_a_masked_over_limit_success_stores_only_the_masked_text(
+    engine_factory, in_memory_runtime
+) -> None:
+    engine = engine_factory()
+    engine.hooks = _RedactingHookManager()
+    long_output = f"token={_SECRET}\n" + ("a line of build output\n" * 3_000)
+    tool = MockTool(tool_name="Build", response_content=long_output)
+    await _run_one_call(engine, in_memory_runtime, tool)
+
+    block = _result_block(engine)
+    # The result was cut on entry and the whole value offloaded to a blob.
+    assert block.canonical_ref is not None
+    stored = [data.decode() for data, _meta in in_memory_runtime["blobs"]._store.values()]
+    assert any(_MASK in text for text in stored)
+    assert _SECRET not in _durable_dump(engine, in_memory_runtime)
+    assert _SECRET not in _dump(in_memory_runtime["llm"].calls[1])
+
+
+@pytest.mark.asyncio
+async def test_a_rewritten_result_drops_a_reference_the_hook_could_not_mask() -> None:
+    hooks = _RedactingHookManager()
+    tool = MockTool(
+        tool_name="Dump",
+        response_content=f"key={_SECRET}",
+        response_canonical_ref="blob://tool-wrote-this-itself",
+        response_ui_payload={"raw": _SECRET},
+        response_path="config/.env",
+    )
+    events, outcome = await _drain(_dispatcher([tool], hooks), ToolCall(name="Dump", arguments={}))
+
+    assert outcome.content == f"key={_MASK}"
+    assert outcome.canonical_content is None
+    assert outcome.canonical_ref is None
+    assert outcome.ui_payload is None
+    # Where the result came from is not its content, and stays.
+    assert outcome.path == "config/.env"
+    _assert_secret_absent(events, outcome)
+    result = next(e for e in events if e.type is EventType.TOOL_RESULT)
+    assert "canonical_ref" not in result.payload
+    assert "ui_payload" not in result.payload
+
+
+@pytest.mark.asyncio
+async def test_a_hook_that_allows_leaves_the_canonical_value_as_before() -> None:
+    hooks = InMemoryHookManager()
+    tool = MockTool(
+        tool_name="List",
+        response_content="line 1\nline 2\nline 3",
+        response_projection="line 1 (2 more)",
+        response_canonical_ref="blob://listing",
+        response_ui_payload={"rows": 3},
+    )
+    _events, outcome = await _drain(_dispatcher([tool], hooks), ToolCall(name="List", arguments={}))
+
+    assert outcome.content == "line 1 (2 more)"
+    assert outcome.canonical_content == "line 1\nline 2\nline 3"
+    assert outcome.canonical_ref == "blob://listing"
+    assert outcome.ui_payload == {"rows": 3}
+
+
+@pytest.mark.asyncio
+async def test_an_unmodified_success_keeps_its_canonical_value_in_history(
+    engine_factory, in_memory_runtime
+) -> None:
+    engine = engine_factory()
+    tool = MockTool(
+        tool_name="List",
+        response_content="line 1\nline 2\nline 3",
+        response_projection="line 1 (2 more)",
+    )
+    await _run_one_call(engine, in_memory_runtime, tool)
+
+    block = _result_block(engine)
+    assert block.content == "line 1 (2 more)"
+    assert block.canonical_content == "line 1\nline 2\nline 3"

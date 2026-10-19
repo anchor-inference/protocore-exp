@@ -125,6 +125,21 @@ outcome's metadata for the parallel replay is replaced too, and
 successes returns `ALLOW` when `is_error` is true. A hook that raises is
 logged and ignored on either path, and the result stands as written.
 
+A rewrite also ends the tool's own value: the original must not outlive the
+process, so `canonical_content` is dropped and the hook's text is the value
+from then on. A result over the entry limit is offloaded as the rewritten text,
+never as the original. A `canonical_ref` the tool stored itself is dropped too,
+because the core cannot mask what that reference points at, and so is the
+`ui_payload`, which the hook is not shown; a host that wants either kept must
+mask it before the tool returns. `path` stays. A hook that returns `ALLOW`, or
+a `MODIFY` without a string `tool_output`, leaves all of these as they were.
+
+`tool_output` is the model projection. When a tool states a
+`model_projection`, the canonical value behind it is not in the payload and,
+unless the hook rewrites the output, is kept; a tool whose canonical value may
+carry a secret should not hide it behind a projection the hook cannot see
+through.
+
 See the [Tool dispatch + gating](architecture.md#dispatch-roles-the-canonical-result-and-pairing-repair) section
 for the event-emission contract.
 
@@ -917,6 +932,10 @@ a tool names none, compaction stores the value itself at the moment it first
 needs the room and fills this in on the block it rewrites. A tool that names no
 projection says the value is small enough to be its own, which is the common
 case and costs it nothing.
+The one exception is a `post_tool_use` hook that rewrites the output: the
+hook's text then becomes the value, and the original is dropped with the
+`canonical_ref` and the `ui_payload`, which the hook never saw (see
+[the hook payload](#the-post_tool_use-payload)).
 
 **A record before the call.** Every dispatched call commits an `IntentRecord`
 (`runtime/intent.py`) before the tool is touched, with its result ids reserved

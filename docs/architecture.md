@@ -805,7 +805,11 @@ value can be fetched back from once the transcript no longer holds it.
 `ToolResult.model_content` is what every path that builds a `ToolResultBlock`
 reads, so a tool that names no projection is unaffected. A tool that serves
 all three audiences out of one string is why truncating a transcript used to
-destroy evidence: there was nothing to truncate but the only copy.
+destroy evidence: there was nothing to truncate but the only copy. The one
+exception to "beside it rather than replacing it" is a `post_tool_use` hook
+that rewrites the output: the hook's text becomes the value and the original,
+its `canonical_ref` and its `ui_payload` are dropped, so a redactor's original
+reaches no transcript, snapshot, request or blob.
 
 **Durable intent before the call.** Every dispatched call commits an
 `IntentRecord` (`runtime/intent.py`) BEFORE the tool is touched, with its
