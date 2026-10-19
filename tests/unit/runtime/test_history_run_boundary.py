@@ -309,6 +309,9 @@ _WHOLE_HISTORY_BY_DESIGN: dict[str, _Declaration] = {
         "said, and a marker covering any less of it would let the next "
         "hand-over append onto rows that were never written"
     ),
+    "protocore/runtime/history_persist.py::history_rewrite": _whole(
+        "compares the whole transcript before and after a compaction pass, by identity"
+    ),
     "protocore/runtime/history_persist.py::persist_history": _whole(
         "hands the session store what changed in the session transcript: what "
         "is persisted is the whole of what the session has said, because that "

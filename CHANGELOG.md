@@ -119,6 +119,13 @@ All notable changes to this project are recorded here. The format follows
   hand missed the measurement, and the next turn re-compacted a history the
   last pass had already shrunk.
 
+- **`compaction_completed` says what the pass replaced:** `replaced_indices`
+  (positions in the history handed to the store just before the pass),
+  `inserted_indices` (positions of what it wrote in the history after it),
+  `history_messages_before` and `history_messages_after`, compared by identity
+  with the new `protocore.runtime.history_persist.history_rewrite`. A host
+  labels the summary from them instead of diffing two histories.
+
 ### Changed
 
 - **`ToolPermissionGate(policies=[])` installs no policy.** An empty list read
@@ -200,6 +207,15 @@ All notable changes to this project are recorded here. The format follows
   without it, or with one that does not fit the history, resumes on the
   estimate as before. A consumer that wants the old reading drops the key from
   the payload before resuming.
+
+- **The loop hands the history to the session store before each compaction
+  inside a run** (`persist_history` before `compaction_started`, on both the
+  proactive and the reactive path). The rounds a run produced since the last
+  hand-over used to reach the store only as the compacted result, so a host
+  transcribed the history itself on that event. A delta store now sees one more
+  append before the pass and the rewrite at the next hand-over; a store that
+  writes the history whole is called once more per pass. Nothing turns it off:
+  a host that does not want the extra write ignores a delta that only appends.
 
 ### Fixed
 

@@ -388,6 +388,18 @@ a 2,400-token cap; the ledger may spend 5,120 tokens.
 | `tier3_failures` | fold failures by kind |
 | `floor_dropped`, `floor_reached` | messages the floor removed; whether it ran out of things to remove |
 | `ledger_tokens` | the size of the rebuilt ledger |
+| `replaced_indices` | positions, in the history handed to the store just before the pass, of the messages the pass removed or rewrote |
+| `inserted_indices` | positions, in the history after the pass, of the messages it wrote (summaries, folds, the ledger, masked outputs) |
+| `history_messages_before`, `history_messages_after` | the lengths of those two histories |
+
+Before `compaction_started` the loop hands the history to the session store
+(`persist_history`), so the rounds the run produced since the last hand-over
+are durable before the pass rewrites them, and `replaced_indices` index exactly
+the rows the store was just given. Messages carry no id of their own; the
+positions are compared by object identity, like the persist marker. *Why.* A
+host transcribed the whole history itself on `compaction_started`, because
+otherwise those rounds existed only as the summary, and labelled the summary on
+`compaction_completed` by diffing two histories.
 
 Every pass also logs one line, `DIAG compaction.pass`, with the same figures,
 and the floor logs `DIAG compaction.floor`.

@@ -178,7 +178,7 @@ from protocore.runtime.error_kinds import (
     # reports a run's terminal kind reads it from the driver it drives.
 )
 from protocore.runtime.events import BlockVisibility, EventType, TurnEvent
-from protocore.runtime.history_persist import persist_history
+from protocore.runtime.history_persist import history_rewrite, persist_history
 from protocore.runtime.intent import (
     RESERVED,
     SETTLED,
@@ -2669,6 +2669,13 @@ async def _run_compaction(
     tokens_before_value = engine.context_manager.token_estimator.estimate_history(
         engine.history, rc
     )
+    # The rounds since the last hand-over reach the store before the pass
+    # rewrites them; otherwise they exist only as the summary, and a host had
+    # to transcribe the whole history itself on this event to keep them. Held
+    # strongly until the pass is done, so the completed event can name what it
+    # replaced by position.
+    persist_history(engine)
+    history_before_pass = tuple(engine.history)
     yield TurnEvent(
         type=EventType.COMPACTION_STARTED,
         run_id=engine.config.run_id,
@@ -2784,7 +2791,10 @@ async def _run_compaction(
     yield TurnEvent(
         type=EventType.COMPACTION_COMPLETED,
         run_id=engine.config.run_id,
-        payload=compaction_event_payload(attempt, reason=reason),
+        payload={
+            **compaction_event_payload(attempt, reason=reason),
+            **history_rewrite(history_before_pass, engine.history),
+        },
     )
     _commit, commit_evt = await fire_lifecycle(
         engine,
@@ -5688,6 +5698,9 @@ async def _handle_context_window_exceeded(
     tokens_before_value = engine.context_manager.token_estimator.estimate_history(
         engine.history, rc
     )
+    # As on the proactive path: the store gets the rounds before the pass.
+    persist_history(engine)
+    history_before_pass = tuple(engine.history)
     yield TurnEvent(
         type=EventType.COMPACTION_STARTED,
         run_id=engine.config.run_id,
@@ -5765,7 +5778,10 @@ async def _handle_context_window_exceeded(
     yield TurnEvent(
         type=EventType.COMPACTION_COMPLETED,
         run_id=engine.config.run_id,
-        payload=compaction_event_payload(attempt, reason="reactive_413"),
+        payload={
+            **compaction_event_payload(attempt, reason="reactive_413"),
+            **history_rewrite(history_before_pass, engine.history),
+        },
     )
     # This path calls force_compaction directly (not via _run_compaction), so
     # clear the diagnostic scalar here too: it describes the request before
