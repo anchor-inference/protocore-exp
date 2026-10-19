@@ -474,10 +474,13 @@ All notable changes to this project are recorded here. The format follows
 
 ### Changed
 
-- **The snapshot schema is version 10.** Version 9 adds `recovery_budget` to
-  the run's own state and version 10 adds `last_step_settings`; older payloads
-  are lifted with `None` in each, and a build at an older version refuses a
-  newer payload, as it refuses any newer one.
+- **The snapshot schema is version 10** (2.0.0a25 wrote version 7). Version 8
+  adds `run_cause`, the wind-down's cause with the provider's verdict, so a run
+  resumed while winding down still reports what failed it; version 9 adds
+  `recovery_budget` to the run's own state; version 10 adds
+  `last_step_settings`. An older payload is lifted step by step with `None` in
+  each new field. A build that reads an older version refuses a newer
+  snapshot, as with every version bump: roll forward, not back.
 - **`ToolPermissionGate(policies=[])` installs no policy.** An empty list read
   as "use the defaults", so a host that passed one to turn the shell deny list
   off still had it. Only `None` means the defaults now.
@@ -511,11 +514,6 @@ All notable changes to this project are recorded here. The format follows
   construction still works at run time (the loop reads the fields by name), but
   a type checker now flags the assignment; attach a `ProviderFailure` instead,
   or keep the old object and silence the check at that line.
-- **The snapshot schema is version 8.** It adds `run_cause`, the wind-down's
-  cause with the provider's verdict, so a run resumed while winding down still
-  reports what failed it. A version 7 payload is lifted with `run_cause: null`.
-  A build that reads at most version 7 refuses a version 8 snapshot, as with
-  every version bump: roll forward, not back.
 - **The private reason sets are gone.** `query._PROVIDER_ADVANCE_REASONS`,
   `provider_failure._PERMANENT_FAILURE_REASONS` and
   `provider_failure._SURFACE_INDEPENDENT_REASONS` are replaced by the public
