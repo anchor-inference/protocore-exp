@@ -133,6 +133,15 @@ default-**off**: `intent_settlement_enabled`, `usage_ledger_enabled`,
 `lanes_enabled`, `typed_hooks_enabled`, `telemetry_spans_enabled`,
 `compaction_manual_enabled`, `steer_follow_up_enabled`.
 
+A default is tuned for the common case, which is a short run. One preset says
+what a long run wants instead without moving the defaults under everyone:
+`LoopConstants.long_run(**overrides)` switches `loop_guard_enabled` on with
+`loop_guard_identical_tool_limit` 30, `loop_guard_nudge_max` 3 and
+`max_consecutive_tool_errors` 8 (the mapping is `LONG_RUN_LOOP_GUARD`). A run
+of a couple of hundred turns legitimately re-runs the same test command and
+re-reads the same file many times, which the default limits of three and one
+mistake for a loop. Overrides win over the preset.
+
 The snapshot carries only what the loop itself reads. Knobs that govern a
 surface the host owns — authentication policy, session storage, the transport
 to a provider — are declared by the host in its own model and reach the

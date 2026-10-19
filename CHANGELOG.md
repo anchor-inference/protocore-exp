@@ -117,6 +117,11 @@ All notable changes to this project are recorded here. The format follows
   trim a cache write of everything after it. `stale_trim_batch_chars(rc)` in
   `protocore.runtime.stale_result_trim` is the threshold in force. The default
   0 keeps the fixed batch.
+- **`LoopConstants.long_run(**overrides)`**, a preset for runs of hundreds of
+  turns: the loop guard on, 30 identical calls, 3 nudges and 8 consecutive
+  failures of one tool (`LONG_RUN_LOOP_GUARD`), every other field at its
+  default and the overrides winning. The defaults (guard off, 3 / 1 / 3) are
+  unchanged.
 
 ### Changed
 

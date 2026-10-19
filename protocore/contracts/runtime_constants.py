@@ -17,6 +17,22 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from protocore.constants import MAX_DATA_NESTING_DEPTH
 
+LONG_RUN_LOOP_GUARD: dict[str, object] = {
+    "loop_guard_enabled": True,
+    "loop_guard_identical_tool_limit": 30,
+    "loop_guard_nudge_max": 3,
+    "max_consecutive_tool_errors": 8,
+}
+"""What :meth:`LoopConstants.long_run` sets over the defaults.
+
+The defaults — three identical calls, one nudge, three failures of one tool —
+were tuned for short runs. A run of a couple of hundred turns legitimately
+re-runs the same test command and re-reads the same file many times, and three
+failures of one tool across hundreds of turns is not a broken tool. These are
+the values a long-running deployment settled on; the defaults stay as they are
+for everyone else.
+"""
+
 
 class LoopConstants(BaseModel):
     """Frozen snapshot of every runtime-tunable threshold.
@@ -3583,6 +3599,16 @@ class LoopConstants(BaseModel):
         ),
     )
 
+    @classmethod
+    def long_run(cls, **overrides: object) -> Self:
+        """Constants for runs of hundreds of turns: :data:`LONG_RUN_LOOP_GUARD` over the defaults.
+
+        The loop guard is switched on with limits that do not mistake a long
+        run's honest repetition for a loop. ``overrides`` win over the preset,
+        exactly as they would over the defaults.
+        """
+        return cls.model_validate({**LONG_RUN_LOOP_GUARD, **overrides})
+
     @model_validator(mode="after")
     def _validate_relationships(self) -> Self:
         if self.request_context_safety_tokens >= self.model_context_window:
@@ -3673,4 +3699,4 @@ class RuntimeConstantsProvider(Protocol):
         ...
 
 
-__all__ = ["LoopConstants", "RuntimeConstantsProvider"]
+__all__ = ["LONG_RUN_LOOP_GUARD", "LoopConstants", "RuntimeConstantsProvider"]
