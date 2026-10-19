@@ -577,7 +577,9 @@ crashes. The shared assistant loop is **not** a single immutable path:
   moved past it; the newest `tool_result_fresh_count` results and every result
   of the latest round of tool calls are never touched, whatever their size,
   because that is what the model is about to read. Nothing is cut until the
-  trimmable excess crosses `tool_result_stale_trim_batch_chars`, so the prompt
+  trimmable excess crosses `tool_result_stale_trim_batch_chars` (or
+  `tool_result_stale_trim_window_share` of the window, when that is larger, so
+  a million-token window trims seldom and in large steps), so the prompt
   prefix moves for a batch and not for one result, and the batch must save at
   least `tool_result_stale_trim_min_share` of the whole view — with cache
   breakpoints only at the system prompt and the last messages, a cut further

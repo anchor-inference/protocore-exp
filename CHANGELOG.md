@@ -109,6 +109,14 @@ All notable changes to this project are recorded here. The format follows
   metadata gains `kept_tail_chars`, and `kept_chars` counts both ends. The
   default 0 keeps the head only, as before; 0.25 keeps three quarters head and
   one quarter tail.
+- **`LoopConstants.tool_result_stale_trim_window_share`** scales the
+  stale-trim batch with the window: the threshold is the larger of
+  `tool_result_stale_trim_batch_chars` and this share of the window in tokens
+  (at `token_count_chars_per_token_latin` characters a token). A batch that
+  suits a 128k window let a million-token one trim a few pages at a time, each
+  trim a cache write of everything after it. `stale_trim_batch_chars(rc)` in
+  `protocore.runtime.stale_result_trim` is the threshold in force. The default
+  0 keeps the fixed batch.
 
 ### Changed
 

@@ -479,3 +479,53 @@ def test_a_result_the_pointer_would_lengthen_is_left_whole() -> None:
     )
     assert "barely" not in trimmed
     assert {f"call_{index}" for index in range(6)} <= trimmed
+
+
+def test_on_a_large_window_the_window_share_sets_the_batch() -> None:
+    # A batch sized for a small window is a drip on a million-token one: every
+    # trim rewrites the cache behind it, so there the window's share decides.
+    # 0.05 of 1_000_000 tokens at four characters a token is 200_000 chars, and
+    # five stale pages of 30_000 save about 150_000.
+    history = [*_transcript(5, size=30_000), *_transcript(2, size=50, prefix="new")]
+    rc = _rc(
+        model_context_window=1_000_000,
+        tool_result_stale_trim_batch_chars=10_000,
+        tool_result_stale_trim_min_share=0.0,
+        tool_result_stale_trim_window_share=0.05,
+    )
+    _, trimmed = trim_stale_results(history, rc, PROMPTS)
+    assert trimmed == frozenset()
+
+    history = [*_transcript(12, size=30_000), *_transcript(2, size=50, prefix="new")]
+    _, trimmed = trim_stale_results(history, rc, PROMPTS)
+    assert trimmed == frozenset(f"call_{index}" for index in range(12))
+
+
+def test_the_window_share_never_lowers_the_configured_batch() -> None:
+    # On a small window the share comes to less than the batch, and the batch
+    # stands: the larger of the two is the threshold.
+    history = _transcript(5)
+    _, trimmed = trim_stale_results(
+        history,
+        _rc(
+            model_context_window=8_192,
+            tool_result_stale_trim_batch_chars=10_000,
+            tool_result_stale_trim_window_share=0.01,
+        ),
+        PROMPTS,
+    )
+    assert trimmed == frozenset()
+
+
+def test_a_window_share_of_zero_is_the_fixed_batch() -> None:
+    history = [*_transcript(5, size=30_000), *_transcript(2, size=50, prefix="new")]
+    _, trimmed = trim_stale_results(
+        history,
+        _rc(
+            model_context_window=1_000_000,
+            tool_result_stale_trim_batch_chars=10_000,
+            tool_result_stale_trim_min_share=0.0,
+        ),
+        PROMPTS,
+    )
+    assert trimmed == frozenset(f"call_{index}" for index in range(5))

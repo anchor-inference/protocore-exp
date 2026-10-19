@@ -38,7 +38,9 @@ about 1.25 times plain input and reading at about 0.1, so a cut that saves
 further calls. Two thresholds stand between a result and the knife. The
 trimmable excess must cross
 :attr:`~LoopConstants.tool_result_stale_trim_batch_chars`, so one result per
-turn never moves the prefix. And it must be at least
+turn never moves the prefix — or, when
+:attr:`~LoopConstants.tool_result_stale_trim_window_share` is set and the
+window is large, that share of the window, whichever is larger. And it must be at least
 :attr:`~LoopConstants.tool_result_stale_trim_min_share` of the characters the
 view carries. The second rule is the one that matters in a long context:
 shaving forty thousand characters off a view of one and a half million — the
@@ -200,6 +202,22 @@ def _message_chars(message: Message, sticky: frozenset[str], limit: int) -> int:
     return total
 
 
+def stale_trim_batch_chars(rc: LoopConstants) -> int:
+    """The trimmable excess a view must carry before a trim: the batch, or the window's share.
+
+    The larger of the two. A batch that suits a small window lets a very large
+    one trim a few pages at a time, and each of those trims costs a cache
+    write of the whole view; scaled by the window, the trims that remain are
+    the few that cut a large slice of a view that has really grown.
+    """
+    by_window = int(
+        rc.tool_result_stale_trim_window_share
+        * max(0, rc.model_context_window)
+        * rc.token_count_chars_per_token_latin
+    )
+    return max(rc.tool_result_stale_trim_batch_chars, by_window)
+
+
 def trim_stale_results(
     history: Sequence[Message],
     rc: LoopConstants,
@@ -284,7 +302,7 @@ def trim_stale_results(
         candidates.append(block.tool_call_id)
         new_saved += saved
 
-    if new_saved > rc.tool_result_stale_trim_batch_chars:
+    if new_saved > stale_trim_batch_chars(rc):
         view_chars = sum(_message_chars(message, sticky, limit) for message in history)
         if new_saved >= rc.tool_result_stale_trim_min_share * view_chars:
             to_trim.update(candidates)
@@ -331,4 +349,4 @@ def trim_stale_results(
     return rewritten, (sticky | to_trim) & present
 
 
-__all__ = ["trim_stale_results"]
+__all__ = ["stale_trim_batch_chars", "trim_stale_results"]

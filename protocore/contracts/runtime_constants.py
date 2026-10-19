@@ -3480,6 +3480,21 @@ class LoopConstants(BaseModel):
             "there is a batch."
         ),
     )
+    tool_result_stale_trim_window_share: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "The stale-trim batch as a share of the window: the threshold is "
+            "the larger of ``tool_result_stale_trim_batch_chars`` and this "
+            "share of ``model_context_window`` in tokens, at "
+            "``token_count_chars_per_token_latin`` characters a token. A fixed "
+            "batch that suits a 128k window is a drip on a million-token one, "
+            "and every trim rewrites the provider's cache of everything after "
+            "it, so there a run should trim seldom and in large steps. 0 keeps "
+            "the fixed batch."
+        ),
+    )
     tool_result_stale_trim_min_share: float = Field(
         default=0.25,
         ge=0.0,
