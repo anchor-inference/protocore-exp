@@ -193,6 +193,14 @@ Every conversation primitive flows as one of these Pydantic models (the
 - **`ToolResultBlock`** — a tool-call result returned to the model
   (`tool_call_id`, `content`, `is_error`, `metadata`).
 - **`ImageRefBlock`** — an image reference whose bytes live in `IBlobStore`.
+  A user turn holds one block, its text, so the images sent with it ride in
+  `metadata[IMAGE_REFS_METADATA_KEY]` (`"protocore.image_refs"`) as a list of
+  `ImageRefBlock.model_dump(mode="json")` entries. `message_image_refs(message)`
+  reads both places, blocks first, and skips an entry that does not validate.
+  The core sends nothing itself: an adapter for a model that takes images
+  loads each blob and sends it, one for a text-only model sends a marker or
+  nothing. The prompt estimate prices every image, block or entry, at
+  `token_count_image_tokens`.
 
 ### Tool calls & results
 

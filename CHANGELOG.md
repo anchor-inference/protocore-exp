@@ -149,6 +149,24 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
+- **A queued steer or follow-up keeps its attachments.**
+  `placed_as_user_message` joined only the items' texts, so a screenshot sent
+  while a run was busy reached the model as its caption alone. Each item's
+  image attachments (a `blob_ref` with an image `mime_type`) now ride on the
+  placed turn under the new `IMAGE_REFS_METADATA_KEY`, every image in queue
+  order, and `QUEUED_ITEMS_METADATA_KEY` records each placed item's `id`,
+  `kind` and attachments, so a host can tell which items reached the model
+  without reloading its queue. An item with an image and no words is placed
+  rather than dropped. `message_image_refs` reads a message's images from its
+  blocks and that key, and the prompt estimate now prices images carried in
+  the key. See `docs/contracts.md`.
+- **A stopped run hands back its queued items with their files.**
+  `restore_queued_prompts` returned texts only, so a screenshot queued while a
+  run was busy was lost when the run stopped, and an item with no caption was
+  lost whole. The new `restore_queued_items` drains both queues and returns
+  each item as a `QueuedPrompt` (`id`, `kind`, text, attachments), and the
+  stop's `message_stop` event carries them as `restored_queue_items`.
+  `restore_queued_prompts` keeps its `list[str]` return as the text-only view.
 - **The compaction ledger no longer clips the operator's words.** Each quote
   was cut at 1,200 characters without a marker. A quote is now kept whole, the
   other sections of the ledger give up their room before it, and a quote that

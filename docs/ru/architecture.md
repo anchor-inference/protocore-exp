@@ -1168,6 +1168,21 @@ magic numbers**. Каждое настраиваемое значение — э
 - `runtime/live_control.py` — очереди steer / follow-up (`QueuedPrompt`,
   `enqueue`, `place_items`), живые переопределения model/thinking и settled-
   помощник. Гейтится `steer_follow_up_enabled` (по умолчанию `False`).
+  `placed_as_user_message` склеивает тексты размещённых элементов в один
+  user-ход и сохраняет их файлы: вложение с `blob_ref` и `mime_type`
+  изображения едет на ходе под `IMAGE_REFS_METADATA_KEY`, изображения всех
+  элементов в порядке очереди, а `QUEUED_ITEMS_METADATA_KEY` перечисляет
+  `id`, `kind` (`steer` / `follow_up`) и вложения каждого размещённого
+  элемента в том виде, в каком их поставили в очередь, — так хост знает, какие
+  его элементы дошли до модели. Элемент с изображением без слов размещается;
+  элемент без слов и без изображения — нет. Увидит ли модель изображение,
+  решает адаптер провайдера, как для любого изображения (см.
+  [contracts](contracts.md)). Остановка опустошает обе очереди через
+  `restore_queued_items`, который возвращает каждый элемент целиком (`id`,
+  `kind`, текст, вложения); событие `message_stop` этой остановки несёт их как
+  `restored_queue_items` рядом со склеенным `restored_queue_text`.
+  `restore_queued_prompts` — его текстовый вид для вызывающего, который
+  возвращает только слова.
 - `runtime/run_work_budget.py` — кумулятивный бюджет жизни дерева
   (`max_subagent_runs_per_tree`, `max_total_tokens_per_tree`) для одного
   корневого рана и всего, что он порождает. Сиблинг `SubagentTreeBudget`

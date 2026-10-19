@@ -1200,6 +1200,20 @@ the matching RC field says otherwise.
 - `runtime/live_control.py` — steer / follow-up queues (`QueuedPrompt`,
   `enqueue`, `place_items`), live model/thinking overrides, and the settled
   helper. Gated by `steer_follow_up_enabled` (default `False`).
+  `placed_as_user_message` joins the placed items' texts into one user turn
+  and keeps their files: an attachment with a `blob_ref` and an image
+  `mime_type` rides on the turn under `IMAGE_REFS_METADATA_KEY`, every item's
+  images in queue order, and `QUEUED_ITEMS_METADATA_KEY` lists each placed
+  item's `id`, `kind` (`steer` / `follow_up`) and attachments as queued, so a
+  host knows which of its items reached the model. An item with an image and
+  no words is placed; one with neither words nor an image is not. Whether the
+  model sees the image is the provider adapter's call, as for any image (see
+  [contracts](contracts.md)). A stop drains both queues with
+  `restore_queued_items`, which hands back each item whole (`id`, `kind`,
+  text, attachments); the stop's `message_stop` event carries them as
+  `restored_queue_items` beside the joined `restored_queue_text`.
+  `restore_queued_prompts` is its text-only view, for a caller that puts words
+  back and nothing else.
 - `runtime/run_work_budget.py` — cumulative tree-lifetime budget
   (`max_subagent_runs_per_tree`, `max_total_tokens_per_tree`) for one root
   run and everything it spawns. Sibling of `SubagentTreeBudget` (permits),
