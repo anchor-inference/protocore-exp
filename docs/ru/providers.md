@@ -333,6 +333,72 @@ reasoning=None)` хранит доллары США за миллион токе
 подсчёт — `None`, и ядро берёт собственную оценку, которую возвращает и
 `count_tokens`.
 
+## Как узнать окно контекста модели
+
+Окно читает всё, что задаёт размеры прогона, а число, введённое руками, —
+вопрос, на который многие операторы ответить не могут. `ContextWindowResolver`
+(`protocore.providers.context_window`, чистый Python) берёт его из первого
+источника, который знает:
+
+1. **собственный список моделей сервера** — через пробу;
+2. **каталог** в форме `api.json` models.dev — файл, который хост скачивает
+   и передаёт (`WindowCatalogue.from_file(path)`);
+3. **таблица** шаблонов семейств моделей, которую ведёт хост
+   (`WindowTable({"family-*": 128_000})` или `WindowTable.from_toml(path)`,
+   читающий раздел `[windows]`; побеждает самый конкретный шаблон, а
+   сравнивается id в нижнем регистре без префикса `vendor/` и `:tag`);
+4. **отказ**: сервер, который сказал «maximum context length is N tokens»,
+   назвал настоящий предел, и если N меньше, чем говорят источники выше, оно
+   побеждает их все.
+
+```python
+from protocore.providers.context_window import ContextWindowResolver, WindowCatalogue
+from protocore.providers.openai_compat import ListingWindowProbe
+
+resolver = ContextWindowResolver(
+    probe=ListingWindowProbe.for_endpoint(spec, props=is_llama_cpp),
+    catalogue=WindowCatalogue.from_file(Path("models.json")),
+)
+provider = OpenAICompatibleProvider(spec, on_failure=resolver.observe_failure)
+window = await resolver.resolve("model-a")      # ResolvedWindow(tokens, source, detail) или None
+chain = ListProviderChain(rungs, window_of=resolver.rung_window)
+```
+
+Ничего не поставляется в комплекте: какие модели существуют и каков их
+размер, меняется каждый месяц, и число, зашитое в библиотеку, устаревает
+задолго до того, как его кто-нибудь обновит. Когда ни один источник не знает,
+`resolve` возвращает `None`, и хост оставляет своё число.
+
+- **Проба.** `ListingWindowProbe(base_url, *, client=None, api_key="",
+  headers=None, props=False)` читает `GET {base}/models` (и `{base}/v1/models`
+  для базы без `/v1`), затем собственную запись модели `GET .../models/{id}`;
+  с `props=True` она сначала читает `GET /props` llama.cpp — длину, с которой
+  запущен сервер, а не ту, на которой обучалась модель. Окно читается из того
+  поля, которое использует сервер (`max_model_len`, `context_length`,
+  `context_window`, `max_context_length`, `loaded_context_length`,
+  `max_input_tokens`, `inputTokenLimit`, `limit.context`; `ENTRY_FIELDS`
+  перечисляет их по порядку). Любой сбой тих, а перенаправления не
+  выполняются, потому что запрос может нести ключ. Пробой служит любая
+  асинхронная функция `model -> FoundWindow | None`.
+- **Кэш.** Ответ пробы хранится `ttl_seconds` (сутки), а промах —
+  `miss_ttl_seconds` (десять минут), так что сервер, который никогда не
+  отвечает, не спрашивают на каждом прогоне, а тот, что был недоступен,
+  спросят снова скоро. Одновременные `resolve` одной модели делят одну пробу.
+  Проба, бросившая исключение, пишется в лог и считается промахом.
+- **Отказы.** `observe_failure` имеет форму наблюдателя `on_failure`
+  адаптера и учится только на отказе, классифицированном как
+  `context_overflow`; `learn_refusal(model, text)` и
+  `remember_refusal(model, tokens)` делают это вручную. `stated_window(text)`
+  читает формулировки OpenAI/vLLM, Anthropic, llama.cpp, Google и LM Studio.
+  Большее названное окно никогда не заменяет меньшее. Выученные окна живут,
+  пока жив резолвер; `learned()` отдаёт их хосту, который их сохраняет, а
+  `forget(model)` начинает заново.
+- **Без ожидания.** `known(model)` отвечает из уже найденного или
+  выученного, никого не спрашивая, — для решений, которые не могут ждать
+  запроса. `rung_window` — то же для ступени цепочки:
+  `ListProviderChain(window_of=...)` использует его в проверке вместимости
+  (ниже).
+
 ## Цепочка провайдеров
 
 ```python
@@ -361,6 +427,11 @@ chain.bind_prompt_size(engine.prompt_tokens_now)
   минуту назад);
 - её `factory` бросает исключение (нет ключа или плохой URL — факт об этой
   ступени).
+
+С `window_of=` (например, `rung_window` резолвера) проверка вместимости берёт
+меньшее из настроенного `context_window` ступени и окна, найденного с тех
+пор: если право хоть одно из них, большее — это запрос, от которого сервер
+откажется.
 
 Ступень с `factory` строится только тогда, когда прогон до неё доходит, так что
 прогон, не покинувший основную, не открывает пулов для остальных. Основная

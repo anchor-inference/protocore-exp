@@ -35,6 +35,9 @@ ProviderFactory = Callable[[], Awaitable[ILLMProvider]]
 RestingCheck = Callable[["ChainRung"], str | None]
 """Why a fallback rung should not be tried right now, or ``None`` when it may be."""
 
+WindowLookup = Callable[["ChainRung"], int | None]
+"""A rung's context window as found out since the rung was configured, or ``None``."""
+
 
 @dataclass(frozen=True, slots=True)
 class ChainRung:
@@ -69,6 +72,11 @@ class ListProviderChain(IProviderChain):
     host binds the engine's measurement, e.g. ``engine.prompt_tokens_now``, with
     :meth:`bind_prompt_size` once the engine exists); ``0`` means unknown and
     skips no rung. ``resting`` names fallbacks to pass over for now.
+    ``window_of`` reports a rung's window as discovered since it was
+    configured (a :class:`~protocore.providers.context_window.ContextWindowResolver`'s
+    ``rung_window``); where both it and the rung's own ``context_window`` are
+    known, the fit check uses the smaller, since either one being right means
+    the larger is a request the server refuses.
 
     One caveat on resume: the engine re-seats a restored run by advancing the
     recorded number of times and then checks the rung's model name. A rung that
@@ -83,6 +91,7 @@ class ListProviderChain(IProviderChain):
         *,
         prompt_tokens: Callable[[], int] | None = None,
         resting: RestingCheck | None = None,
+        window_of: WindowLookup | None = None,
     ) -> None:
         if not rungs:
             raise ValueError("a provider chain needs at least one rung")
@@ -96,6 +105,7 @@ class ListProviderChain(IProviderChain):
         self._providers: dict[int, ILLMProvider] = {0: first.provider}
         self._prompt_tokens = prompt_tokens or (lambda: 0)
         self._resting = resting
+        self._window_of = window_of
         self._index = 0
         self._ruled_out: list[tuple[str, str]] = []
         # The check-and-advance is one transition. Building a rung awaits, and
@@ -151,7 +161,7 @@ class ListProviderChain(IProviderChain):
             resting = self._resting(rung)
             if resting:
                 return resting
-        window = rung.context_window
+        window = self._window(rung)
         if not window:
             return None
         prompt = int(self._prompt_tokens() or 0)
@@ -162,6 +172,11 @@ class ListProviderChain(IProviderChain):
                 f"and the reply ({reply})"
             )
         return None
+
+    def _window(self, rung: ChainRung) -> int | None:
+        discovered = self._window_of(rung) if self._window_of is not None else None
+        known = [window for window in (rung.context_window, discovered) if window]
+        return min(known) if known else None
 
     async def _materialise(self, index: int) -> str | None:
         """Build the rung's provider; why it could not be built, if it could not.
@@ -187,4 +202,4 @@ class ListProviderChain(IProviderChain):
         return None
 
 
-__all__ = ["ChainRung", "ListProviderChain", "ProviderFactory", "RestingCheck"]
+__all__ = ["ChainRung", "ListProviderChain", "ProviderFactory", "RestingCheck", "WindowLookup"]

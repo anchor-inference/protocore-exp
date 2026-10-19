@@ -57,6 +57,7 @@ from protocore.providers.openai_compat.spec import (
 )
 from protocore.providers.openai_compat.stream import StreamAssembler, normalize_usage
 from protocore.providers.openai_compat.tokenize import TokenizeCounter
+from protocore.providers.openai_compat.windows import ListingWindowProbe
 from protocore.providers.openai_compat.wire import (
     INTERRUPTED_TOOL_RESULT,
     REASONING_ENVELOPE,
@@ -74,6 +75,7 @@ __all__ = [
     "FailureObserver",
     "ImageLimits",
     "ImageLoader",
+    "ListingWindowProbe",
     "OpenAICompatibleProvider",
     "ProviderCapabilities",
     "ReasoningReplay",

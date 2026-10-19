@@ -331,6 +331,70 @@ the server root (`base_url` without `/v1`, or `tokenize_url`). A server without
 the route answers 404 once and is not asked again; the count is then `None`,
 and the core uses its own estimate, which `count_tokens` also returns.
 
+## Finding a model's context window
+
+Everything that sizes a run reads the window, and a number typed by hand is a
+question many operators cannot answer. `ContextWindowResolver`
+(`protocore.providers.context_window`, pure Python) takes it from the first
+source that knows:
+
+1. **the server's own listing**, through a probe;
+2. **a catalogue** in the shape of models.dev's `api.json`, a file the host
+   downloads and passes in (`WindowCatalogue.from_file(path)`);
+3. **a table** of model-family patterns the host keeps
+   (`WindowTable({"family-*": 128_000})` or `WindowTable.from_toml(path)`,
+   reading a `[windows]` section; the most specific pattern wins, matched
+   against the id in lower case without a `vendor/` prefix or `:tag`);
+4. **a refusal**: a server that said "maximum context length is N tokens" has
+   stated the real limit, and when N is smaller than what the sources above
+   say it wins over all of them.
+
+```python
+from protocore.providers.context_window import ContextWindowResolver, WindowCatalogue
+from protocore.providers.openai_compat import ListingWindowProbe
+
+resolver = ContextWindowResolver(
+    probe=ListingWindowProbe.for_endpoint(spec, props=is_llama_cpp),
+    catalogue=WindowCatalogue.from_file(Path("models.json")),
+)
+provider = OpenAICompatibleProvider(spec, on_failure=resolver.observe_failure)
+window = await resolver.resolve("model-a")      # ResolvedWindow(tokens, source, detail) or None
+chain = ListProviderChain(rungs, window_of=resolver.rung_window)
+```
+
+Nothing is bundled: which models exist and how large they are changes every
+month, and a number shipped in a library goes stale long before anyone
+updates it. When no source knows, `resolve` returns `None` and the host keeps
+the number it has.
+
+- **The probe.** `ListingWindowProbe(base_url, *, client=None, api_key="",
+  headers=None, props=False)` reads `GET {base}/models` (and `{base}/v1/models`
+  for a base without `/v1`), then the model's own entry `GET .../models/{id}`;
+  with `props=True` it first reads llama.cpp's `GET /props`, the length the
+  server was started with rather than what the model was trained for. It
+  reads the window from whichever field a server uses (`max_model_len`,
+  `context_length`, `context_window`, `max_context_length`,
+  `loaded_context_length`, `max_input_tokens`, `inputTokenLimit`,
+  `limit.context`; `ENTRY_FIELDS` lists them in order). Every failure is quiet,
+  and redirects are never followed, since the request may carry the key. Any
+  async callable `model -> FoundWindow | None` is a probe.
+- **The cache.** A probe's answer is kept for `ttl_seconds` (a day) and a miss
+  for `miss_ttl_seconds` (ten minutes), so a server that never says is not
+  asked on every run while one that was down is asked again soon. Concurrent
+  `resolve` calls for one model share one probe. A probe that raises is
+  logged and counts as a miss.
+- **Refusals.** `observe_failure` has the shape of the adapter's `on_failure`
+  observer and learns only from a refusal classified as `context_overflow`;
+  `learn_refusal(model, text)` and `remember_refusal(model, tokens)` do it by
+  hand. `stated_window(text)` reads the OpenAI/vLLM, Anthropic, llama.cpp,
+  Google and LM Studio phrasings. A larger stated window never replaces a
+  smaller one. Learned windows live as long as the resolver; `learned()` hands
+  them to a host that persists them, and `forget(model)` starts over.
+- **Without waiting.** `known(model)` answers from what was resolved or
+  learned, never asking anyone, for decisions that cannot wait for a request.
+  `rung_window` is that for a chain rung: `ListProviderChain(window_of=...)`
+  uses it in the fit check (below).
+
 ## The provider chain
 
 ```python
@@ -358,6 +422,11 @@ with its reason recorded in `attempted()`, when:
 - the `resting` check names it (an account that refused for a spent quota a
   minute ago);
 - its `factory` raises (a missing key or a bad URL is a fact about that rung).
+
+With `window_of=` (for instance a resolver's `rung_window`), the fit check
+uses the smaller of the rung's configured `context_window` and the window
+found out since: either one being right makes the larger a request the server
+refuses.
 
 A rung with a `factory` is built only when the run reaches it, so a run that
 never leaves the primary opens no pool for the others. The primary is never

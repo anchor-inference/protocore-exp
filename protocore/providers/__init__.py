@@ -17,4 +17,8 @@ package holds implementations a host can use as they are or subclass:
   Python; the reference adapter applies it per endpoint.
 * :mod:`protocore.providers.spend` — :class:`~protocore.providers.spend.ModelPricing`
   and the spend admission hook a host enforces a budget through. Pure Python.
+* :mod:`protocore.providers.context_window` —
+  :class:`~protocore.providers.context_window.ContextWindowResolver`, a model's
+  window from a server probe, a catalogue, a table and refusals. Pure Python;
+  the HTTP probe is ``protocore.providers.openai_compat.ListingWindowProbe``.
 """

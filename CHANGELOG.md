@@ -178,6 +178,22 @@ All notable changes to this project are recorded here. The format follows
   (`estimate(...)`); an omitted rate falls back to the one that cannot
   undercharge. The reference adapter takes `admission=` and `pricing=`;
   without them it behaves as before. See `docs/providers.md`.
+- **A model's context window is found out rather than typed in
+  (`protocore.providers.context_window`).** `ContextWindowResolver` takes it
+  from the first source that knows: the server's listing through a probe,
+  a models.dev-shaped catalogue file the host passes in
+  (`WindowCatalogue`), a table of model-family patterns the host keeps
+  (`WindowTable`), and refusals — a server that said "maximum context length
+  is N tokens" wins when N is smaller (`stated_window` reads the OpenAI/vLLM,
+  Anthropic, llama.cpp, Google and LM Studio phrasings). Answers are cached
+  (a day; a miss ten minutes), concurrent lookups share one probe, and
+  `observe_failure` plugs into the adapter's `on_failure` observer. No model
+  list is bundled. `ListingWindowProbe` (in `protocore.providers.openai_compat`)
+  reads `/models`, `/models/{id}` and llama.cpp's `/props`, quietly and
+  without following redirects. `ListProviderChain` takes `window_of=`
+  (for instance `resolver.rung_window`); its fit check then uses the smaller
+  of the configured and the discovered window. Without it the chain behaves
+  as before. See `docs/providers.md`.
 
 ### Changed
 
