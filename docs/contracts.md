@@ -316,7 +316,9 @@ Three distinct run shapes — do not conflate them (see
   (`model_no_progress`) ends `failed` even when its closing turn wrote prose; a
   run wound down by a bound it was given (turns, tool calls, output tokens,
   wall clock) ends `wound_down`. Read back with `RunOutcome(payload["outcome"])`
-  and `RunCause.model_validate(payload["cause"])`.
+  and `RunCause.model_validate(payload["cause"])`. The same stop lists, under
+  `leftover_queued` (`LEFTOVER_QUEUED_FIELD`), the ids of the queued steer and
+  follow-up items the engine still held and never placed.
 
 ### Ingress, blobs, compaction
 

@@ -1218,6 +1218,25 @@ the matching RC field says otherwise.
   `restored_queue_items` beside the joined `restored_queue_text`.
   `restore_queued_prompts` is its text-only view, for a caller that puts words
   back and nothing else.
+  A host controls the queues through the engine rather than its private
+  lists: `queued()` lists what the engine holds, steers first;
+  `queue_input(kind, text, attachments=, item_id=)` adds one under the caps;
+  `withdraw_queued(id)` takes an item back before it is placed (`False` when
+  the engine holds none: placed already, or it arrived in the host's store
+  after the engine's last read, where the host removes it); and
+  `promote_queued(id)` turns a waiting follow-up into the last steer. A host
+  that keeps the queues in a store calls `load_queued(steer, follow_up)` from
+  its `reload_live_control` and `merge_queued(stored_steer, stored_follow_up)`
+  from its `persist_live_control`, inside the store's transaction. The merge
+  applies the seen rule (`merge_queue`): a stored item the engine holds or was
+  handed by its last read is the engine's to decide about; any other stored
+  item arrived after that read and is kept behind the engine's remainder, so a
+  message that landed while the run held the queue is not overwritten. The
+  returned `QueueMerge` carries the lists to write and `consumed`, the ids the
+  engine was handed and placed (never one taken back). A withdrawal and a
+  promotion outlive a read that predates them until the next merge. Every
+  terminal `message_stop` lists the ids the engine still held unplaced as
+  `leftover_queued`, so a host can open its next run with them.
 - `runtime/run_work_budget.py` — cumulative tree-lifetime budget
   (`max_subagent_runs_per_tree`, `max_total_tokens_per_tree`) for one root
   run and everything it spawns. Sibling of `SubagentTreeBudget` (permits),

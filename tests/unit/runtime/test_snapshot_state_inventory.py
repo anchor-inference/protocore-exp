@@ -97,6 +97,13 @@ _PROCESS_LOCAL: dict[str, str] = {
         "loads them. A resume is not a seed: the snapshot's loaded tools say "
         "which groups are loaded, so it empties this."
     ),
+    "_queue_sync": (
+        "what the queues owe one process's reads of a host's store. A resumed "
+        "run reloads the queues from that store before its first model call, "
+        "and that read hands it the ids afresh; withdrawals and promotions not "
+        "yet written back are the host's to repeat, since its store is the "
+        "record of them."
+    ),
     "events": "the event stream is the host's transport, not run state.",
     "hooks": "the hook manager is injected by the host.",
     "skills": "the skill store is injected by the host.",

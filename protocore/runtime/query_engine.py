@@ -69,6 +69,7 @@ from protocore.contracts.observability import (
     read_manifest_schema_version,
 )
 from protocore.contracts.outcome import (
+    LEFTOVER_QUEUED_FIELD,
     RUN_CAUSE_FIELD,
     RUN_OUTCOME_FIELD,
     RunCause,
@@ -114,6 +115,12 @@ from protocore.runtime.deadline_clock import (
     restore_deadline_clock,
 )
 from protocore.runtime.events import EventType, TurnEvent
+from protocore.runtime.live_control import (
+    QueuedPrompt,
+    QueueKind,
+    QueueMerge,
+    QueueSync,
+)
 from protocore.runtime.loop_state import (
     InvalidStateTransitionError,
     LoopState,
@@ -961,6 +968,11 @@ class QueryEngine:
             # model/thinking overrides are the operator's standing choice.
             "_steer_queue",
             "_follow_up_queue",
+            # What the queues owe a host's store: the ids its last read handed
+            # over, and the withdrawals and promotions since. It goes with the
+            # queues it describes; reset alone, the next write-back would call
+            # an item taken back consumed.
+            "_queue_sync",
             "_live_model_name",
             "_live_thinking_enabled",
             "_live_reasoning_effort",
@@ -1390,6 +1402,7 @@ class QueryEngine:
         self._loop_guard_nudge_count: int = 0
         self._steer_queue: list[dict[str, Any]] = []
         self._follow_up_queue: list[dict[str, Any]] = []
+        self._queue_sync: QueueSync = QueueSync()
         self._live_model_name: str | None = None
         self._live_thinking_enabled: bool | None = None
         self._live_reasoning_effort: str | None = None
@@ -2133,6 +2146,9 @@ class QueryEngine:
         outcome, cause = self._run_outcome(payload.get("stop_reason"), windup_cause)
         payload[RUN_OUTCOME_FIELD] = outcome.value
         payload[RUN_CAUSE_FIELD] = None if cause is None else cause.model_dump(mode="json")
+        from protocore.runtime.live_control import leftover_queued_ids
+
+        payload[LEFTOVER_QUEUED_FIELD] = leftover_queued_ids(self)
         return event.model_copy(update={"payload": payload})
 
     def _run_outcome(
@@ -4091,6 +4107,69 @@ class QueryEngine:
         """Clear temporary controls and start a fresh retry budget."""
         self.clear_reasoning_recovery_overrides()
         self._reasoning_length_cut_count = 0
+
+    # ------------------------------------------------------------------
+    # Live-control queues
+    # ------------------------------------------------------------------
+
+    def queued(self) -> list[QueuedPrompt]:
+        """Every steer and follow-up the engine holds and has not placed, steers first."""
+        from protocore.runtime.live_control import queued_items
+
+        return queued_items(self)
+
+    def queue_input(
+        self,
+        kind: QueueKind,
+        text: str,
+        *,
+        attachments: list[dict[str, Any]] | None = None,
+        item_id: str | None = None,
+    ) -> QueuedPrompt:
+        """Queue a steer or a follow-up on this engine; raises ``ValueError`` over the caps."""
+        from protocore.runtime.live_control import queue_input
+
+        return queue_input(self, kind, text, attachments=attachments, item_id=item_id)
+
+    def withdraw_queued(self, item_id: str) -> bool:
+        """Take a waiting item back before it is placed; ``False`` when the engine holds none.
+
+        See :func:`~protocore.runtime.live_control.withdraw_queued` for the two
+        meanings of ``False``.
+        """
+        from protocore.runtime.live_control import withdraw_queued
+
+        return withdraw_queued(self, item_id)
+
+    def promote_queued(self, item_id: str) -> bool:
+        """Turn a waiting follow-up into the last steer; ``False`` when it is not waiting here."""
+        from protocore.runtime.live_control import promote_queued
+
+        return promote_queued(self, item_id)
+
+    def load_queued(
+        self, steer: list[dict[str, Any]], follow_up: list[dict[str, Any]]
+    ) -> None:
+        """Take a store's queues as the engine's, remembering the ids handed over.
+
+        The call a host's ``reload_live_control`` makes instead of assigning the
+        private queue lists.
+        """
+        from protocore.runtime.live_control import load_queued
+
+        load_queued(self, steer, follow_up)
+
+    def merge_queued(
+        self, stored_steer: list[dict[str, Any]], stored_follow_up: list[dict[str, Any]]
+    ) -> QueueMerge:
+        """What to write back to a store whose row is now as given, and what the model read.
+
+        The call a host's ``persist_live_control`` makes, inside the store's
+        transaction, instead of writing the engine's lists over the row.
+        """
+        from protocore.runtime.live_control import merge_queued
+
+        return merge_queued(self, stored_steer, stored_follow_up)
 
     def apply_live_controls(
         self,

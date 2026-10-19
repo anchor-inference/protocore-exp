@@ -1,6 +1,7 @@
 """Steer / follow-up queues, live model/thinking, and settled helper."""
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from uuid import uuid4
@@ -212,20 +213,261 @@ def restore_queued_prompts(engine: Any) -> list[str]:
     return [item.text.strip() for item in restore_queued_items(engine) if item.text.strip()]
 
 
+def _queue_item_id(raw: Any) -> str:
+    """The id of one queue entry, whether a dict a store wrote or a :class:`QueuedPrompt`."""
+    if isinstance(raw, QueuedPrompt):
+        return raw.id
+    if isinstance(raw, dict):
+        return str(raw.get("id") or "")
+    return ""
+
+
+@dataclass(slots=True)
+class QueueSync:
+    """What the engine's queues owe a host's durable copy of them.
+
+    A host that keeps the queues in a store reads them into the engine before a
+    model call (:meth:`QueryEngine.load_queued`) and writes back what the engine
+    did not place (:meth:`QueryEngine.merge_queued`). Between the two, the store
+    can gain an item the engine never saw, and the engine can lose one the host
+    took back. These four records are what lets the write-back tell those apart
+    from an item the model read.
+    """
+
+    #: The ids the last read handed the engine, per queue.
+    seen_steer: list[str] = field(default_factory=list)
+    seen_follow_up: list[str] = field(default_factory=list)
+    #: Ids taken back since that read; a read that predates the withdrawal
+    #: must not put them back, and the write-back must not call them consumed.
+    withdrawn: list[str] = field(default_factory=list)
+    #: Follow-ups turned into steers since that read, in the order turned.
+    promoted: list[str] = field(default_factory=list)
+
+    def seen(self) -> list[str]:
+        return [*self.seen_steer, *self.seen_follow_up]
+
+
+@dataclass(frozen=True, slots=True)
+class QueueMerge:
+    """What a host writes back to its store, and what it may say the model read.
+
+    ``steer`` and ``follow_up`` are the engine's remainder followed by whatever
+    the store gained after the engine's last read. ``consumed`` are the ids the
+    engine was handed and no longer holds: placed into the history, and only
+    those. An item taken back is not consumed, and neither is one that arrived
+    after the read.
+    """
+
+    steer: list[dict[str, Any]]
+    follow_up: list[dict[str, Any]]
+    consumed: list[str]
+
+
+def merge_queue(
+    kept: list[dict[str, Any]],
+    stored: list[dict[str, Any]],
+    seen: Sequence[str],
+) -> list[dict[str, Any]]:
+    """What the engine hands back, followed by what the store gained meanwhile.
+
+    The seen rule: an item in ``stored`` that the engine still holds, or was
+    handed by its last read (``seen``), is the engine's to decide about, and it
+    decided: kept, or placed. Any other stored item arrived after that read and
+    is kept, behind the engine's remainder, so the order stays the order things
+    were queued in. Writing ``kept`` over the store instead destroys a message
+    that landed while the run held the queue, and the sender is told it was
+    delivered.
+    """
+    known = {_queue_item_id(item) for item in kept} | set(seen)
+    return [*kept, *(item for item in stored if _queue_item_id(item) not in known)]
+
+
+def _queue_sync(engine: Any) -> QueueSync:
+    sync = getattr(engine, "_queue_sync", None)
+    if not isinstance(sync, QueueSync):
+        sync = QueueSync()
+        engine._queue_sync = sync
+    return sync
+
+
+def queued_items(engine: Any) -> list[QueuedPrompt]:
+    """Every item the engine holds and has not placed, steers first, in queue order."""
+    items: list[QueuedPrompt] = []
+    for kind, queue in (("steer", engine._steer_queue), ("follow_up", engine._follow_up_queue)):
+        for raw in list(queue or []):
+            item = _restorable(raw, kind)  # type: ignore[arg-type]
+            if item is not None:
+                items.append(item)
+    return items
+
+
+def queue_input(
+    engine: Any,
+    kind: QueueKind,
+    text: str,
+    *,
+    attachments: list[dict[str, Any]] | None = None,
+    item_id: str | None = None,
+) -> QueuedPrompt:
+    """Add one item to the engine's own queue, under the configured caps."""
+    item = new_queued_prompt(kind, text, attachments=attachments, item_id=item_id)
+    queue = list((engine._steer_queue if kind == "steer" else engine._follow_up_queue) or [])
+    # Only the length of the queue is checked, so a stand-in per entry is
+    # enough; converting what a store wrote could raise on an entry with no id.
+    enqueue([item] * len(queue), item, engine.config.rc)
+    if kind == "steer":
+        engine._steer_queue = [*queue, item.to_dict()]
+    else:
+        engine._follow_up_queue = [*queue, item.to_dict()]
+    return item
+
+
+def withdraw_queued(engine: Any, item_id: str) -> bool:
+    """Take one waiting item out of the engine's queues; ``False`` when it holds none.
+
+    ``False`` covers two cases a host answers differently. An item the engine
+    was handed and no longer holds has been placed: the model is reading it,
+    and nothing can take it back. An item the engine was never handed arrived
+    in the store after the engine's last read, so the host removes it there;
+    the engine still remembers the id until its next write-back, because a read
+    already in flight returns the row as it stood and would bring it back.
+    """
+    sync = _queue_sync(engine)
+    steer = list(engine._steer_queue or [])
+    follow_up = list(engine._follow_up_queue or [])
+    kept_steer = [raw for raw in steer if _queue_item_id(raw) != item_id]
+    kept_follow_up = [raw for raw in follow_up if _queue_item_id(raw) != item_id]
+    removed = len(kept_steer) != len(steer) or len(kept_follow_up) != len(follow_up)
+    engine._steer_queue = kept_steer
+    engine._follow_up_queue = kept_follow_up
+    if removed or item_id not in sync.seen():
+        if item_id not in sync.withdrawn:
+            sync.withdrawn.append(item_id)
+    return removed
+
+
+def promote_queued(engine: Any, item_id: str) -> bool:
+    """Turn a waiting follow-up into the last steer; ``False`` when the engine holds no such follow-up.
+
+    A follow-up waits for the run to finish; a steer is read at the next tool
+    round. The item moves in the engine first, before the host moves it in its
+    store, because once it is out of the follow-up list the engine cannot start
+    placing it as a follow-up and the store move cannot race a placement into a
+    message the model reads twice.
+    """
+    queue = list(engine._follow_up_queue or [])
+    index = next((i for i, raw in enumerate(queue) if _queue_item_id(raw) == item_id), None)
+    if index is None:
+        return False
+    raw = queue.pop(index)
+    moved = dict(raw) if isinstance(raw, dict) else _restorable(raw, "follow_up")
+    if isinstance(moved, QueuedPrompt):
+        moved = moved.to_dict()
+    if not isinstance(moved, dict):
+        return False
+    moved["kind"] = "steer"
+    engine._follow_up_queue = queue
+    engine._steer_queue = [*list(engine._steer_queue or []), moved]
+    sync = _queue_sync(engine)
+    if item_id not in sync.promoted:
+        sync.promoted.append(item_id)
+    return True
+
+
+def load_queued(
+    engine: Any,
+    steer: list[dict[str, Any]],
+    follow_up: list[dict[str, Any]],
+) -> None:
+    """Replace the engine's queues with a store's, and remember what it was handed.
+
+    Withdrawn items stay out, and a promoted follow-up stays a steer, even when
+    the read returns a row written before the withdrawal or the promotion.
+    """
+    sync = _queue_sync(engine)
+    withdrawn = set(sync.withdrawn)
+    promoted = set(sync.promoted)
+    next_steer = [
+        dict(item) for item in steer
+        if isinstance(item, dict) and _queue_item_id(item) not in withdrawn
+    ]
+    next_follow_up = [
+        dict(item) for item in follow_up
+        if isinstance(item, dict) and _queue_item_id(item) not in withdrawn | promoted
+    ]
+    # A promotion the store has not written yet keeps its place: the engine's
+    # copy is the only one that says it is a steer now.
+    steer_ids = {_queue_item_id(item) for item in next_steer}
+    for raw in list(engine._steer_queue or []):
+        raw_id = _queue_item_id(raw)
+        if raw_id in promoted and raw_id not in steer_ids and isinstance(raw, dict):
+            next_steer.append(dict(raw))
+    sync.seen_steer = [_queue_item_id(item) for item in next_steer]
+    sync.seen_follow_up = [_queue_item_id(item) for item in next_follow_up]
+    engine._steer_queue = next_steer
+    engine._follow_up_queue = next_follow_up
+
+
+def merge_queued(
+    engine: Any,
+    stored_steer: list[dict[str, Any]],
+    stored_follow_up: list[dict[str, Any]],
+) -> QueueMerge:
+    """Merge the engine's remainder into a store's current row by the seen rule.
+
+    Call it with the row as the store holds it now, inside the store's own
+    transaction, and write the result back. The engine then counts what it holds
+    as handed, and forgets its withdrawals and promotions: the write-back is the
+    record of both.
+    """
+    sync = _queue_sync(engine)
+    kept_steer = [dict(raw) for raw in engine._steer_queue or [] if isinstance(raw, dict)]
+    kept_follow_up = [dict(raw) for raw in engine._follow_up_queue or [] if isinstance(raw, dict)]
+    known = [*sync.seen(), *sync.withdrawn, *sync.promoted]
+    merged_steer = merge_queue(kept_steer, stored_steer, [*known, *map(_queue_item_id, kept_follow_up)])
+    merged_follow_up = merge_queue(kept_follow_up, stored_follow_up, [*known, *map(_queue_item_id, kept_steer)])
+    held = {_queue_item_id(item) for item in [*kept_steer, *kept_follow_up]}
+    withdrawn = set(sync.withdrawn)
+    consumed: list[str] = []
+    for item_id in [*sync.seen(), *sync.promoted]:
+        if item_id and item_id not in held and item_id not in withdrawn and item_id not in consumed:
+            consumed.append(item_id)
+    sync.seen_steer = [_queue_item_id(item) for item in kept_steer]
+    sync.seen_follow_up = [_queue_item_id(item) for item in kept_follow_up]
+    sync.withdrawn = []
+    sync.promoted = []
+    return QueueMerge(steer=merged_steer, follow_up=merged_follow_up, consumed=consumed)
+
+
+def leftover_queued_ids(engine: Any) -> list[str]:
+    """The ids of the items the engine still holds, steers first."""
+    return [item.id for item in queued_items(engine) if item.id]
+
+
 # SequenceLike avoids importing Sequence in the public helper signature noise.
 SequenceLike = list[QueuedPrompt]
 
 
 __all__ = [
     "QueueKind",
+    "QueueMerge",
     "QueueMode",
+    "QueueSync",
     "QueuedPrompt",
     "enqueue",
     "lease_key",
+    "leftover_queued_ids",
+    "load_queued",
+    "merge_queue",
+    "merge_queued",
     "new_queued_prompt",
     "place_items",
     "placed_as_user_message",
+    "promote_queued",
+    "queue_input",
+    "queued_items",
     "restore_queued_items",
     "restore_queued_prompts",
     "validate_thinking_for_mode",
+    "withdraw_queued",
 ]

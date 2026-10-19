@@ -8,6 +8,18 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- **A live-control queue API on `QueryEngine`.** `queued()`, `queue_input()`,
+  `withdraw_queued(id)` and `promote_queued(id)` (a waiting follow-up becomes
+  the last steer) replace writing `_steer_queue` / `_follow_up_queue`
+  directly. A host that keeps the queues in a store calls `load_queued()` from
+  its `reload_live_control` and `merge_queued()` from its
+  `persist_live_control`: the merge keeps an item the store gained after the
+  engine's last read (the seen rule, `merge_queue`), and its `consumed` names
+  only what the engine was handed and placed, never an item taken back. A
+  withdrawal or a promotion outlives a read that predates it. Every terminal
+  `message_stop` lists the ids the engine still held unplaced as
+  `leftover_queued`. Nothing changes for a host that keeps writing the lists;
+  the payload field is new and may be ignored.
 - **`OPERATOR_WORDS_METADATA_KEY` (`"protocore.operator_words"`) says who
   wrote a message.** `True` on `Message.metadata` makes the message the
   operator's, `False` makes a user-role message a runtime note, and a list of

@@ -327,7 +327,9 @@ value-объекты.
   написал текст; прогон, свёрнутый по выданному ему пределу (ходы, вызовы
   инструментов, выходные токены, время), заканчивается `wound_down`. Читаются
   обратно через `RunOutcome(payload["outcome"])` и
-  `RunCause.model_validate(payload["cause"])`.
+  `RunCause.model_validate(payload["cause"])`. Тот же стоп перечисляет под
+  `leftover_queued` (`LEFTOVER_QUEUED_FIELD`) id элементов очередей steer и
+  follow-up, которые движок ещё держал и так и не разместил.
 
 ### Входящий трафик, блобы, компакция
 
