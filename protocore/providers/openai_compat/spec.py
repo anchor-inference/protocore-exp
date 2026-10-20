@@ -151,6 +151,13 @@ class ProviderCapabilities:
     repair_tool_pairs: bool = True
     #: Image input; ``None`` means the endpoint takes none.
     images: ImageLimits | None = None
+    #: Put the images a tool returned inside its ``tool`` message, as content
+    #: parts after the text. Most chat-completions servers refuse anything but
+    #: a string there, so by default the images ride in a ``user`` message
+    #: right after the run of tool results, opened by a line saying they are
+    #: tool output and not the user's words. Turn it on for a server that
+    #: takes parts in a tool message. Needs :attr:`images`.
+    tool_result_images: bool = False
     #: Translate the core's cache breakpoints into ``cache_control`` markers on
     #: message content (Anthropic models behind OpenRouter and similar
     #: gateways). Servers that cache prefixes on their own need nothing.

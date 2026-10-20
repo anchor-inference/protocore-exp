@@ -24,7 +24,7 @@ pip install "protocore[openai]==2.0.0a25"   # adds httpx
 Nothing in the core imports the adapter, so a host that brings its own loses
 nothing without the extra. Both pass the packaged conformance suites
 (`LLMProviderConformance`, `ProviderChainConformance`,
-`RequestTokenCounterConformance`).
+`RequestTokenCounterConformance`, `VisionCapabilityConformance`).
 
 ## A minimal endpoint
 
@@ -74,6 +74,7 @@ at most some efficiency.
 | `schema_additional_properties` | `True` | whether a schema's `additionalProperties` reaches the wire |
 | `repair_tool_pairs` | `True` | answer an unanswered call, drop a result without a call |
 | `images` | `None` | image input and its limits (`ImageLimits`) |
+| `tool_result_images` | `False` | put a tool's images inside its `tool` message rather than in a carrier turn after the batch |
 | `cache_control` | `False` | turn the core's cache breakpoints into `cache_control` markers |
 | `cache_prompt` | `False` | send `cache_prompt: true` (llama.cpp server) |
 | `stream_usage` | `True` | ask for the usage chunk at the end of a stream |
@@ -137,6 +138,20 @@ With `images=ImageLimits(max_images=..., max_bytes=..., mime_types=...)` and an
 (over the count, which keeps the most recent; over the size; another format; a
 load failure) is replaced by a note saying why, so a request never fails on a
 picture and the model still knows one was attached.
+
+A tool's images (`ToolResultBlock.images`) share that limit with the user's,
+newest first, and inline bytes need no loader. Most servers take only a string
+in a `tool` message, so by default the images of a batch ride in one `user`
+message placed after the batch's last result, opened by
+`TOOL_IMAGES_CARRIER_HEADER` ("Tool output, not a message from the user"),
+with one line naming each call and, where the tool gave it, the image's size
+in pixels. A server that takes content parts in a tool message gets them
+there instead with `tool_result_images=True`, which is the shape Anthropic's
+`tool_result` has. An image that is not sent becomes a line in its result's
+text, so a text-only model gets no extra turn. A cache breakpoint on the
+batch's last result lands on the carrier, since a tool message's content has
+to stay a string. `vision_support()` reports all this as a `VisionSupport`:
+images only with both `images` and an `image_loader`.
 
 `cache_control=True` places a `cache_control` marker (with `ttl` for the
 `5m`/`1h` buckets) on the wire entry each of the core's `CacheBreakpoint`s

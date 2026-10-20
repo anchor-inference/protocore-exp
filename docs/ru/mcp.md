@@ -92,7 +92,7 @@ await tracker.close()      # останавливает сервер и убир
 | Сервер возвращает | Результат инструмента |
 |---|---|
 | содержимое `text` | текст, по блоку на строку |
-| `image`, `audio` | `[image image/png returned by the tool]` |
+| `image`, `audio` | `[image image/png returned by the tool]`; изображение ещё и прикладывается как `ToolResult.images`, так что модель со зрением его видит |
 | `resource_link` | `[resource <name>: <uri>]` |
 | встроенный `resource` | его текст или `[binary resource <uri> (<type>)]` |
 | `structuredContent` | сам результат, когда текста нет, иначе `ui_payload["structured_content"]` |

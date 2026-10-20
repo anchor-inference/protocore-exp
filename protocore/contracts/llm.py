@@ -679,6 +679,58 @@ class IRequestTokenCounter(Protocol):
         ...
 
 
+class VisionSupport(BaseModel):
+    """What a provider's model can do with images, as the provider states it.
+
+    A host that runs tools returning images (a screenshot after every action,
+    a rendered page) needs to know before the run whether the model answering
+    it will see them. When it will not, the host routes the images to a
+    separate vision model and hands the main model words instead; the core
+    does not do that routing, because which model describes a picture, and
+    how, is the host's choice. The default value is a model that takes no
+    images at all, which is what an adapter that says nothing is taken to be.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    images: bool = False
+    """The model reads images at all."""
+    tool_result_images: bool = False
+    """Images a tool returns reach the model, wherever the adapter places them."""
+    native_tool_result_images: bool = False
+    """They are placed inside the tool result itself, as Anthropic's
+    ``tool_result`` content takes them, rather than in a turn that follows it."""
+    max_images: int | None = Field(default=None, ge=0)
+    """How many images one request may carry, when a limit is known."""
+
+
+@runtime_checkable
+class IVisionCapability(Protocol):
+    """Optional provider capability: say whether the model sees images.
+
+    Not part of :class:`ILLMProvider`, so a provider that says nothing is left
+    exactly as it is and is read as taking no images. A provider behind a
+    chain is asked through :meth:`IProviderChain.current`, since a demotion
+    can land on a model with different eyes.
+    """
+
+    def vision_support(self, model: str | None = None) -> VisionSupport:
+        """What ``model`` (the provider's own when ``None``) does with images."""
+        ...
+
+
+def vision_support_of(provider: object, model: str | None = None) -> VisionSupport:
+    """What ``provider`` says its model does with images, or "nothing" when it says nothing.
+
+    An unknown capability is treated as absent: a host that sent images to a
+    model that cannot read them would pay for every one and get a model
+    guessing at what it was shown.
+    """
+    if isinstance(provider, IVisionCapability):
+        return provider.vision_support(model)
+    return VisionSupport()
+
+
 @runtime_checkable
 class IProviderChain(Protocol):
     """The ordered providers one consumer may run on, plus a cursor over them.
@@ -882,6 +934,7 @@ __all__ = [
     "ILLMProvider",
     "IProviderChain",
     "IRequestTokenCounter",
+    "IVisionCapability",
     "LLMContextWindowExceeded",
     "LLMError",
     "LLMObservabilityContext",
@@ -898,6 +951,8 @@ __all__ = [
     "ProviderDeltaKind",
     "ProviderFailure",
     "ProviderFailureReason",
+    "VisionSupport",
     "classify_transport_exception",
     "provider_failure_of",
+    "vision_support_of",
 ]

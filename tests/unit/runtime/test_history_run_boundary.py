@@ -387,6 +387,26 @@ _WHOLE_HISTORY_BY_DESIGN: dict[str, _Declaration] = {
         "messages of the snapshot handed to it and states the two fields "
         "version 5 adds to a tool result. It asks nothing of any run"
     ),
+    "protocore/contracts/snapshot.py::_v10_to_v11": _whole(
+        "lifts a stored payload, not a live transcript: it walks the recorded "
+        "messages of the snapshot handed to it and states that a version-10 "
+        "tool result carried no images. It asks nothing of any run"
+    ),
+    "protocore/runtime/tool_image_retention.py::_evictions": _whole(
+        "prompt assembly over the outbound view it is handed: counts every "
+        "tool image the request would carry. The limit is on what one request "
+        "holds, seeded turns included, so the whole view is what is counted"
+    ),
+    "protocore/runtime/tool_image_retention.py::retain_recent_tool_images": _whole(
+        "prompt assembly over the outbound view it is handed: takes the older "
+        "tool images out of the copy sent to the provider and leaves persist "
+        "untouched, like the stale-trim beside it"
+    ),
+    "protocore/runtime/tool_image_retention.py::evicted_image_tokens": _whole(
+        "sizes what the request leaves out of the sequence it is handed, for "
+        "the history sums that measure the same sequence: the estimate is of "
+        "whatever the caller is about to send, run-scoped or not"
+    ),
     "protocore/runtime/result_eviction.py::tool_name_for_result": _whole(
         "identity lookup keyed on a tool call id, over the outbound view it is "
         "handed. A call id names a single call, so a wider search cannot "

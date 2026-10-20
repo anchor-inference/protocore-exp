@@ -51,6 +51,18 @@ MAX_STRUCTURED_JSON_CHARS: Final[int] = 1_000_000
 # engine-driven paths read so the ceiling stays dashboard-tunable.
 MAX_DATA_NESTING_DEPTH: Final[int] = 200
 
+# The largest image a tool may hand back inline, as raw bytes. A screenshot of a
+# large display is a few megabytes as PNG; anything far past that is a tool
+# returning a file it should have stored, and inline bytes ride the result into
+# history and every snapshot until a blob store takes them, so the bound is on
+# what one result may pin in memory.
+MAX_INLINE_TOOL_IMAGE_BYTES: Final[int] = 20 * 1024 * 1024
+
+# How many images one tool result may carry. A screen is one image and a page
+# of thumbnails a handful; past this a result is a gallery the model cannot
+# read in one turn, and each image is priced at thousands of tokens.
+MAX_TOOL_RESULT_IMAGES: Final[int] = 16
+
 # Protocol marker for cross-pod compacted tool-result placeholders.
 # Wire format with a byte-deterministic renderer per
 # `runtime/wire_format.py`.
@@ -87,6 +99,7 @@ __all__ = [
     "MAX_DATA_NESTING_DEPTH",
     "MAX_DELEGATE_TASK_CHARS",
     "MAX_ENVELOPE_PAYLOAD_CHARS",
+    "MAX_INLINE_TOOL_IMAGE_BYTES",
     "MAX_LLM_CALL_DETAILS",
     "MAX_REPORT_EVENTS",
     "MAX_STRUCTURED_JSON_CHARS",
@@ -94,6 +107,7 @@ __all__ = [
     "MAX_TOKEN_ESTIMATE_CACHE_ENTRIES",
     "MAX_TOOL_CALL_ARGUMENT_BYTES",
     "MAX_TOOL_CALL_DETAILS",
+    "MAX_TOOL_RESULT_IMAGES",
     "MAX_TOOL_SURFACE_AUDIENCES",
     "MAX_TOOL_SURFACE_CACHE_ENTRIES",
     "MAX_WARNINGS",

@@ -39,6 +39,7 @@ from protocore.contracts.llm import (
     ProviderDeltaKind,
     ProviderFailure,
     ProviderFailureReason,
+    VisionSupport,
     classify_transport_exception,
 )
 from protocore.contracts.runtime_constants import LoopConstants
@@ -360,6 +361,27 @@ class OpenAICompatibleProvider(ILLMProvider):
     def count_tokens(self, text: str, model: str | None = None) -> int:
         """The core's estimate; the loop re-anchors on the size the server reports."""
         return max(1, _estimate(text)) if text else 0
+
+    def vision_support(self, model: str | None = None) -> VisionSupport:
+        """What this endpoint does with images, read from its capabilities.
+
+        An endpoint takes images only when its capabilities say so and an
+        image loader was given, since without one no image held by reference
+        is ever sent. Tool images always reach a model that takes images: in
+        the tool message where :attr:`ProviderCapabilities.tool_result_images`
+        allows it, in the carrier turn after it otherwise. The answer is the
+        endpoint's whatever ``model`` names: one endpoint is one model's
+        capabilities here.
+        """
+        caps = self.endpoint.capabilities
+        if caps.images is None or self._image_loader is None:
+            return VisionSupport()
+        return VisionSupport(
+            images=True,
+            tool_result_images=True,
+            native_tool_result_images=caps.tool_result_images,
+            max_images=caps.images.max_images,
+        )
 
     async def count_request_tokens(self, request: LLMRequest) -> int | None:
         """The exact prompt size from the endpoint's counting route, or ``None``.

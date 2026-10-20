@@ -947,8 +947,17 @@ projection says the value is small enough to be its own, which is the common
 case and costs it nothing.
 The one exception is a `post_tool_use` hook that rewrites the output: the
 hook's text then becomes the value, and the original is dropped with the
-`canonical_ref` and the `ui_payload`, which the hook never saw (see
-[the hook payload](#the-post_tool_use-payload)).
+`canonical_ref`, the `ui_payload` and the `images`, which the hook never saw
+(see [the hook payload](#the-post_tool_use-payload)).
+
+**Images for the model.** A tool that has something to show the model — a
+screenshot after a click, a rendered page — returns it in `ToolResult.images`
+as `ToolResultImage(data=..., mime_type=..., width=..., height=...)`, or with a
+`blob_ref` it stored itself. Unlike `ui_payload` these reach the model. The
+dispatcher stores inline bytes in the run's blob store, events name the image
+by reference, and only the newest few tool images ride in each request (see
+[`contracts.md`](contracts.md#images-in-tool-results)). Give the size: a model
+that points at pixels needs it to map a point back to the screen.
 
 **Outside text, fenced.** A tool whose results carry text from outside the
 run — a fetched page, a search hit, a remote server's reply — sets

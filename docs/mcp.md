@@ -89,7 +89,7 @@ validates what it receives.
 | The server returns | The tool result |
 |---|---|
 | `text` content | the text, one block per line |
-| `image`, `audio` | `[image image/png returned by the tool]` |
+| `image`, `audio` | `[image image/png returned by the tool]`; an image is also attached as `ToolResult.images`, so a model that takes images sees it |
 | `resource_link` | `[resource <name>: <uri>]` |
 | an embedded `resource` | its text, or `[binary resource <uri> (<type>)]` |
 | `structuredContent` | the result when there is no text, else `ui_payload["structured_content"]` |

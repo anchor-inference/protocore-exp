@@ -66,6 +66,7 @@ from protocore.contracts import (
     ISkillStore,
     ITodoStorage,
     IToolRegistry,
+    IVisionCapability,
     LifecycleContext,
     LifecycleDecision,
     LifecycleDisposer,
@@ -105,7 +106,10 @@ from protocore.contracts import (
     ToolPolicyDenied,
     ToolPrecondition,
     ToolResult,
+    ToolResultImage,
     ToolVisibilityPolicy,
+    VisionSupport,
+    vision_support_of,
 )
 from protocore.contracts.middleware import RegistrationKind
 from protocore.events import EventBus, EventName
@@ -170,6 +174,7 @@ __all__ = [  # noqa: RUF022
     "LifecycleVerdict",
     "ILLMProvider",
     "IRequestTokenCounter",
+    "IVisionCapability",
     "IRunStore",
     "ISearchIndex",
     "ISessionStore",
@@ -221,7 +226,9 @@ __all__ = [  # noqa: RUF022
     "ToolPolicyDenied",
     "ToolPrecondition",
     "ToolResult",
+    "ToolResultImage",
     "ToolVisibilityPolicy",
+    "VisionSupport",
     # Runtime
     "DefaultShellSafetyPolicy",
     "EnvelopeParseError",
@@ -247,6 +254,7 @@ __all__ = [  # noqa: RUF022
     "parse_envelope",
     "serialize_envelope",
     "strip_thinking",
+    "vision_support_of",
     "strip_thinking_tokens",
     "structured_json_candidates",
     "structured_json_strings",

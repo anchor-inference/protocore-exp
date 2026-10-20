@@ -19,8 +19,10 @@ from protocore.contracts.types import (
     ThinkingBlock,
     ToolDefinition,
     ToolResultBlock,
+    ToolResultImage,
     ToolUseBlock,
     message_image_refs,
+    message_tool_images,
 )
 from protocore.logging_utils import get_logger
 from protocore.providers.openai_compat.spec import (
@@ -42,6 +44,15 @@ REASONING_ENVELOPE = "openai_compat.reasoning_details"
 #: repaired. An error, never a made-up success: the call did not complete, and
 #: the model has to know that to decide whether to make it again.
 INTERRUPTED_TOOL_RESULT = "[no result: the call was interrupted before it returned]"
+
+#: The line that opens the ``user`` message carrying tool images. The images
+#: ride in a user turn only because most servers take nothing but a string in a
+#: tool message; without this line the model would read a screenshot it asked
+#: for as something the user sent it.
+TOOL_IMAGES_CARRIER_HEADER = (
+    "[Tool output, not a message from the user: the images below were returned "
+    "by the tool calls above.]"
+)
 
 
 def tools_to_wire(
@@ -113,6 +124,10 @@ async def messages_to_wire(
     allowed_images = _allowed_image_positions(messages, capabilities)
     items: list[tuple[int, dict[str, Any]]] = []
     image_position = 0
+    #: Each tool result's images, by call id, with the request-wide position
+    #: of the first: placed only after the pairing repair, which decides which
+    #: results are sent at all.
+    tool_images: dict[str, tuple[tuple[ToolResultImage, ...], int]] = {}
     for index, message in enumerate(messages):
         if message.role is MessageRole.system:
             items.append((index, {"role": "system", "content": message.text}))
@@ -122,6 +137,9 @@ async def messages_to_wire(
                     items.append(
                         (index, {"role": "tool", "tool_call_id": block.tool_call_id, "content": block.content})
                     )
+                    if block.images:
+                        tool_images[block.tool_call_id] = (block.images, image_position)
+                        image_position += len(block.images)
         elif message.role is MessageRole.assistant:
             entry = _assistant_entry(
                 message,
@@ -145,6 +163,14 @@ async def messages_to_wire(
             items.append((index, entry))
     if capabilities.repair_tool_pairs:
         items = _repair_tool_pairs(items)
+    if tool_images:
+        items = await _place_tool_images(
+            items,
+            tool_images,
+            allowed=allowed_images,
+            capabilities=capabilities,
+            image_loader=image_loader,
+        )
     index_map = [-1] * len(messages)
     for position, (index, _entry) in enumerate(items):
         if index >= 0:
@@ -206,6 +232,8 @@ def _allowed_image_positions(
     limits = capabilities.images
     total = sum(
         len(message_image_refs(message)) for message in messages if message.role is MessageRole.user
+    ) + sum(
+        len(message_tool_images(message)) for message in messages if message.role is MessageRole.tool
     )
     if limits is None or limits.max_images is None:
         return range(total)
@@ -241,7 +269,7 @@ async def _user_entry(
 
 
 async def _image_part(
-    ref: ImageRefBlock,
+    ref: ImageRefBlock | ToolResultImage,
     *,
     in_window: bool,
     capabilities: ProviderCapabilities,
@@ -249,16 +277,22 @@ async def _image_part(
 ) -> dict[str, Any]:
     """The content part for one image: the image itself, or a note saying why not."""
     limits = capabilities.images
-    if limits is None or image_loader is None:
+    inline = ref.data if isinstance(ref, ToolResultImage) else None
+    if limits is None or (image_loader is None and inline is None):
         return _image_note(ref, "this model does not take images")
     if not in_window:
         return _image_note(ref, "only the most recent images fit in one request")
-    try:
-        data, mime = await image_loader(ref.blob_ref)
-    except Exception as exc:
-        # One unreadable attachment must not fail the whole request.
-        _logger.warning("image %s could not be loaded: %s", ref.blob_ref, exc)
-        return _image_note(ref, "it could not be loaded")
+    # An image without inline bytes always has a reference (the contract
+    # holds exactly one), and the check above left a loader for it.
+    if inline is None and image_loader is not None and ref.blob_ref is not None:
+        try:
+            data, mime = await image_loader(ref.blob_ref)
+        except Exception as exc:
+            # One unreadable attachment must not fail the whole request.
+            _logger.warning("image %s could not be loaded: %s", ref.blob_ref, exc)
+            return _image_note(ref, "it could not be loaded")
+    else:
+        data, mime = inline or b"", ref.mime_type
     mime = mime or ref.mime_type
     if limits.mime_types is not None and mime not in limits.mime_types:
         return _image_note(ref, f"{mime} is not a format this model takes")
@@ -268,8 +302,96 @@ async def _image_part(
     return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
 
 
-def _image_note(ref: ImageRefBlock, reason: str) -> dict[str, Any]:
-    return {"type": "text", "text": f"[image not sent, {reason}: {ref.blob_ref}]"}
+def _image_note(ref: ImageRefBlock | ToolResultImage, reason: str) -> dict[str, Any]:
+    return {"type": "text", "text": f"[image not sent, {reason}: {ref.blob_ref or 'inline image'}]"}
+
+
+def _image_label(call_id: str, number: int, image: ToolResultImage) -> dict[str, Any] | None:
+    """A line naming an image's size, for a model that reasons in its pixels.
+
+    A computer-use model points at coordinates in the image it was shown; the
+    size it was shown at is what turns them back into screen positions, and a
+    model that is not told it guesses. Nothing is said when the tool gave none.
+    """
+    if image.width is None or image.height is None:
+        return None
+    return {
+        "type": "text",
+        "text": f"[image {number} of tool call {call_id}: {image.width}x{image.height} pixels]",
+    }
+
+
+async def _place_tool_images(
+    items: list[tuple[int, dict[str, Any]]],
+    tool_images: Mapping[str, tuple[tuple[ToolResultImage, ...], int]],
+    *,
+    allowed: range,
+    capabilities: ProviderCapabilities,
+    image_loader: ImageLoader | None,
+) -> list[tuple[int, dict[str, Any]]]:
+    """Put each sent tool result's images where this endpoint takes them.
+
+    With :attr:`ProviderCapabilities.tool_result_images` the images are parts
+    of the tool message itself, after its text — the Anthropic ``tool_result``
+    shape. Otherwise they ride in one ``user`` message placed after the whole
+    run of consecutive tool messages: a user turn between two results of one
+    batch would close the batch, and the server would refuse the calls left
+    without an answer. The carrier opens with
+    :data:`TOOL_IMAGES_CARRIER_HEADER`. An image that cannot be sent becomes a
+    line in its result's own text, so a text-only model gets no extra turn.
+    """
+    out: list[tuple[int, dict[str, Any]]] = []
+    carrier: list[dict[str, Any]] = []
+    carrier_index = -1
+
+    def close_run() -> None:
+        nonlocal carrier, carrier_index
+        if carrier:
+            out.append(
+                (carrier_index, {"role": "user", "content": [{"type": "text", "text": TOOL_IMAGES_CARRIER_HEADER}, *carrier]})
+            )
+        carrier = []
+        carrier_index = -1
+
+    for index, entry in items:
+        if entry["role"] != "tool":
+            close_run()
+            out.append((index, entry))
+            continue
+        out.append((index, entry))
+        if index >= 0:
+            carrier_index = index
+        call_id = str(entry.get("tool_call_id"))
+        found = tool_images.get(call_id) if index >= 0 else None
+        if found is None:
+            continue
+        images, first_position = found
+        sent: list[dict[str, Any]] = []
+        notes: list[str] = []
+        for offset, image in enumerate(images):
+            part = await _image_part(
+                image,
+                in_window=first_position + offset in allowed,
+                capabilities=capabilities,
+                image_loader=image_loader,
+            )
+            if part["type"] != "image_url":
+                notes.append(part["text"])
+                continue
+            label = _image_label(call_id, offset + 1, image)
+            if label is not None:
+                sent.append(label)
+            sent.append(part)
+        text = "\n".join([entry["content"], *notes]) if notes else entry["content"]
+        if sent and capabilities.tool_result_images:
+            entry["content"] = [{"type": "text", "text": text}, *sent]
+            continue
+        entry["content"] = text
+        if sent:
+            carrier.append({"type": "text", "text": f"[images returned by tool call {call_id}]"})
+            carrier.extend(sent)
+    close_run()
+    return out
 
 
 def _repair_tool_pairs(items: list[tuple[int, dict[str, Any]]]) -> list[tuple[int, dict[str, Any]]]:
@@ -427,6 +549,7 @@ def tool_choice_for(extra: Mapping[str, Any], capabilities: ProviderCapabilities
 __all__ = [
     "INTERRUPTED_TOOL_RESULT",
     "REASONING_ENVELOPE",
+    "TOOL_IMAGES_CARRIER_HEADER",
     "ImageLoader",
     "WireMessages",
     "apply_cache_control",

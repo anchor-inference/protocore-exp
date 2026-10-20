@@ -15,7 +15,7 @@ from protocore.contracts.hooks import (
 from protocore.contracts.run_state import RunScopedState
 from protocore.contracts.tool_registry import ToolVisibilityPolicy
 from protocore.contracts.tools import ToolContext, ToolPolicyDenied
-from protocore.contracts.types import HookEvent, ToolCall, ToolResult
+from protocore.contracts.types import HookEvent, ToolCall, ToolResult, ToolResultImage
 from protocore.runtime.events import EventType, TurnEvent
 from protocore.runtime.tool_dispatch import (
     DispatchErrorKind,
@@ -1182,3 +1182,67 @@ async def test_contract_pattern_case_sensitive() -> None:
     assert outcome.error_kind is DispatchErrorKind.unknown_tool
     assert outcome.content == "unknown tool: 'Finalization_contract'"
     assert "is not a tool" not in outcome.content
+
+
+# ----------------------------------------------------------------------
+# Images a tool returns
+# ----------------------------------------------------------------------
+
+
+class _ScreenshotTool(MockTool):
+    async def invoke(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
+        return ToolResult(
+            tool_call_id="",
+            content="screen",
+            images=(ToolResultImage(data=b"\x89PNG-1"), ToolResultImage(blob_ref="kept-by-tool")),
+        )
+
+
+@pytest.mark.asyncio
+async def test_inline_images_are_stored_before_the_event_names_them() -> None:
+    from protocore.tests_support.adapters import InMemoryBlobStore
+
+    blobs = InMemoryBlobStore()
+    dispatcher = ToolDispatcher(
+        registry=ToolRegistry([_ScreenshotTool(tool_name="Shot")]),
+        permission_gate=ToolPermissionGate(roles=CONVENTIONAL_TOOL_ROLES),
+        blob_store=blobs,
+    )
+    ctx = make_default_ctx()
+
+    events, outcome = await _drain(dispatcher, tool_call=ToolCall(name="Shot", arguments={}), ctx=ctx)
+
+    stored, kept = outcome.images
+    assert stored.data is None and stored.blob_ref is not None
+    assert await blobs.get(ctx.tenant_id, stored.blob_ref) == b"\x89PNG-1"
+    assert kept.blob_ref == "kept-by-tool"
+    result = next(e for e in events if e.type is EventType.TOOL_RESULT)
+    assert result.payload["images"] == [stored.event_entry(), kept.event_entry()]
+
+
+@pytest.mark.asyncio
+async def test_without_a_store_the_images_stay_inline_and_the_event_names_their_size() -> None:
+    dispatcher, _, _ = _build_dispatcher([_ScreenshotTool(tool_name="Shot")])
+
+    events, outcome = await _drain(dispatcher, tool_call=ToolCall(name="Shot", arguments={}))
+
+    assert outcome.images[0].data == b"\x89PNG-1"
+    result = next(e for e in events if e.type is EventType.TOOL_RESULT)
+    assert result.payload["images"][0] == {"mime_type": "image/png", "inline": True, "byte_size": 6}
+
+
+@pytest.mark.asyncio
+async def test_a_hook_that_rewrites_the_output_drops_the_images_it_never_saw() -> None:
+    hooks = InMemoryHookManager()
+    hooks.queue_action(
+        HookEvent.post_tool_use,
+        HookResult(action=HookActionKind.MODIFY, modifications={"tool_output": "redacted"}),
+    )
+    dispatcher, _, _ = _build_dispatcher([_ScreenshotTool(tool_name="Shot")], hook_manager=hooks)
+
+    events, outcome = await _drain(dispatcher, tool_call=ToolCall(name="Shot", arguments={}))
+
+    assert outcome.content == "redacted"
+    assert outcome.images == ()
+    result = next(e for e in events if e.type is EventType.TOOL_RESULT)
+    assert "images" not in result.payload

@@ -25,7 +25,13 @@ from protocore.contracts.blob import IBlobStore
 from protocore.contracts.config import IConstantsRegistry, ICoreConstantsProvider
 from protocore.contracts.events import IEventStream
 from protocore.contracts.hooks import IHookManager
-from protocore.contracts.llm import ILLMProvider, IProviderChain, IRequestTokenCounter
+from protocore.contracts.llm import (
+    ILLMProvider,
+    IProviderChain,
+    IRequestTokenCounter,
+    IVisionCapability,
+    VisionSupport,
+)
 from protocore.contracts.memory import (
     IMemory,
     IMemoryContentScanner,
@@ -135,6 +141,31 @@ class RequestTokenCounterConformance(ContractSuite):
     """The optional provider capability that sizes a rendered request."""
 
     protocol = IRequestTokenCounter
+
+
+class VisionCapabilityConformance(ContractSuite):
+    """The optional provider capability that says whether the model sees images.
+
+    Two behavioural cases, because a host routes images on the answer before
+    any image is sent: an answer that is not a :class:`VisionSupport`, or one
+    that claims tool images reach a model that takes no images, sends a run's
+    screenshots to a model that cannot read them.
+    """
+
+    protocol = IVisionCapability
+
+    def test_the_answer_is_a_vision_support(self, subject: object) -> None:
+        assert isinstance(subject, IVisionCapability)
+        assert isinstance(subject.vision_support(), VisionSupport)
+        assert isinstance(subject.vision_support(model=None), VisionSupport)
+
+    def test_the_answer_is_consistent(self, subject: object) -> None:
+        assert isinstance(subject, IVisionCapability)
+        support = subject.vision_support()
+        if support.tool_result_images:
+            assert support.images, "tool images cannot reach a model that takes no images"
+        if support.native_tool_result_images:
+            assert support.tool_result_images, "a native placement is a placement"
 
 
 class MemoryConformance(ContractSuite):
@@ -283,6 +314,7 @@ SUITES: tuple[type[ContractSuite], ...] = (
     LLMProviderConformance,
     ProviderChainConformance,
     RequestTokenCounterConformance,
+    VisionCapabilityConformance,
     MemoryConformance,
     ProvenanceMemoryConformance,
     MemoryWritePolicyConformance,

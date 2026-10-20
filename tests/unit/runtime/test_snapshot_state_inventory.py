@@ -330,7 +330,7 @@ async def test_a_version_one_payload_is_lifted_and_resumes_empty(engine_factory)
     source = engine_factory(run_id="run-1", tenant_id="scope-1", session_id="session-1")
     source.turn_count = 5
     payload = source.snapshot()
-    assert payload["schema_version"] == SNAPSHOT_SCHEMA_VERSION == 10
+    assert payload["schema_version"] == SNAPSHOT_SCHEMA_VERSION == 11
     # A version-1 payload named the run's two allowances at the top level.
     run_state_payload = payload.pop(RUN_SCOPED_STATE_SNAPSHOT_KEY)
     payload["run_work_ledger"] = run_state_payload["run_work_ledger"]

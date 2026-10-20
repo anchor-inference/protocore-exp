@@ -276,6 +276,15 @@ what makes it bite. `recovery_redrive_backoff_base_seconds` (30),
 run reports on its terminal stop to a host deciding whether to re-drive it. See
 [`contracts.md`](contracts.md#provider-failures-and-the-runs-outcome).
 
+The tool-image fields are a fourth. `tool_result_image_keep` (3; `None` keeps
+every image, `0` sends none) is how many of the newest tool images a request
+carries, and `tool_result_image_evict_batch` (2) how many leave at once past
+it, so a view holds between `keep` and `keep + batch - 1` and the prompt prefix
+moves once per batch. A larger batch breaks the provider's cache less often and
+carries more images between breaks; each image is priced at
+`token_count_image_tokens` either way. See
+[`contracts.md`](contracts.md#images-in-tool-results).
+
 ## See also
 
 - [`architecture.md`](architecture.md) — the LoopConstants system in the

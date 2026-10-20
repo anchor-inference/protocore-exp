@@ -1184,6 +1184,13 @@ def _llm_history(engine: QueryEngine) -> tuple[list[Message], list[str]]:
             already_trimmed=engine._trimmed_tool_result_ids,
             roles=engine.config.tool_roles,
         )
+    if engine.config.rc.tool_result_image_keep is not None:
+        from protocore.runtime.tool_image_retention import retain_recent_tool_images
+
+        # After the checkpoint and the trim, which change text and leave every
+        # image where it was, so the count of images the cut is made from is
+        # the count the request carries.
+        view = retain_recent_tool_images(view, engine.config.rc, engine.prompt_provider)
     if engine.config.rc.tool_result_split_enabled:
         from protocore.contracts.types import ToolResultBlock
         from protocore.runtime.tool_result_split import project_result_content
@@ -7447,6 +7454,7 @@ def _result_block_from_outcome(
         ),
         canonical_ref=outcome.canonical_ref,
         path=outcome.path,
+        images=outcome.images,
     )
 
 
@@ -11395,6 +11403,11 @@ async def _replay_recorded_tool_outcomes(
                     "content": block.content,
                     "is_error": block.is_error,
                     "replayed": True,
+                    **(
+                        {"images": [image.event_entry() for image in block.images]}
+                        if block.images
+                        else {}
+                    ),
                 },
             )
             continue
@@ -13579,6 +13592,7 @@ def _ensure_tool_dispatcher(engine: QueryEngine) -> ToolDispatcher:
         tool_error_counter=engine.run_state.tool_error_counter,
         roles=engine.config.tool_roles,
         resilience_classifier=engine.config.resilience_classifier,
+        blob_store=engine.blobs,
     )
     engine._tool_dispatcher = dispatcher  # type: ignore[attr-defined]
     return dispatcher

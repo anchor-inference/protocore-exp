@@ -612,6 +612,12 @@ crashes. The shared assistant loop is **not** a single immutable path:
   were kept and how many went, so a trimmed result cannot be read as complete
   evidence. It runs after the compaction checkpoint and before the split
   projection, and sizes its head so the split cannot cut its own pointer.
+- `runtime/tool_image_retention.py` — keeps only the newest
+  `tool_result_image_keep` tool images in the request view, after the trim and
+  before the split; older ones leave `tool_result_image_evict_batch` at a time,
+  their results saying so in a line, and `engine.history` keeps them all. The
+  cut follows from the count of images alone, so it needs no state on the
+  engine or in the snapshot. See [contracts](contracts.md#images-in-tool-results).
 - `runtime/loop_state.py` — `LoopState` is a pure 7-state machine:
   `PENDING → RUNNING → {AWAITING | COMPACTING} → {COMPLETED | FAILED |
   CANCELLED}`. `assert_transition()` enforces the legal-edge table;

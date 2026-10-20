@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from typing import Any
 
 import pytest
 
+from protocore.constants import MAX_TOOL_RESULT_IMAGES
 from protocore.contracts.tool_registry import tool_group_of
 from protocore.contracts.tools import Tool, ToolContext, ToolInvocationError
 from protocore.mcp import (
@@ -130,6 +132,33 @@ def test_every_kind_of_content_becomes_text() -> None:
     assert result.ui_payload == {"structured_content": {"count": 2}}
     assert result.metadata == {"mcp_server": "s", "mcp_tool": "t"}
     assert result.is_error is False
+
+
+def test_an_image_is_attached_for_the_model_as_well_as_named() -> None:
+    """The line stays, so a model that takes no images still knows one came
+    back; the image itself rides the result for a model that can look."""
+    png = base64.b64encode(b"\x89PNG-shot").decode("ascii")
+    result = tool_result_from_mcp("c", {
+        "content": [
+            {"type": "image", "mimeType": "image/png", "data": png},
+            {"type": "image", "mimeType": "image/png", "data": "not base64!"},
+            {"type": "image", "mimeType": "text/plain", "data": png},
+            {"type": "image", "data": png},
+            {"type": "audio", "mimeType": "audio/wav", "data": png},
+        ],
+    }, server="s", tool="t")
+
+    assert result.content.splitlines()[0] == "[image image/png returned by the tool]"
+    assert [image.data for image in result.images] == [b"\x89PNG-shot"]
+    assert result.images[0].mime_type == "image/png"
+
+
+def test_no_more_images_are_attached_than_a_result_may_carry() -> None:
+    png = base64.b64encode(b"\x89PNG").decode("ascii")
+    items = [{"type": "image", "mimeType": "image/png", "data": png}] * (MAX_TOOL_RESULT_IMAGES + 2)
+    result = tool_result_from_mcp("c", {"content": items}, server="s", tool="t")
+
+    assert len(result.images) == MAX_TOOL_RESULT_IMAGES
 
 
 def test_structured_content_alone_is_the_result() -> None:

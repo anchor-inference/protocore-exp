@@ -37,7 +37,7 @@ from typing import Any
 SNAPSHOT_SCHEMA_KEY = "schema_version"
 
 #: The schema version this build writes and can read after upcasting.
-SNAPSHOT_SCHEMA_VERSION = 10
+SNAPSHOT_SCHEMA_VERSION = 11
 
 #: Where the run's own state sits inside the snapshot payload: the tree's
 #: cumulative work ledger and the capacity of its concurrency budget, the two
@@ -458,6 +458,40 @@ def _v9_to_v10(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 UPCASTERS.register(9, _v9_to_v10)
+
+
+def _v10_to_v11(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Version 11 lets a recorded tool result carry the images the model was shown.
+
+    A version-10 build reads a result with ``images`` and drops them without a
+    word, since the block ignores a key it does not know: the resumed run would
+    answer from screenshots it no longer has. The version bump is what makes
+    that build refuse the payload instead.
+
+    A version-10 result carried no images, and the lift says so on every
+    result rather than leaving the key off, as the version 5 lift did for the
+    fields it introduced.
+    """
+    history = snapshot.get("history")
+    if not isinstance(history, list):
+        return dict(snapshot)
+    lifted_history: list[Any] = []
+    for message in history:
+        blocks = message.get("content_blocks") if isinstance(message, dict) else None
+        if not isinstance(blocks, list):
+            lifted_history.append(message)
+            continue
+        lifted_blocks = [
+            {"images": [], **block}
+            if isinstance(block, dict) and block.get("kind") == "tool_result"
+            else block
+            for block in blocks
+        ]
+        lifted_history.append({**message, "content_blocks": lifted_blocks})
+    return {**snapshot, "history": lifted_history}
+
+
+UPCASTERS.register(10, _v10_to_v11)
 
 
 def migrate_snapshot(

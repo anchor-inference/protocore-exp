@@ -61,6 +61,7 @@ from enum import StrEnum
 from typing import Any, Final
 
 from protocore.constants import MAX_DATA_NESTING_DEPTH
+from protocore.contracts.blob import IBlobStore
 from protocore.contracts.evidence import (
     EvidenceProducerBinding,
     EvidenceRecord,
@@ -107,6 +108,7 @@ from protocore.contracts.types import (
     HookEvent,
     ToolCall,
     ToolResult,
+    ToolResultImage,
 )
 from protocore.logging_utils import get_logger
 from protocore.runtime.events import EventType, TurnEvent
@@ -721,6 +723,10 @@ class DispatchOutcome:
  canonical_ref:
  Where the canonical value can be fetched back from, if the tool
  stored it anywhere.
+ images:
+ The images the model is shown with the result, by blob reference once
+ the dispatcher has stored them. Dropped with ``ui_payload`` wherever the
+ result is replaced by the dispatcher's own words or a hook's.
  path:
  The workspace path this result is a view of, if it is a view of one.
  replay_message:
@@ -750,6 +756,7 @@ class DispatchOutcome:
     ui_payload: dict[str, Any] | None = None
     canonical_ref: str | None = None
     path: str | None = None
+    images: tuple[ToolResultImage, ...] = ()
     replay_message: str | None = field(default=None, repr=False, compare=False)
 
 
@@ -833,8 +840,13 @@ class ToolDispatcher:
         tool_error_counter: IRunToolErrorCounter | None = None,
         roles: ToolRoleMap = EMPTY_TOOL_ROLE_MAP,
         resilience_classifier: IResilienceClassifier | None = None,
+        blob_store: IBlobStore | None = None,
     ) -> None:
         self._registry = registry
+        self._blob_store = blob_store
+        """Where a tool's inline images are moved before the result event is
+        written, so the event, the transcript and the snapshot carry a
+        reference. ``None`` leaves them inline."""
         self._gate = permission_gate
         self._hooks = hook_manager
         self._tool_error_counter = tool_error_counter
@@ -2011,6 +2023,7 @@ class ToolDispatcher:
         # What the parallel path's replay rebuilds a failed result's text from.
         replay_message = tool_result.content
         ui_payload = tool_result.ui_payload
+        images = tool_result.images
         canonical_ref = tool_result.canonical_ref
         result_path = tool_result.path
         result_metadata = dict(tool_result.metadata)
@@ -2025,6 +2038,7 @@ class ToolDispatcher:
                 content = "tool evidence rejected: registered tool has no evidence producer binding"
                 canonical_content = content
                 ui_payload = None
+                images = ()
                 canonical_ref = None
                 evidence_records = ()
             else:
@@ -2034,6 +2048,7 @@ class ToolDispatcher:
                     content = "tool evidence rejected: dispatch context has no evidence origin"
                     canonical_content = content
                     ui_payload = None
+                    images = ()
                     canonical_ref = None
                     evidence_records = ()
                     evidence_producer = None
@@ -2054,6 +2069,7 @@ class ToolDispatcher:
                             content = "tool evidence rejected: dispatcher has no private ledger admission channel"
                             canonical_content = content
                             ui_payload = None
+                            images = ()
                             canonical_ref = None
                             evidence_records = ()
                             evidence_producer = None
@@ -2071,6 +2087,7 @@ class ToolDispatcher:
                                 content = f"tool evidence rejected: {exc}"
                                 canonical_content = content
                                 ui_payload = None
+                                images = ()
                                 canonical_ref = None
                                 evidence_records = ()
                                 evidence_producer = None
@@ -2176,6 +2193,7 @@ class ToolDispatcher:
             canonical_content = content
             canonical_ref = None
             ui_payload = None
+            images = ()
 
         outcome_metadata: dict[str, Any] | None = result_metadata or None
         if is_untrusted_tool(tool):
@@ -2207,6 +2225,8 @@ class ToolDispatcher:
                 ),
             }
 
+        images = await self._store_inline_images(images, ctx)
+
         # ── Step 6: ToolResult envelope event ──────────────────────
         # ``success`` and ``is_error`` are both stated, and they mirror each
         # other by construction. Two readers grew up on this payload asking
@@ -2226,6 +2246,9 @@ class ToolDispatcher:
                 "duration_ms": duration_ms,
                 "content_blocks": [{"type": "text", "text": content}],
                 **({"ui_payload": ui_payload} if ui_payload else {}),
+                # The images by reference, never their bytes: see
+                # ``ToolResultImage.event_entry``.
+                **({"images": [image.event_entry() for image in images]} if images else {}),
                 **({"canonical_ref": canonical_ref} if canonical_ref else {}),
                 **({"path": result_path} if result_path else {}),
                 **({"metadata": outcome_metadata} if outcome_metadata else {}),
@@ -2248,12 +2271,49 @@ class ToolDispatcher:
             ui_payload=ui_payload,
             canonical_ref=canonical_ref,
             path=result_path,
+            images=images,
             replay_message=outcome_replay_message,
         )
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    async def _store_inline_images(
+        self, images: tuple[ToolResultImage, ...], ctx: ToolContext
+    ) -> tuple[ToolResultImage, ...]:
+        """Move a result's inline images into the blob store, where there is one.
+
+        Done before the result event is written, so the event can name each
+        image by reference, and before the result enters history, so neither
+        the transcript nor any snapshot carries megabytes of base64 for a
+        screenshot. An image the store refuses stays inline: the model still
+        sees it, the event names its size, and the snapshot pays for the bytes.
+        """
+        if self._blob_store is None or not any(image.data is not None for image in images):
+            return images
+        stored: list[ToolResultImage] = []
+        for image in images:
+            if image.data is None:
+                stored.append(image)
+                continue
+            try:
+                blob = await self._blob_store.put(
+                    ctx.tenant_id,
+                    image.data,
+                    content_type=image.mime_type,
+                    metadata={"label": "tool_result_image"},
+                )
+            except Exception as exc:
+                _logger.warning(
+                    "tool image could not be stored run=%s error=%s",
+                    ctx.run_id,
+                    type(exc).__name__,
+                )
+                stored.append(image)
+                continue
+            stored.append(image.model_copy(update={"blob_ref": blob.ref, "data": None}))
+        return tuple(stored)
 
     async def _post_tool_use(
         self,

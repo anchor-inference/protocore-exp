@@ -28,6 +28,38 @@ All notable changes to this project are recorded here. The format follows
   provider's `retry_after_seconds`; a permanent refusal, a spend cap, a crash
   or a spent budget never. The snapshot becomes version 9, with an upcaster
   from 8 that records no budget.
+- **A tool result can carry images to the model.** `ToolResult.images` and
+  `ToolResultBlock.images` hold `ToolResultImage`s: a `blob_ref` or inline
+  `data` (base64 in JSON), an `image/*` `mime_type`, optional `width` and
+  `height`, and `metadata` for geometry. The dispatcher stores inline bytes in
+  the engine's blob store before the `tool_result` event, whose new `images`
+  list names each one by reference (`event_entry()`; `inline: true` with
+  `byte_size` when no store took it) and never carries base64. A hook that
+  rewrites the output drops them. Only the newest `tool_result_image_keep` (3)
+  ride in a request; older ones leave the provider's copy
+  `tool_result_image_evict_batch` (2) at a time, so the cached prefix moves
+  once per batch, and their result says so in a line from the new
+  `tool_image_elided` template and in `TOOL_IMAGES_ELIDED_METADATA_KEY`. A tool
+  image is priced at `token_count_image_tokens` and the history sums take off
+  the ones left out. MCP `image` content is attached as well as named. New
+  caps `MAX_INLINE_TOOL_IMAGE_BYTES` and `MAX_TOOL_RESULT_IMAGES`. A result
+  without images is stored and sent exactly as before. See
+  `docs/contracts.md`, "Images in tool results".
+- **`IVisionCapability` says whether a provider's model sees images.**
+  `vision_support(model=None)` returns a `VisionSupport` (`images`,
+  `tool_result_images`, `native_tool_result_images`, `max_images`), and
+  `vision_support_of(provider)` reads it, answering "no images" for a provider
+  that does not implement it, so a host can route screenshots to a separate
+  vision model. `VisionCapabilityConformance` is its suite, with two
+  behavioural cases. The reference adapter implements it.
+- **The reference adapter sends tool images.** By default the images of a
+  batch ride in one `user` message after its last tool result, opened by
+  `TOOL_IMAGES_CARRIER_HEADER`, so most chat-completions servers, which take
+  only a string in a `tool` message, accept the request and the pairing of
+  calls and results holds; `ProviderCapabilities.tool_result_images=True` puts
+  them inside the tool message instead. Tool and user images share
+  `ImageLimits.max_images`, a size the tool gave is said beside its image, and
+  an image that cannot be sent is a line in its result's text.
 - **The core emits `model_changed` when the model answering a run changes.**
   Every provider-chain advance emits it before the restarted turn's first
   delta, with `from`, `to` (rungs named as the chain names them),
@@ -474,12 +506,14 @@ All notable changes to this project are recorded here. The format follows
 
 ### Changed
 
-- **The snapshot schema is version 10** (2.0.0a25 wrote version 7). Version 8
+- **The snapshot schema is version 11** (2.0.0a25 wrote version 7). Version 8
   adds `run_cause`, the wind-down's cause with the provider's verdict, so a run
   resumed while winding down still reports what failed it; version 9 adds
   `recovery_budget` to the run's own state; version 10 adds
-  `last_step_settings`. An older payload is lifted step by step with `None` in
-  each new field. A build that reads an older version refuses a newer
+  `last_step_settings`; version 11 lets a recorded tool result carry `images`,
+  which a version-10 build would drop without a word. An older payload is
+  lifted step by step with `None` in each new field, and `images: []` on each
+  recorded result. A build that reads an older version refuses a newer
   snapshot, as with every version bump: roll forward, not back.
 - **`ToolPermissionGate(policies=[])` installs no policy.** An empty list read
   as "use the defaults", so a host that passed one to turn the shell deny list

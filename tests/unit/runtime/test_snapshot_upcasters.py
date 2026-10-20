@@ -189,3 +189,47 @@ def test_a_version_nine_payload_says_no_step_settings_were_recorded() -> None:
 
     assert upgraded[SNAPSHOT_SCHEMA_KEY] == SNAPSHOT_SCHEMA_VERSION
     assert upgraded["last_step_settings"] is None
+
+
+def test_a_version_ten_result_says_it_carried_no_images() -> None:
+    """Version 11 lets a recorded result carry images. A version-10 result had
+    none, and the lift says so on every result rather than leaving it to a
+    default; a version-10 build refuses the version-11 payload instead of
+    dropping the images it does not know."""
+    upgraded = migrate_snapshot(
+        {
+            SNAPSHOT_SCHEMA_KEY: 10,
+            "run_id": "run-1",
+            "history": [
+                {"role": "user", "content_blocks": [{"kind": "text", "text": "go"}]},
+                {
+                    "role": "tool",
+                    "content_blocks": [
+                        {"kind": "tool_result", "tool_call_id": "c1", "content": "ok"},
+                        "not a block",
+                    ],
+                },
+                {"role": "assistant", "content_blocks": "not a list"},
+                "not a message",
+            ],
+        }
+    )
+
+    assert upgraded[SNAPSHOT_SCHEMA_KEY] == SNAPSHOT_SCHEMA_VERSION
+    history = upgraded["history"]
+    assert history[0] == {"role": "user", "content_blocks": [{"kind": "text", "text": "go"}]}
+    assert history[1]["content_blocks"][0] == {
+        "images": [],
+        "kind": "tool_result",
+        "tool_call_id": "c1",
+        "content": "ok",
+    }
+    assert history[1]["content_blocks"][1] == "not a block"
+    assert history[2] == {"role": "assistant", "content_blocks": "not a list"}
+    assert history[3] == "not a message"
+    assert migrate_snapshot({SNAPSHOT_SCHEMA_KEY: 10, "history": None})["history"] is None
+
+
+def test_a_version_ten_build_refuses_a_payload_that_carries_images() -> None:
+    with pytest.raises(SnapshotSchemaError, match="newer"):
+        migrate_snapshot({SNAPSHOT_SCHEMA_KEY: 11}, registry=UpcasterRegistry(10))

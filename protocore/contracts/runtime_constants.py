@@ -3560,6 +3560,32 @@ class LoopConstants(BaseModel):
             "the fixed batch."
         ),
     )
+    tool_result_image_keep: int | None = Field(
+        default=3,
+        ge=0,
+        description=(
+            "How many of the newest images tool results returned ride in a "
+            "request. An older one is taken out of the copy sent to the "
+            "provider and named in its result's text instead; the history "
+            "keeps it. A computer-use run takes a screenshot after every "
+            "action, each priced at over a thousand tokens, and only the last "
+            "few say what the screen looks like now. None keeps every image."
+        ),
+    )
+    tool_result_image_evict_batch: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "How many tool images leave the request at once when the newest "
+            "``tool_result_image_keep`` are exceeded. Taking one out per step "
+            "would change an earlier part of the prompt on every request and "
+            "lose the provider's cache of everything after it each time; "
+            "waiting until this many are over the limit keeps between "
+            "``tool_result_image_keep`` and that plus this minus one images in "
+            "view, and moves the prefix once per batch. 1 evicts as soon as the "
+            "limit is passed."
+        ),
+    )
     tool_result_stale_trim_min_share: float = Field(
         default=0.25,
         ge=0.0,

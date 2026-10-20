@@ -60,6 +60,7 @@ from protocore.contracts.hooks import (
 from protocore.contracts.llm import (
     ILLMProvider,
     IRequestTokenCounter,
+    IVisionCapability,
     LLMContextWindowExceeded,
     LLMError,
     LLMObservabilityContext,
@@ -72,6 +73,8 @@ from protocore.contracts.llm import (
     ProviderDeltaKind,
     ProviderFailure,
     ProviderFailureReason,
+    VisionSupport,
+    vision_support_of,
 )
 from protocore.contracts.memory import (
     DEFAULT_RECALL_SCOPES,
@@ -167,6 +170,7 @@ from protocore.contracts.types import (
     ORIGIN_METADATA_KEY,
     PARTIAL_ASSISTANT_ATTEMPT_METADATA_KEY,
     QUEUED_ITEMS_METADATA_KEY,
+    TOOL_IMAGES_ELIDED_METADATA_KEY,
     AgentEnvelope,
     BlobMetadata,
     CompactionSourceRef,
@@ -201,8 +205,10 @@ from protocore.contracts.types import (
     ToolPrecondition,
     ToolResult,
     ToolResultBlock,
+    ToolResultImage,
     ToolUseBlock,
     message_image_refs,
+    message_tool_images,
     synthetic_recovery_origin,
 )
 from protocore.contracts.workspace import (
@@ -234,6 +240,7 @@ __all__ = [
     "PARTIAL_ASSISTANT_ATTEMPT_METADATA_KEY",
     "QUEUED_ITEMS_METADATA_KEY",
     "RETRYABLE_ERROR_CLASSES",
+    "TOOL_IMAGES_ELIDED_METADATA_KEY",
     "TRANSPORT_DOWN_ERROR_CLASSES",
     "AgentDispatchError",
     "AgentEnvelope",
@@ -285,6 +292,7 @@ __all__ = [
     "IToolOutcomeStore",
     "IToolRegistry",
     "IToolTransport",
+    "IVisionCapability",
     "IWorkPool",
     "IWorkspace",
     "ImageRefBlock",
@@ -385,6 +393,7 @@ __all__ = [
     "ToolPrecondition",
     "ToolResult",
     "ToolResultBlock",
+    "ToolResultImage",
     "ToolTransportError",
     "ToolTransportRetryBudgetExhausted",
     "ToolTransportTimeout",
@@ -400,6 +409,7 @@ __all__ = [
     "VerificationResourceUse",
     "VerificationSeverity",
     "VerificationState",
+    "VisionSupport",
     "WorkHandle",
     "WorkSpec",
     "WorkspaceConflictError",
@@ -417,6 +427,8 @@ __all__ = [
     "WorkspaceWriteOutcome",
     "assert_verification_transition",
     "message_image_refs",
+    "message_tool_images",
     "settle_step_settings",
     "synthetic_recovery_origin",
+    "vision_support_of",
 ]

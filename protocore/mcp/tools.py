@@ -16,7 +16,9 @@ What crosses the boundary, and how:
   definitions section and a reference to nothing is a schema no model can
   satisfy.
 * **Results.** Text content is the result; images, audio and binary resources
-  are named in a line each, since a tool result here is text; structured
+  are named in a line each, and an image is also attached to the result
+  (:attr:`~protocore.contracts.types.ToolResult.images`) for a model that can
+  look at it; structured
   content becomes the result when the server sent no text, and rides as
   ``ui_payload`` when it did. A result the server marks ``isError`` is an
   error result.
@@ -38,9 +40,10 @@ from collections.abc import Callable, Mapping, Sequence
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
+from protocore.constants import MAX_TOOL_RESULT_IMAGES
 from protocore.contracts.tool_registry import TOOL_GROUP_INSTRUCTIONS_MAX_CHARS, IToolRegistry
 from protocore.contracts.tools import Tool, ToolContext, ToolInvocationError, read_metadata
-from protocore.contracts.types import ToolDefinition, ToolParameterSchema, ToolResult
+from protocore.contracts.types import ToolDefinition, ToolParameterSchema, ToolResult, ToolResultImage
 from protocore.logging_utils import get_logger
 from protocore.mcp.session import McpClientSession, McpError, McpTransport, McpTransportClosed
 
@@ -115,9 +118,13 @@ def _inline_refs(node: Any, definitions: Mapping[str, Any], depth: int) -> Any:
 def tool_result_from_mcp(call_id: str, result: Mapping[str, Any], *, server: str, tool: str) -> ToolResult:
     """The core's :class:`ToolResult` for an MCP ``tools/call`` result."""
     parts: list[str] = []
+    images: list[ToolResultImage] = []
     for item in result.get("content") or []:
         if isinstance(item, Mapping):
             parts.append(_render_item(item))
+            image = _image_of(item)
+            if image is not None and len(images) < MAX_TOOL_RESULT_IMAGES:
+                images.append(image)
     structured = result.get("structuredContent")
     ui_payload: dict[str, Any] | None = None
     if structured is not None:
@@ -131,7 +138,28 @@ def tool_result_from_mcp(call_id: str, result: Mapping[str, Any], *, server: str
         is_error=bool(result.get("isError")),
         metadata={"mcp_server": server, "mcp_tool": tool},
         ui_payload=ui_payload,
+        images=tuple(images),
     )
+
+
+def _image_of(item: Mapping[str, Any]) -> ToolResultImage | None:
+    """The image an ``image`` content item carries, for the model to look at.
+
+    The line :func:`_render_item` writes for it stays in the text, so a model
+    that takes no images still knows one was returned. An item whose data is
+    not base64 of an image the core accepts is left as that line alone.
+    """
+    if item.get("type") != "image":
+        return None
+    data, mime = item.get("data"), item.get("mimeType")
+    if not isinstance(data, str) or not isinstance(mime, str):
+        return None
+    try:
+        # Validated from the mapping so the contract's own base64 reader
+        # decodes the text, rather than a second decoder here.
+        return ToolResultImage.model_validate({"data": data, "mime_type": mime})
+    except ValueError:
+        return None
 
 
 def _render_item(item: Mapping[str, Any]) -> str:

@@ -7,6 +7,8 @@ in :mod:`tests.unit.test_types_serialization`.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import math
 import uuid
 from collections.abc import Sequence
@@ -20,6 +22,7 @@ from pydantic import (
     Field,
     SerializerFunctionWrapHandler,
     computed_field,
+    field_serializer,
     field_validator,
     model_serializer,
     model_validator,
@@ -30,11 +33,13 @@ from protocore.constants import (
     MAX_DATA_NESTING_DEPTH,
     MAX_DELEGATE_TASK_CHARS,
     MAX_ENVELOPE_PAYLOAD_CHARS,
+    MAX_INLINE_TOOL_IMAGE_BYTES,
     MAX_LLM_CALL_DETAILS,
     MAX_REPORT_EVENTS,
     MAX_SUBAGENT_RUNS,
     MAX_TOOL_CALL_ARGUMENT_BYTES,
     MAX_TOOL_CALL_DETAILS,
+    MAX_TOOL_RESULT_IMAGES,
     MAX_WARNINGS,
 )
 from protocore.contracts.attempt_ledger import (
@@ -378,6 +383,15 @@ adapter for a model that takes images loads the blob and sends it, and one for
 a text-only model sends a marker or nothing. :func:`message_image_refs` is the
 one reader, blocks first and then this list. The prompt estimate prices every
 entry at :attr:`LoopConstants.token_count_image_tokens`, as it prices a block.
+"""
+
+TOOL_IMAGES_ELIDED_METADATA_KEY = "protocore.tool_images_elided"
+"""``ToolResultBlock.metadata`` key on a result whose images the request left out.
+
+Written by the retention policy on the copy of a result it sends to the
+provider, never on ``engine.history``: the number of the result's images that
+were taken out of the request and named in its text instead, because only the
+newest :attr:`LoopConstants.tool_result_image_keep` tool images ride along.
 """
 
 QUEUED_ITEMS_METADATA_KEY = "protocore.queued_items"
@@ -795,6 +809,142 @@ class ImageRefBlock(BaseModel):
     mime_type: str = "image/png"
 
 
+class ToolResultImage(BaseModel):
+    """One image a tool handed back for the model to look at.
+
+    A screenshot after a click, a rendered page, a chart: the model that made
+    the call reads it, so it belongs on the result rather than in a side
+    channel only a person sees. The bytes live in exactly one place — a blob
+    reference in the run's store, or inline in :attr:`data` until something
+    stores them. The dispatcher moves inline bytes into the engine's blob
+    store when it has one, before the result event is written, so the
+    transcript, the snapshot and the event carry a reference and nothing
+    larger; with no store the bytes stay inline, and the snapshot holds them
+    as base64.
+
+    The core never sends anything itself. Whether the model sees the image is
+    the provider adapter's decision (see ``docs/contracts.md``, "Images in tool
+    results"), and which of a run's images still ride in a request is the
+    retention policy's (:attr:`LoopConstants.tool_result_image_keep`).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    blob_ref: str | None = None
+    """Where the bytes are kept, as a key in the run's blob store."""
+
+    data: bytes | None = None
+    """The bytes themselves, while nothing has stored them. Base64 in JSON."""
+
+    mime_type: str = "image/png"
+    width: int | None = Field(default=None, ge=1)
+    """The image's width in pixels, when the tool knows it."""
+    height: int | None = Field(default=None, ge=1)
+    """The image's height in pixels, when the tool knows it."""
+
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    """What else a reader of the image needs: the geometry a computer-use tool
+    took it under (the display it shows, the scale from screen to image
+    pixels, the origin of a cropped region), a caption. Never sent to the
+    model as such; an adapter may say part of it in words."""
+
+    @field_validator("data", mode="before")
+    @classmethod
+    def _decode_base64_data(cls, value: object) -> object:
+        """Read the base64 text a JSON dump wrote back into bytes.
+
+        A snapshot is stored as JSON and read back with ``model_validate`` on
+        the decoded mapping, where pydantic would take the text as the bytes
+        themselves. Bytes pass as they are; text is always base64.
+        """
+        if isinstance(value, str):
+            try:
+                return base64.b64decode(value, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise ValueError("ToolResultImage.data text must be base64") from exc
+        return value
+
+    @field_validator("mime_type")
+    @classmethod
+    def _image_media_type(cls, value: str) -> str:
+        if not value.startswith("image/"):
+            raise ValueError(f"ToolResultImage.mime_type must be an image type, got {value!r}")
+        return value
+
+    @field_validator("metadata")
+    @classmethod
+    def _reject_non_finite_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _reject_non_finite_floats(value, field="ToolResultImage.metadata")
+
+    @model_validator(mode="after")
+    def _one_source(self) -> Self:
+        if (self.blob_ref is None) == (self.data is None):
+            raise ValueError("a ToolResultImage carries exactly one of blob_ref and data")
+        if self.blob_ref is not None and not self.blob_ref:
+            raise ValueError("ToolResultImage.blob_ref must not be empty")
+        if self.data is not None:
+            if not self.data:
+                raise ValueError("ToolResultImage.data must not be empty")
+            if len(self.data) > MAX_INLINE_TOOL_IMAGE_BYTES:
+                raise ValueError(
+                    f"an inline tool image exceeds {MAX_INLINE_TOOL_IMAGE_BYTES} bytes; "
+                    "store it and pass blob_ref"
+                )
+        return self
+
+    @model_serializer(mode="wrap")
+    def _compact_dump(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Leave out what is unset, and write inline bytes as base64 in JSON.
+
+        Every key left out is one a reader assumes absent anyway; writing
+        ``"data": null`` beside every stored reference would only grow each
+        snapshot. JSON has no bytes, and pydantic's default for them is UTF-8
+        text, which a screenshot is not.
+        """
+        data: dict[str, Any] = handler(self)
+        for key in ("blob_ref", "data", "width", "height"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        if not data.get("metadata"):
+            data.pop("metadata", None)
+        return data
+
+    @field_serializer("data", when_used="json")
+    def _data_as_base64(self, value: bytes | None) -> str | None:
+        """Standard base64, the alphabet :meth:`_decode_base64_data` reads back."""
+        return None if value is None else base64.b64encode(value).decode("ascii")
+
+    def event_entry(self) -> dict[str, Any]:
+        """The image as an event names it: by reference, never by its bytes.
+
+        An event is fanned out to every watcher and often kept, so base64 in
+        it would multiply the image by the number of readers. An image still
+        inline (the run has no blob store) is described by its type, size and
+        byte count, with ``inline: true`` saying there is nothing to fetch.
+        """
+        entry: dict[str, Any] = {"mime_type": self.mime_type}
+        if self.blob_ref is not None:
+            entry["blob_ref"] = self.blob_ref
+        else:
+            entry["inline"] = True
+            entry["byte_size"] = len(self.data or b"")
+        if self.width is not None:
+            entry["width"] = self.width
+        if self.height is not None:
+            entry["height"] = self.height
+        if self.metadata:
+            entry["metadata"] = dict(self.metadata)
+        return entry
+
+
+def _cap_tool_images(
+    value: tuple[ToolResultImage, ...], *, field: str
+) -> tuple[ToolResultImage, ...]:
+    if len(value) > MAX_TOOL_RESULT_IMAGES:
+        raise ValueError(f"{field} carries more than {MAX_TOOL_RESULT_IMAGES} images")
+    return tuple(value)
+
+
 class ToolUseBlock(BaseModel):
     """Assistant-emitted tool invocation."""
 
@@ -873,10 +1023,38 @@ class ToolResultBlock(BaseModel):
     stops being kept once it stopped being true.
     """
 
+    images: tuple[ToolResultImage, ...] = ()
+    """The images the model is shown with :attr:`content`, oldest first.
+
+    Part of the projection, like the text: the retention policy takes all but
+    the newest few out of the copy sent to the provider and says so in the
+    text, and Tier 1 masking drops them with the text it masks. Serialised
+    only when there are some, so a stored result without images is byte for
+    byte what it was before the field existed.
+    """
+
     @field_validator("metadata")
     @classmethod
     def _reject_non_finite_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
         return _reject_non_finite_floats(value, field="ToolResultBlock.metadata")
+
+    @field_validator("images")
+    @classmethod
+    def _cap_images(cls, value: tuple[ToolResultImage, ...]) -> tuple[ToolResultImage, ...]:
+        return _cap_tool_images(value, field="ToolResultBlock.images")
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_images(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Leave ``images`` out of the dump when there are none.
+
+        Almost no result has any; writing an empty list would rewrite the
+        stored bytes of every result in every durable blob and change the
+        digest of every recorded request, to say nothing.
+        """
+        data: dict[str, Any] = handler(self)
+        if not data.get("images"):
+            data.pop("images", None)
+        return data
 
 
 ContentBlock = TextBlock | ThinkingBlock | ImageRefBlock | ToolUseBlock | ToolResultBlock
@@ -1084,6 +1262,16 @@ def message_image_refs(message: Message) -> tuple[ImageRefBlock, ...]:
     return tuple(images)
 
 
+def message_tool_images(message: Message) -> tuple[ToolResultImage, ...]:
+    """Every image the tool results of ``message`` carry, in order."""
+    return tuple(
+        image
+        for block in message.content_blocks
+        if isinstance(block, ToolResultBlock)
+        for image in block.images
+    )
+
+
 # ---------------------------------------------------------------------------
 # ToolCall / ToolResult — adapter-facing primitives
 # ---------------------------------------------------------------------------
@@ -1186,6 +1374,16 @@ class ToolResult(BaseModel):
     needs the room, and fills this in on the block it rewrites.
     """
 
+    images: tuple[ToolResultImage, ...] = ()
+    """Images for the model to look at, beside the text.
+
+    Unlike :attr:`ui_payload` these reach the model: they travel onto
+    :attr:`ToolResultBlock.images`. A tool returns inline bytes or a blob
+    reference it stored itself; the dispatcher stores inline bytes in the
+    run's blob store when there is one. A ``post_tool_use`` hook that rewrites
+    the output drops them, since the hook never saw them.
+    """
+
     path: str | None = None
     """The workspace path this result is a view of, when it is a view of one.
 
@@ -1204,6 +1402,11 @@ class ToolResult(BaseModel):
         for and a tool that asked for none is unaffected.
         """
         return self.content if self.model_projection is None else self.model_projection
+
+    @field_validator("images")
+    @classmethod
+    def _cap_images(cls, value: tuple[ToolResultImage, ...]) -> tuple[ToolResultImage, ...]:
+        return _cap_tool_images(value, field="ToolResult.images")
 
     @field_validator("ui_payload")
     @classmethod
@@ -1820,6 +2023,7 @@ __all__ = [
     "TERMINAL_TOOL_METADATA_KEY",
     "TERMINAL_TOOL_STATUS_COMPLETED",
     "TERMINAL_TOOL_STATUS_METADATA_KEY",
+    "TOOL_IMAGES_ELIDED_METADATA_KEY",
     "TOOL_RESULT_CONSECUTIVE_CAP_ELIGIBLE_METADATA_KEY",
     "TOOL_RESULT_COUNT_AS_ERROR_METADATA_KEY",
     "AgentEnvelope",
@@ -1857,7 +2061,9 @@ __all__ = [
     "ToolParameterSchema",
     "ToolResult",
     "ToolResultBlock",
+    "ToolResultImage",
     "ToolUseBlock",
     "message_image_refs",
+    "message_tool_images",
     "synthetic_recovery_origin",
 ]

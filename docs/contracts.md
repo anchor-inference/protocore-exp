@@ -112,6 +112,7 @@ concrete adapter. Each is one line: the contract and what a host supplies.
 | `ILLMProvider` | `contracts/llm.py` | LLM completions: `stream_with_tools`, `complete_structured` (post-loop JSON schema), `complete_text` (post-loop free-form document), and `count_tokens`; a universal LiteLLM/OpenAI-compatible adapter (OpenRouter / vLLM / OpenAI). |
 | `IProviderChain` | `contracts/llm.py` | Ordered remaining providers plus a one-way `advance()` cursor. `QueryEngine` injects it as `provider_chain` for mid-stream failover; `None` leaves existing recovery untouched. Not in `protocore.contracts.__all__` — import from `protocore.contracts.llm`. |
 | `IRequestTokenCounter` | `contracts/llm.py` | Optional provider capability: `async count_request_tokens(request) -> int \| None`, the prompt tokens the server renders the request to (messages through its chat template, tools, generation prompt). Asked only near a limit (`exact_token_count_margin_ratio`); `None` means "cannot count here", a raise falls back to the estimate with a warning. Looked up on the provider's class, so a provider without it is unaffected. |
+| `IVisionCapability` | `contracts/llm.py` | Optional provider capability: `vision_support(model=None) -> VisionSupport`, whether the model reads images at all (`images`), whether images a tool returns reach it (`tool_result_images`), whether they sit inside the tool result itself (`native_tool_result_images`) and how many fit in a request (`max_images`). `vision_support_of(provider)` reads it and answers "no images" for a provider that says nothing. A host asks before a run that will produce screenshots and routes them to a separate vision model when the answer is no; the core does no routing. Asked of `IProviderChain.current()` behind a chain. Suite: `VisionCapabilityConformance`. |
 | `RuntimeConstantsProvider` | `contracts/runtime_constants.py` | Per-tenant `LoopConstants` (`async get(tenant_id)`), Postgres-backed with a Redis cache. |
 | `ISessionStore` | `contracts/session.py` | Session / transcript persistence. |
 | `IRunStore` | `contracts/run.py` | Run record create / list / read (durable row + hot record). |
@@ -208,7 +209,9 @@ Every conversation primitive flows as one of these Pydantic models (the
 - **`ToolUseBlock`** — an assistant-emitted tool invocation (`tool_call_id`,
   `name`, `arguments_json`; arg bytes capped).
 - **`ToolResultBlock`** — a tool-call result returned to the model
-  (`tool_call_id`, `content`, `is_error`, `metadata`).
+  (`tool_call_id`, `content`, `is_error`, `metadata`, and `images`, the
+  `ToolResultImage`s the model is shown with the text; see "Images in tool
+  results" below).
 - **`ImageRefBlock`** — an image reference whose bytes live in `IBlobStore`.
   A user turn holds one block, its text, so the images sent with it ride in
   `metadata[IMAGE_REFS_METADATA_KEY]` (`"protocore.image_refs"`) as a list of
@@ -235,7 +238,64 @@ Every conversation primitive flows as one of these Pydantic models (the
   cannot change what the model decides; `canonical_ref` says where the whole
   value can be fetched back from once the transcript no longer holds it; and
   `path` says which workspace path the result is a view of, which is what lets
-  a later write say the result is no longer true.
+  a later write say the result is no longer true. `images` are pictures for
+  the model, unlike `ui_payload`: they travel onto `ToolResultBlock.images`.
+- **`ToolResultImage`** — one image a tool handed back for the model to look
+  at: exactly one of `blob_ref` (a key in the run's `IBlobStore`) and `data`
+  (inline bytes, base64 in JSON), a `mime_type` that must be `image/*`,
+  optional `width` and `height` in pixels, and `metadata` for what a reader of
+  the image needs (the display it shows, the scale from screen to image
+  pixels, the origin of a crop). Inline bytes are capped at
+  `MAX_INLINE_TOOL_IMAGE_BYTES` and a result at `MAX_TOOL_RESULT_IMAGES`
+  images (`protocore/constants.py`). `event_entry()` is the image as an event
+  names it, by reference and never by its bytes.
+
+#### Images in tool results
+
+A computer-use tool takes a screenshot after every action and the model that
+acted reads it, so a result can carry pixels to the model itself, end to end:
+
+- **Dispatch.** A tool returns `ToolResult(images=...)`. When the engine has a
+  blob store, the dispatcher moves inline bytes into it before the
+  `tool_result` event is written, so the event, the transcript and the
+  snapshot carry a reference; a store that refuses leaves the image inline. A
+  `post_tool_use` hook that rewrites the output drops the images, as it drops
+  `ui_payload`: the hook never saw them.
+- **Events.** The `tool_result` event (and a replayed one) carries
+  `images: [image.event_entry(), ...]` — `blob_ref`, `mime_type`, `width`,
+  `height`, `metadata`, or `inline: true` with `byte_size` for an image no
+  store holds. No event carries base64.
+- **History and snapshot.** `ToolResultBlock.images` is serialised only when
+  non-empty, so a result without images keeps its stored bytes. The snapshot
+  schema is version 11: a version-10 build would drop the images without a
+  word, so it refuses the payload instead, and the 10 → 11 upcaster writes
+  `images: []` on every recorded result.
+- **The request.** Only the newest `tool_result_image_keep` tool images (3)
+  ride in a request; an older one leaves the copy sent to the provider, and its
+  result gains a line (template `tool_image_elided`) and
+  `metadata[TOOL_IMAGES_ELIDED_METADATA_KEY]`, the number it lost. Images leave
+  `tool_result_image_evict_batch` (2) at a time, the oldest first, so the
+  prompt prefix moves once per batch rather than on every step; the cut follows
+  from the count alone, so a rebuilt or resumed view makes the same one.
+  `engine.history` keeps every image. `None` keeps all; `0` sends none.
+- **Estimation.** A tool image costs `token_count_image_tokens`, as a user's
+  image does. The history sums take off the images the request leaves out, so
+  a long computer-use run is not compacted for screenshots it no longer sends.
+  Compaction's summariser is told how many images a result had; Tier 1
+  masking drops them with the text.
+- **The adapter.** The core sends nothing itself. An adapter for a model that
+  takes images places each one where its API takes it — Anthropic's shape is
+  the reference: image blocks inside the `tool_result` content, after its text.
+  An API that takes only text in a tool message (most chat-completions
+  servers) gets the images in one `user` turn placed after the whole run of
+  consecutive tool results (a user turn between two results of one batch would
+  close the batch), opened by a line saying the images are tool output and not
+  the user's words; that turn exists only on the wire and never enters
+  history. A size the tool gave is said beside its image, since a model that
+  points at pixels needs it to map back to the screen. An image a model cannot
+  take becomes a line in its result's text, never a failed request. The
+  reference adapter does both (`ProviderCapabilities.tool_result_images`
+  chooses); see [`providers.md`](providers.md#images-and-the-prompt-cache).
 - **`ToolContext`** — the per-invocation context handed to a tool: the run's
   scope, its `metadata`, the `evidence` context when the tool produces evidence,
   and `run_state` — the live state of the run the call belongs to.
@@ -481,6 +541,9 @@ everything verbatim is still correct, only larger.
   snapshot (schema version 10), and emitted as a `step_settings` event when
   `step_settings_event_enabled` is on. Holds no prompt, credential or tool
   argument.
+- **Tool images in the snapshot** (schema version 11) — a recorded result
+  carries its `images`, by blob reference when the run had a store and as
+  base64 otherwise; see "Images in tool results" above.
 - **`SNAPSHOT_SCHEMA_VERSION`** / **`SnapshotUpcaster`** /
   **`SnapshotSchemaError`** (`contracts/snapshot.py`) — the snapshot states its
   own schema version, and a reader that cannot recognise it refuses the payload

@@ -84,6 +84,7 @@ from protocore.runtime.context.carrier import (
 from protocore.runtime.context.ledger import Ledger, distinct_lines, is_ledger, ledger_message
 from protocore.runtime.result_eviction import tool_names_by_call_id
 from protocore.runtime.token_counting import estimate_tokens
+from protocore.runtime.tool_image_retention import evicted_image_tokens
 from protocore.runtime.wire_format import (
     is_compacted_placeholder,
     render_compacted_placeholder,
@@ -328,6 +329,12 @@ def _estimate_message_tokens_uncached(message: Message, rc: LoopConstants) -> in
     for block in message.content_blocks:
         if isinstance(block, ImageRefBlock):
             continue
+        if isinstance(block, ToolResultBlock):
+            # A tool's images reach the model as a user's do and cost the same.
+            # Which of them the request still carries depends on where the
+            # message sits, which one message cannot see; the history sum
+            # takes the ones left out back off (``evicted_image_tokens``).
+            total += len(block.images) * rc.token_count_image_tokens
         total += estimate_tokens(_block_text_for_estimation(block), rc)
     if message.reasoning_content:
         total += estimate_tokens(message.reasoning_content, rc)
@@ -432,7 +439,7 @@ class TokenEstimator:
         return sum(
             round(self._estimate(message, rc, signature) * calibration)
             for message in history
-        )
+        ) - round(evicted_image_tokens(history, rc) * calibration)
 
     def estimate_history_uncalibrated(
         self,
@@ -446,7 +453,9 @@ class TokenEstimator:
         same arithmetic with a rounding error in it.
         """
         signature = _token_estimate_signature(rc)
-        return sum(self._estimate(message, rc, signature) for message in history)
+        return sum(
+            self._estimate(message, rc, signature) for message in history
+        ) - evicted_image_tokens(history, rc)
 
     def clear(self) -> None:
         """Forget every remembered estimate."""
@@ -495,8 +504,9 @@ def estimate_message_tokens(message: Message, rc: LoopConstants) -> int:
  * :class:`ImageRefBlock` via the flat
  :attr:`LoopConstants.token_count_image_tokens` constant — image blocks
  carry only a blob ref, so a size-derived estimate is impossible ; the
- images a user turn carries under ``IMAGE_REFS_METADATA_KEY`` are priced the
- same way;
+ images a user turn carries under ``IMAGE_REFS_METADATA_KEY`` and the images
+ of a tool result are priced the same way (the history sums take off the tool
+ images the request leaves out);
  * :attr:`Message.reasoning_content` via ``estimate_tokens`` .
 
     Answers from a process-wide :class:`TokenEstimator`, for callers that hold
@@ -1577,6 +1587,10 @@ def render_span_for_summary(
             elif isinstance(block, ToolResultBlock):
                 name = tool_names.get(block.tool_call_id, "")
                 body = originals.get(block.tool_call_id) or block.canonical_content or block.content
+                if block.images:
+                    # The summariser reads text; it is told the images were
+                    # there so the summary does not claim the tool showed nothing.
+                    body = f"{body}\n[{len(block.images)} image(s) returned]"
                 label = f"[output of {name or 'tool'}{', error' if block.is_error else ''}]"
                 entries.append((label, body, True))
             elif isinstance(block, ImageRefBlock):
