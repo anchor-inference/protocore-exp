@@ -277,9 +277,11 @@ class StreamAssembler:
                 )
             )
         if self.finish_reason is None and self._calls:
-            # Some servers end a stream of calls with no finish reason. It used to
-            # be read after the calls below were cleared, fell back to ``stop``, and
-            # the loop took a turn that asked for a tool as finished.
+            # Some servers end a stream of calls with ``[DONE]`` and no finish
+            # reason. It used to be read after the calls below were cleared, fell
+            # back to ``stop``, and the loop took a turn that asked for a tool as
+            # finished. A stream with neither never gets here: the provider
+            # refuses it as a dropped connection.
             self.finish_reason = "tool_calls"
         self._calls.clear()
         self._slot_by_index.clear()

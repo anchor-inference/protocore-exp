@@ -320,9 +320,12 @@ async def test_a_refusal_is_an_answer_and_is_never_resent() -> None:
     assert len(server.requests) == 1
 
 
-async def test_an_empty_body_ends_the_stream_cleanly() -> None:
-    deltas = await collect(provider(FakeServer(sse_response(b""))).stream_with_tools(user_request()))
-    assert [delta.kind for delta in deltas] == [ProviderDeltaKind.usage, ProviderDeltaKind.finish]
+async def test_an_empty_body_is_a_dropped_connection_not_an_empty_answer() -> None:
+    """A 200 whose body ends before any event said the response was over. It used
+    to end the turn as an empty, finished answer."""
+    with pytest.raises(LLMProviderError) as raised:
+        await collect(provider(FakeServer(sse_response(b""))).stream_with_tools(user_request()))
+    assert assert_adapter_failure(raised.value).reason is R.connection
 
 
 async def test_a_timeout_of_the_caller_is_not_mistaken_for_the_watchdog() -> None:

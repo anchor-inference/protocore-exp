@@ -208,6 +208,44 @@ async def test_calls_streamed_without_a_finish_reason_end_the_turn_as_tool_use()
     assert [delta.finish_reason for delta in finish] == [map_finish("tool_calls")]
 
 
+async def test_a_stream_cut_before_its_end_is_a_connection_failure_not_a_tool_call() -> None:
+    """The same calls with neither a finish reason nor ``[DONE]``: the connection
+    dropped. Reading that as ``tool_calls`` ran a call the model may not have
+    finished; reading it as ``stop`` ended the turn as if it were answered."""
+    body = chunk_stream(
+        {"choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "id": "c1", "function": {"name": "Write", "arguments": '{"path": "a", "content": "par'}}]}}]},
+        done=False,
+    )
+    seen: list[K] = []
+    try:
+        async for delta in provider(FakeServer(sse_response(body))).stream_with_tools(user_request()):
+            seen.append(delta.kind)
+    except LLMError as exc:
+        failure = assert_adapter_failure(exc)
+    else:
+        raise AssertionError("a cut stream was read as finished")
+    assert failure.reason is ProviderFailureReason.connection
+    assert failure.retryable is True
+    assert K.tool_use_stop not in seen and K.finish not in seen
+
+
+async def test_text_cut_before_the_end_of_the_stream_is_a_connection_failure() -> None:
+    body = chunk_stream({"choices": [{"index": 0, "delta": {"content": "Half an ans"}}]}, done=False)
+    try:
+        await collect(provider(FakeServer(sse_response(body))).stream_with_tools(user_request()))
+    except LLMError as exc:
+        assert assert_adapter_failure(exc).reason is ProviderFailureReason.connection
+    else:
+        raise AssertionError("a cut stream was read as finished")
+
+
+async def test_a_finish_reason_without_done_still_ends_the_turn() -> None:
+    body = chunk_stream({"choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": "stop"}]}, done=False)
+    deltas = await collect(provider(FakeServer(sse_response(body))).stream_with_tools(user_request()))
+    assert [delta.finish_reason for delta in deltas if delta.kind is K.finish] == [map_finish("stop")]
+
+
 def test_calls_numbered_alike_are_told_apart_by_id() -> None:
     assembler = StreamAssembler()
     assembler.feed({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "a", "function": {"name": "One", "arguments": "{}"}}]}}]})

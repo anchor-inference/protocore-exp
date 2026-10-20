@@ -577,6 +577,18 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
+- **A tool call cut short is never dispatched, whatever the round's finish.**
+  The truncated-call recovery fired only when the round ended with `stop`, so
+  a cut call a server closed with `tool_use` ran on its brace-repaired
+  arguments: a `Write` wrote half a file. Every call flagged
+  `args_partial_truncated` now gets the recovery, except one cut by the
+  output cap, which the output-cap policy resumes as before.
+- **The reference adapter refuses a stream that ended before the response
+  did.** A body that closes with neither `[DONE]` nor a finish reason (an
+  empty 200 included) raises a retryable `connection` failure instead of
+  ending the turn on half an answer or running the calls it held. A stream
+  with `[DONE]` and no finish reason still reads as `tool_calls` when it
+  carried calls.
 - **A queued steer or follow-up keeps its attachments.**
   `placed_as_user_message` joined only the items' texts, so a screenshot sent
   while a run was busy reached the model as its caption alone. Each item's

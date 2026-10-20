@@ -1,7 +1,8 @@
 """A tool call the model started writing and never finished.
 
 The model opens a call, streams part of its arguments, and then the round
-ends with an ordinary stop rather than a length cap. What arrives is a call
+ends with anything but a length cap: an ordinary stop, or a ``tool_use`` some
+servers report for a call they cut. What arrives is a call
 whose arguments were salvaged by closing the braces the model never sent —
 parseable, and wrong. Dispatching it fails on validation, and the model reads
 that as "the tool is broken" rather than as "the arguments were too big",
@@ -112,7 +113,10 @@ class TruncatedToolCallRecoveryPolicy:
             for call in turn.pending_tool_calls
             if call.args_partial_truncated and not call.truncated_by_output_cap
         ]
-        if not truncated or turn.finish_reason != "stop":
+        # Any finish but the length cap, which the output-cap policy resumes. Only
+        # ``stop`` used to count, so a cut call a server closed with ``tool_use``
+        # was dispatched on its brace-repaired arguments and wrote half a file.
+        if not truncated:
             # A clean round. Give the whole per-message count back, so one
             # early truncation does not permanently consume a slot.
             self._recoveries.reset(engine)

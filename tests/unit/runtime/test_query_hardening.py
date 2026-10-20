@@ -3081,8 +3081,10 @@ class _TruncatedToolCallStopLLM:
         truncated_rounds: int = 1,
         tool_name: str = "Write",
         final_text: str = "ok",
+        finish_reason: str = "stop",
     ) -> None:
         self._truncated_rounds = truncated_rounds
+        self._finish_reason = finish_reason
         self._call_idx = 0
         self._tool_name = tool_name
         self._final_text = final_text
@@ -3120,7 +3122,7 @@ class _TruncatedToolCallStopLLM:
             )
             yield ProviderDelta(
                 kind=ProviderDeltaKind.finish,
-                finish_reason="stop",
+                finish_reason=self._finish_reason,
             )
             return
 
@@ -3228,6 +3230,27 @@ class _CleanCompleteToolCallLLM:
 
 
 # ``json`` is referenced inside the mock above.
+
+
+@pytest.mark.asyncio
+async def test_a_call_cut_short_is_not_dispatched_when_the_round_says_tool_use(
+    engine_factory, in_memory_runtime
+) -> None:
+    """A server that ends a cut call with ``tool_calls`` (or a stream that
+    closed after ``[DONE]`` with no finish, which reads the same) still sent
+    half a call. Only ``stop`` used to route it to the recovery, so a
+    brace-repaired Write ran and wrote a truncated file."""
+    engine = engine_factory(rc=LoopConstants(model_context_window=4096))
+    llm = _TruncatedToolCallStopLLM(truncated_rounds=1, finish_reason="tool_use")
+    engine.llm = llm  # type: ignore[assignment]
+
+    events = [evt async for evt in engine.run(Message(role=MessageRole.user, content_blocks=[TextBlock(text="hi")]))]
+
+    results = [e for e in events if e.type is EventType.TOOL_RESULT]
+    assert len(results) == 1
+    assert results[0].payload["error"]["kind"] == "tool_call_truncated"
+    assert engine.state is LoopState.COMPLETED
+    assert len(llm.calls) == 2
 
 
 @pytest.mark.asyncio

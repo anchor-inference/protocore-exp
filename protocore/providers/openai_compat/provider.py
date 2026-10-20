@@ -250,6 +250,7 @@ class OpenAICompatibleProvider(ILLMProvider):
                 # stalled stream half-way through the resend.
                 yield ProviderDelta(kind=ProviderDeltaKind.progress)
             response, lines = opened
+            ended_cleanly = False
             try:
                 if response.status_code >= 400:
                     text = (await response.aread()).decode("utf-8", "replace")
@@ -260,6 +261,7 @@ class OpenAICompatibleProvider(ILLMProvider):
                         yield ProviderDelta(kind=ProviderDeltaKind.progress)
                         continue
                     if data.strip() == "[DONE]":
+                        ended_cleanly = True
                         break
                     try:
                         chunk = json.loads(data)
@@ -279,6 +281,19 @@ class OpenAICompatibleProvider(ILLMProvider):
                         yield delta
             finally:
                 await response.aclose()
+            if not ended_cleanly and assembler.finish_reason is None:
+                # The body ended with neither ``[DONE]`` nor a finish reason: the
+                # connection dropped mid-answer. Read as a stop it ended the turn
+                # on half an answer; read as calls it ran a call the model may
+                # not have finished. Neither is said: the round is retried.
+                raise LLMProviderError(
+                    f"{self.endpoint.name}: the stream ended before the response did",
+                    classified=ProviderFailure(
+                        reason=ProviderFailureReason.connection,
+                        retryable=True,
+                        provider_message="stream closed before the response was complete",
+                    ),
+                )
         except httpx.HTTPError as exc:
             raise self._transport_error(exc) from exc
         for delta in assembler.close():
