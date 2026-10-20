@@ -157,7 +157,7 @@ if TYPE_CHECKING:
 # so the accepted vocabularies are declared once (mirrors the Field ``pattern``
 # carried by the Pydantic-side LoopConstants defaults).
 RUN_MODES: tuple[str, ...] = ("direct", "deep")
-REASONING_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh")
+REASONING_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 # These envelopes are structurally children of an assistant reader turn.  In
 # gated mode they cannot precede the withheld ``message_start``; retaining the
@@ -503,7 +503,10 @@ class QueryEngineConfig:
     enforces ``deep ⇒ thinking`` server-side.
     """
     reasoning_effort: str = "low"
-    """Native CoT effort throttle: ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh``.
+    """Native CoT effort throttle: ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh`` | ``max`` | ``ultra``.
+
+    ``max`` and ``ultra`` exist on some models only; the caller picks one the model offers, since the
+    core cannot know which endpoint names them.
 
     Threaded into ``LLMRequest.extra['reasoning_effort']`` on every assistant
     stream so the adapter can map the level onto the provider (vLLM chat

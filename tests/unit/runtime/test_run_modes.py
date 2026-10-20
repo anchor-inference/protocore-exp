@@ -173,6 +173,21 @@ def test_config_accepts_xhigh_reasoning_effort() -> None:
     assert config.reasoning_effort == "xhigh"
 
 
+@pytest.mark.parametrize("effort", ["max", "ultra"])
+def test_config_accepts_the_efforts_above_xhigh(effort: str) -> None:
+    # Codex offers these on some of its models; the host decides which model may have them, so the
+    # core must not refuse to build the run.
+    config = QueryEngineConfig(
+        run_id="r",
+        tenant_id="t",
+        session_id="s",
+        model_name="m",
+        thinking_enabled=True,
+        reasoning_effort=effort,
+    )
+    assert config.reasoning_effort == effort
+
+
 def test_config_rejects_unknown_reasoning_effort() -> None:
     with pytest.raises(ValueError, match="reasoning_effort"):
         QueryEngineConfig(
@@ -180,7 +195,7 @@ def test_config_rejects_unknown_reasoning_effort() -> None:
             tenant_id="t",
             session_id="s",
             model_name="m",
-            reasoning_effort="ultra",
+            reasoning_effort="extreme",
         )
 
 
