@@ -10,7 +10,7 @@ registry as one deferrable group, and forwards the model's calls. Nothing else
 in the core imports it.
 
 ```bash
-pip install "protocore[mcp]==2.0.0a25"   # adds httpx, for the HTTP transport
+pip install "protocore[mcp]==2.0.0a26"   # adds httpx, for the HTTP transport
 ```
 
 The stdio transport needs no extra; the streamable-HTTP transport needs

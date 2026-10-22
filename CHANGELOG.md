@@ -6,6 +6,8 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [2.0.0a26] - 2026-10-22
+
 ### Added
 
 - **One recovery budget across the retry layers, and `recoverable_after` on

@@ -18,7 +18,7 @@ parts that are not about any one vendor:
 | `protocore.providers.openai_compat` | `OpenAICompatibleProvider`, an `ILLMProvider` for any server that speaks the OpenAI chat-completions API | the `openai` extra |
 
 ```bash
-pip install "protocore[openai]==2.0.0a25"   # adds httpx
+pip install "protocore[openai]==2.0.0a26"   # adds httpx
 ```
 
 Nothing in the core imports the adapter, so a host that brings its own loses

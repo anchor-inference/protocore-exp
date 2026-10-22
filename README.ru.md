@@ -48,7 +48,7 @@
 ## Установка
 
 ```bash
-pip install protocore==2.0.0a25
+pip install protocore==2.0.0a26
 ```
 
 Версию нужно назвать явно. Опубликован пре-релиз, а pip их пропускает, пока не
@@ -68,9 +68,9 @@ Python ≥ 3.12. Зависимости рантайма — `pydantic`, `jinja2
 ### Дополнительные наборы
 
 ```bash
-pip install "protocore[testing]==2.0.0a25"   # прогнать conformance-наборы на своих адаптерах
-pip install "protocore[openai]==2.0.0a25"    # эталонный адаптер chat-completions
-pip install "protocore[mcp]==2.0.0a25"       # инструменты MCP-сервера как инструменты ядра
+pip install "protocore[testing]==2.0.0a26"   # прогнать conformance-наборы на своих адаптерах
+pip install "protocore[openai]==2.0.0a26"    # эталонный адаптер chat-completions
+pip install "protocore[mcp]==2.0.0a26"       # инструменты MCP-сервера как инструменты ядра
 ```
 
 `testing` добавляет только тест-раннер: `protocore.conformance` — это pytest-набор,

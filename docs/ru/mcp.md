@@ -10,7 +10,7 @@
 Больше ничто в ядре его не импортирует.
 
 ```bash
-pip install "protocore[mcp]==2.0.0a25"   # добавляет httpx для HTTP-транспорта
+pip install "protocore[mcp]==2.0.0a26"   # добавляет httpx для HTTP-транспорта
 ```
 
 Транспорту stdio ничего не нужно; транспорту streamable HTTP нужен `httpx`,

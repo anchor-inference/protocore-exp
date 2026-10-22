@@ -43,7 +43,7 @@ exhaustively and reused across products.
 ## Install
 
 ```bash
-pip install protocore==2.0.0a25
+pip install protocore==2.0.0a26
 ```
 
 Name the version explicitly. The published release is a pre-release, and pip
@@ -63,9 +63,9 @@ Python ≥ 3.12. Runtime dependencies are `pydantic`, `jinja2`, and
 ### Extras
 
 ```bash
-pip install "protocore[testing]==2.0.0a25"   # run the conformance suites against your adapters
-pip install "protocore[openai]==2.0.0a25"    # the reference chat-completions adapter
-pip install "protocore[mcp]==2.0.0a25"       # an MCP server's tools as core tools
+pip install "protocore[testing]==2.0.0a26"   # run the conformance suites against your adapters
+pip install "protocore[openai]==2.0.0a26"    # the reference chat-completions adapter
+pip install "protocore[mcp]==2.0.0a26"       # an MCP server's tools as core tools
 ```
 
 `testing` adds a test runner and nothing more. `protocore.conformance` is a
