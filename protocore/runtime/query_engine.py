@@ -23,7 +23,7 @@ import logging
 import time
 import uuid
 import weakref
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -994,6 +994,10 @@ class QueryEngine:
             # guards, it would let a hand-over record a write the store had
             # already disowned.
             "_persisted_history_epoch",
+            # The ids the conversation has used. The history carries on into
+            # the next turn and so do they: reset, a call folded away by a
+            # compaction could lend its id to a new one.
+            "_tool_call_ids_used",
             "compaction_state",
             "compact_checkpoint",
             "context_manager",
@@ -1213,6 +1217,14 @@ class QueryEngine:
         # write it knows it has just lost — and the hand-over must not then
         # record the write as durable on the way out.
         self._persisted_history_epoch: int = 0
+        # Every tool call id the conversation has used, kept apart from the
+        # history because the history forgets: a compaction folds old calls
+        # away while the host's transcript still shows them, and a model that
+        # counts its ids from what it is shown starts reusing them. A new call
+        # is never given an id in here (``protocore.runtime.tool_call_ids``).
+        # Each request adds the ids it sends; the host adds the ones from
+        # before this engine's history began through ``reserve_tool_call_ids``.
+        self._tool_call_ids_used: set[str] = set()
         # Something durable about the session changed without the message
         # sequence moving — a checkpoint was taken. Raised by
         # ``note_session_state_changed``, lowered when the store has been told.
@@ -4515,6 +4527,16 @@ class QueryEngine:
         if anchor is None:
             return None
         return {"model": anchor.model, "prompt_tokens": anchor.prompt_tokens, "prefix_length": len(anchor.prefix)}
+
+    def reserve_tool_call_ids(self, ids: Iterable[str]) -> None:
+        """Never give a new tool call any of ``ids``.
+
+        For the ids a conversation used before this engine's history begins —
+        calls a compaction folded away, or an earlier run's calls the host
+        did not seed — which a host still shows and pairs by id. The engine
+        already keeps clear of every id in its own history.
+        """
+        self._tool_call_ids_used.update(ids)
 
     async def replace_history(self, messages: Sequence[Message], *, reason: str) -> TurnEvent:
         """Put ``messages`` in place of the history, and retire everything derived from the old one.

@@ -126,7 +126,11 @@ async def test_query_write_intent_then_crash_does_not_rewrite(
     engine.history.append(Message(role=MessageRole.user, content_blocks=[TextBlock(text="again")]))
     engine.state = LoopState.PENDING
     more = [evt async for evt in query(engine)]
-    assert len(writes) == 1
+    # The interrupted call is not run again: the resume answers it as unknown.
+    # The model's next call is a new decision, made after reading that answer,
+    # and runs under an id of its own even though the model reused ``w1`` —
+    # swallowing it because its id repeated was the defect, not the guarantee.
+    assert [write["content"] for write in writes] == ["once", "twice"]
     unknown = [
         evt
         for evt in more
@@ -135,6 +139,9 @@ async def test_query_write_intent_then_crash_does_not_rewrite(
     assert unknown
     assert unknown[0].payload["is_error"] is False
     assert "never recorded" in unknown[0].payload["content"]
+    assert unknown[0].payload["tool_call_id"] == "w1"
+    rerun = [evt for evt in more if evt.type == EventType.TOOL_USE_START]
+    assert [evt.payload["tool_call_id"] for evt in rerun] != ["w1"]
 
 
 @pytest.mark.asyncio

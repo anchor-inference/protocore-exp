@@ -423,6 +423,19 @@ _WHOLE_HISTORY_BY_DESIGN: dict[str, _Declaration] = {
     "protocore/runtime/query.py::_repair_outbound_tool_pairing": _whole(
         "wire-pairing repair over the outbound message list it is handed"
     ),
+    "protocore/runtime/query.py::_tool_call_ids_in_use": _whole(
+        "identity: a tool call id names one call in the whole conversation "
+        "and every call in it is paired by id, so no id the transcript "
+        "carries can be given to a new call"
+    ),
+    "protocore/runtime/tool_call_ids.py::rekey_repeated_tool_call_ids": _whole(
+        "wire-pairing repair over the outbound message list it is handed: "
+        "tells two calls that share an id apart by their position in it"
+    ),
+    "protocore/runtime/tool_call_ids.py::tool_call_ids_in": _whole(
+        "identity lookup: the set of call ids in whatever sequence it is "
+        "handed, for keeping a new id clear of all of them"
+    ),
     "protocore/runtime/query.py::_normalize_outbound_system_messages": _whole(
         "prompt assembly over the outbound message list it is handed"
     ),

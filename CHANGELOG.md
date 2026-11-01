@@ -6,6 +6,29 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`QueryEngine.reserve_tool_call_ids(ids)`.** Ids a conversation used before
+  the engine's history begins — calls a compaction folded away, or an earlier
+  run's calls — which a host still shows and pairs by id. No new call is given
+  one of them.
+
+### Fixed
+
+- **A repeated tool call id no longer hides a call from the model.** Some
+  models write their own call ids and count them per response or from the
+  history they were shown (Kimi's `functions.Write:0`), so a later call could
+  carry an earlier call's id. The outbound pairing repair kept only the first
+  call with an id, and the later call and its result vanished from the next
+  request while the call's effect stayed. Every call now gets an id unique
+  within the conversation as its response arrives (`ToolCallIdAssigner` in
+  `protocore.runtime.tool_call_ids`): a unique provider id is kept, a repeat
+  gets the next number of its stem or a `_2` suffix, and the events, the
+  history, the dispatcher and the approvals carry the new id. A transcript
+  stored with a repeat is read back whole: the repair gives the later call an
+  id of its own and pairs each result with the oldest call of its id that has
+  none, instead of dropping the call.
+
 ## [2.0.0a26] - 2026-10-22
 
 ### Added

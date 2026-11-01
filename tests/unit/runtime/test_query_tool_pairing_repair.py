@@ -5,7 +5,8 @@ Two complementary defenses:
 * Outbound repair runs UNCONDITIONALLY on the outbound message list
  immediately before :class:`LLMRequest` assembly: it forward-fills a
  synthetic ``is_error`` tool_result for any orphaned ``tool_use``,
- reverse-strips orphaned ``tool_result`` blocks, and dedupes duplicate ids.
+ reverse-strips orphaned ``tool_result`` blocks, gives a repeated call id
+ a fresh id, and drops a second result for the same call.
  The wire always satisfies tool_use<->tool_result pairing regardless of how
  the orphan arose (compaction, resume-from-partial-batch, max_tokens
  truncation).
@@ -140,8 +141,13 @@ def test_reverse_strip_orphaned_tool_result() -> None:
     assert [m.role for m in repaired] == [MessageRole.user, MessageRole.assistant]
 
 
-def test_dedupe_duplicate_tool_use_ids() -> None:
-    """A duplicated tool_use id keeps only the first occurrence."""
+def test_a_repeated_tool_use_id_is_rekeyed_not_dropped() -> None:
+    """Two calls with one id are two calls: the later one gets an id of its own.
+
+    Keeping only the first hid the later call from the model while its effect
+    stayed on disk. The one result belongs to the first call; the second, which
+    has none, is forward-filled like any other orphan.
+    """
     messages = [
         Message(
             role=MessageRole.assistant,
@@ -158,8 +164,11 @@ def test_dedupe_duplicate_tool_use_ids() -> None:
         ),
     ]
     repaired = _repair_outbound_tool_pairing(messages, placeholder="x")
-    assert _tool_use_ids(repaired) == ["dup"]
-    assert _tool_result_ids(repaired) == ["dup"]
+    assert _tool_use_ids(repaired) == ["dup", "dup_2"]
+    assert _tool_result_ids(repaired) == ["dup", "dup_2"]
+    results = [b for m in repaired for b in m.content_blocks if isinstance(b, ToolResultBlock)]
+    assert (results[0].content, results[0].is_error) == ("ok", False)
+    assert (results[1].content, results[1].is_error) == ("x", True)
 
 
 def test_dedupe_duplicate_tool_result_ids() -> None:

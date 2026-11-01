@@ -148,6 +148,14 @@ _PROCESS_LOCAL: dict[str, str] = {
         "marker that itself cannot travel, so carrying it would be carrying "
         "half of a pair."
     ),
+    "_tool_call_ids_used": (
+        "rebuilt rather than carried: every request adds the ids of the history "
+        "it sends, and the restored history holds every call compaction kept. "
+        "The ones compaction folded away are the host's to name, from the "
+        "transcript it keeps, through reserve_tool_call_ids on the engine it "
+        "resumes onto; carried, the snapshot would grow by every id the "
+        "conversation ever used."
+    ),
     "_resumed_skill_catalog_sha256": (
         "read OUT of the snapshot rather than written into it: it is the digest "
         "the catalog block had in the process that wrote the payload, held only "

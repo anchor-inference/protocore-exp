@@ -251,6 +251,11 @@ from protocore.runtime.skill_index import (
 from protocore.runtime.subagent_budget import SubagentTreeBudget, SubagentTreePermit
 from protocore.runtime.token_counting import estimate_tokens as _estimate_tokens
 from protocore.runtime.tool_arguments import argument_names, string_argument
+from protocore.runtime.tool_call_ids import (
+    ToolCallIdAssigner,
+    rekey_repeated_tool_call_ids,
+    tool_call_ids_in,
+)
 from protocore.runtime.tool_deferral import (
     build_tool_surface,
     calls_held_for_rules,
@@ -5426,6 +5431,11 @@ async def _drive_one_stream(
         if answer:
             yield from _text_delta_events(engine, answer, block_idx=block_idx)
 
+    # Renamed before anything reads them: the events, the attempt's calls and
+    # through them the history, the dispatcher and the approvals all carry the
+    # conversation's id, and a provider that repeats an id cannot make two
+    # calls one.
+    call_ids = ToolCallIdAssigner(_tool_call_ids_in_use(engine, full_messages, result))
     async for delta in _iter_with_idle_watchdog(
         _as_provider_deltas(upstream),
         idle_timeout=rc.llm_stream_idle_timeout_seconds,
@@ -5435,6 +5445,7 @@ async def _drive_one_stream(
     ):
         if engine.stop_requested:
             break
+        delta = call_ids.assign(delta)
 
         if delta.reasoning_items:
             result.reasoning_items.extend(delta.reasoning_items)
@@ -5767,6 +5778,27 @@ async def _drive_one_stream(
             },
         )
         open_block_kind = None
+
+
+def _tool_call_ids_in_use(
+    engine: QueryEngine,
+    outbound: list[Message],
+    result: _StreamAttemptResult,
+) -> set[str]:
+    """Every id a call arriving now must not be given, as the engine's own set.
+
+    The whole history and not this run's part of it: an id names one call in
+    the conversation, and an earlier run's call is paired by id like any other.
+    The outbound list adds the ids the pairing repair gave a stored repeat,
+    which the history does not carry; the attempt adds calls already taken from
+    this stream's earlier tries. Returned by reference, so the ids the stream
+    issues stay used after a compaction folds their calls away.
+    """
+    used = engine._tool_call_ids_used
+    used.update(tool_call_ids_in(engine.history))
+    used.update(tool_call_ids_in(outbound))
+    used.update(call.id for call in result.tool_calls)
+    return used
 
 
 def _calibrate_token_estimate(
@@ -13062,56 +13094,44 @@ def _repair_outbound_tool_pairing(
     3. **Reverse-strip** — drop any ``ToolResultBlock`` whose
        ``tool_call_id`` has no matching ``ToolUseBlock`` (and any standalone
        tool message left empty after its block was repositioned).
-    4. **Dedupe** — keep only the first occurrence of each ``tool_use`` id
-       and each ``tool_result`` id (the CC-1212 duplicate-id deadlock).
+    4. **Dedupe** — keep only the first ``tool_result`` for each call (a
+       duplicate id 400s on every retry, which once deadlocked a run).
+
+    Before any of that, a call id repeated on a second ``tool_use`` is given
+    an id of its own (:func:`rekey_repeated_tool_call_ids`). Calls arriving now
+    get unique ids at the stream, but a stored transcript can still hold a
+    repeat, and keeping only the first call with an id hid the later call and
+    its result from the model while its effect stayed on disk.
 
     Pure function: ``messages`` is not mutated; a new list of (possibly
     new) :class:`Message` objects is returned. ``Message`` /
     :class:`ToolResultBlock` are frozen, so unchanged messages are reused
     by reference.
     """
-    # Pass 1 — index every tool_use id (first occurrence) and the FIRST
-    # real ToolResultBlock seen per id (anywhere in the list), so pass 2 can
-    # reposition the real result directly after its tool_use regardless of
-    # where it currently sits. Later duplicate results are dropped.
-    tool_use_ids: set[str] = set()
+    messages = rekey_repeated_tool_call_ids(messages)
+    # Pass 1 — index the FIRST real ToolResultBlock seen per id (anywhere in
+    # the list), so pass 2 can reposition the real result directly after its
+    # tool_use regardless of where it currently sits. Later duplicate results
+    # are dropped.
     result_block_by_id: dict[str, ToolResultBlock] = {}
     for message in messages:
         for block in message.content_blocks:
-            if isinstance(block, ToolUseBlock):
-                tool_use_ids.add(block.tool_call_id)
-            elif isinstance(block, ToolResultBlock):
+            if isinstance(block, ToolResultBlock):
                 if block.tool_call_id not in result_block_by_id:
                     result_block_by_id[block.tool_call_id] = block
 
     result: list[Message] = []
-    seen_tool_use_ids: set[str] = set()
     # tool_use ids whose result we have already emitted (repositioned real or
     # synthetic) so a standalone tool message / duplicate never re-emits it.
     emitted_result_ids: set[str] = set()
 
     for message in messages:
         if message.role is MessageRole.assistant:
-            # Dedupe duplicate tool_use blocks within / across assistant
-            # turns; preserve the FIRST occurrence.
-            new_blocks: list[ContentBlock] = []
-            kept_tool_use_ids: list[str] = []
-            changed = False
-            for block in message.content_blocks:
-                if isinstance(block, ToolUseBlock):
-                    if block.tool_call_id in seen_tool_use_ids:
-                        changed = True
-                        continue
-                    seen_tool_use_ids.add(block.tool_call_id)
-                    kept_tool_use_ids.append(block.tool_call_id)
-                new_blocks.append(block)
-            if changed:
-                # An assistant turn that was ALL duplicate tool_use would now
-                # be empty — drop it (its surviving sibling already carries
-                # the id). Otherwise rebuild with the surviving blocks.
-                if not new_blocks:
-                    continue
-                message = message.model_copy(update={"content_blocks": new_blocks})
+            kept_tool_use_ids = [
+                block.tool_call_id
+                for block in message.content_blocks
+                if isinstance(block, ToolUseBlock)
+            ]
             result.append(message)
             # Emit each kept tool_use's result immediately after this turn,
             # in tool_use order: the repositioned real result if one exists

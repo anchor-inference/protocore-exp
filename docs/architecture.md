@@ -910,8 +910,21 @@ truncation at `max_tokens`, teardown).
   before the request is assembled (and before cache breakpoints are computed,
   so indices address the final list). Four repairs: forward-fill synthetic
   `is_error` results for orphaned `tool_use` blocks, reposition every real
-  result directly after its `tool_use`, reverse-strip orphaned results,
-  de-duplicate repeated ids.
+  result directly after its `tool_use`, reverse-strip orphaned results, drop a
+  second result for the same call. A call id repeated on a later `tool_use`
+  in a stored transcript is first given an id of its own, and each result
+  goes to the oldest call with its id that has none yet
+  (`runtime/tool_call_ids.py::rekey_repeated_tool_call_ids`); keeping only the
+  first call hid the later one and its result from the model.
+- `ToolCallIdAssigner` (`runtime/tool_call_ids.py`) — renames the calls of a
+  response as it arrives, so no call repeats an id the conversation has used:
+  some models write their own ids and count them per response or from what
+  they were shown (Kimi's `functions.Write:0`). A provider id that is unique
+  is kept; a repeat gets the next number of its stem (`functions.Write:3`) or
+  a `_2` suffix. The events, the history, the dispatcher and the approvals all
+  see the new id. `QueryEngine.reserve_tool_call_ids(ids)` adds the ids a
+  host still shows that the history no longer holds, such as calls a
+  compaction folded away.
 - `_synthesize_missing_tool_results(history, error_content)` — mutates history
   in place at **every teardown checkpoint** (stop-before-start,
   compaction-failed, lifecycle deny, stop-after-stream, dispatch-cancel, LLM
