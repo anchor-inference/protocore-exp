@@ -211,6 +211,7 @@ from protocore.runtime.intent import (
 )
 from protocore.runtime.live_control import (
     QueuedPrompt,
+    note_placed,
     place_items,
     placed_as_user_message,
     restore_queued_items,
@@ -1626,6 +1627,7 @@ def _inject_queue_into_history(
         engine._steer_queue = remaining_dicts
     else:
         engine._follow_up_queue = remaining_dicts
+    note_placed(engine, [item.id for item in placed])
     return TurnEvent(
         type=EventType.QUEUE_UPDATE,
         run_id=engine.config.run_id,

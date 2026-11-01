@@ -15,6 +15,15 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
+- **A stop no longer reports the waiting messages as read.** `merge_queued`
+  counted every item the engine had been handed and no longer held as
+  consumed. A stop empties the engine's lists to hand the items back
+  (`restore_queued_items`) and then writes back, so a host that trusted the
+  merge was told the model had read every waiting message and dropped them
+  from its store. `consumed` is now exactly the ids the `queue_update` events
+  named as placed (recorded with `note_placed`), and an item that only left
+  the engine's lists stays in the store. A read between a placement and its
+  write-back no longer hands the placed item to the engine again.
 - **A repeated tool call id no longer hides a call from the model.** Some
   models write their own call ids and count them per response or from the
   history they were shown (Kimi's `functions.Write:0`), so a later call could

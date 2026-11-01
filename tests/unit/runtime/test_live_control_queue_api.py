@@ -22,6 +22,8 @@ from protocore.runtime.live_control import (
     QueuedPrompt,
     merge_queue,
     new_queued_prompt,
+    note_placed,
+    restore_queued_items,
 )
 from protocore.runtime.query import _query as query
 from protocore.tests_support.adapters import InMemoryLLMProvider
@@ -352,3 +354,89 @@ async def test_a_steer_queued_during_the_last_turn_is_left_over(
     events = [event async for event in engine.run(_user())]
 
     assert _terminal_stop(events)[LEFTOVER_QUEUED_FIELD] == ["s9"]
+
+
+# -- consumption is what was placed ---------------------------------------
+
+
+def test_a_stop_that_hands_the_queue_back_consumes_nothing(engine_factory) -> None:
+    """A stop empties the engine's lists to hand the items back, unread. The
+    write-back used to take "handed over and no longer held" for "placed",
+    tell the host the model had read every one of them, and drop them from
+    the store, so a host that trusted it lost the operator's messages."""
+    engine = engine_factory(rc=_enabled())
+    row_steer = [_item("steer", "look left", "s1")]
+    row_follow = [_item("follow_up", "then summarise", "f1")]
+    engine.load_queued(row_steer, row_follow)
+
+    restored = restore_queued_items(engine)
+    merged = engine.merge_queued(row_steer, row_follow)
+
+    assert [item.id for item in restored] == ["s1", "f1"]
+    assert merged.consumed == []
+    assert [item["id"] for item in merged.steer] == ["s1"]
+    assert [item["id"] for item in merged.follow_up] == ["f1"]
+
+
+@pytest.mark.asyncio
+async def test_a_run_stopped_with_steers_waiting_reports_none_consumed(
+    engine_factory, in_memory_runtime: dict[str, object]
+) -> None:
+    llm = in_memory_runtime["llm"]
+    assert isinstance(llm, InMemoryLLMProvider)
+    llm.queue_response(text="done")
+    engine = engine_factory(rc=_enabled())
+    store = _Store()
+    store.steer = [_item("steer", "look left", "s1")]
+    _bind(engine, store)
+    engine.load_queued(list(store.steer), [])
+    engine.stop()
+
+    events = [event async for event in engine.run(_user())]
+
+    assert not [e for e in events if e.type is EventType.QUEUE_UPDATE]
+    assert "look left" not in " ".join(m.text for m in engine.history)
+    assert store.consumed == []
+    assert [item["id"] for item in store.steer] == ["s1"]
+
+
+@pytest.mark.asyncio
+async def test_only_the_items_a_queue_update_names_are_consumed(
+    engine_factory, in_memory_runtime: dict[str, object]
+) -> None:
+    """One steer is placed at the tool round (one-at-a-time) and the next is
+    still held when the run ends; the write-backs report exactly the ids the
+    ``queue_update`` events named."""
+    llm = in_memory_runtime["llm"]
+    assert isinstance(llm, InMemoryLLMProvider)
+    llm.queue_tool_call_response(tool_call_id="c1", tool_name="Read", tool_input={"path": "x"})
+    llm.queue_response(text="done")
+    engine = engine_factory(rc=_enabled(steer_default_mode="one-at-a-time"))
+    engine.history.append(_user())
+    store = _Store()
+    store.steer = [_item("steer", "first", "s1"), _item("steer", "second", "s2")]
+    _bind(engine, store)
+
+    events = [event async for event in query(engine)]
+
+    placed = [i for e in events if e.type is EventType.QUEUE_UPDATE for i in e.payload["placed"]]
+    assert placed == ["s1"]
+    assert store.consumed == placed
+    assert [item["id"] for item in store.steer] == ["s2"]
+
+
+def test_a_read_older_than_the_write_back_does_not_bring_a_placed_item_back(
+    engine_factory,
+) -> None:
+    """Between a placement and its write-back the store still lists the item;
+    a read of that row must not hand it to the engine a second time."""
+    engine = engine_factory(rc=_enabled())
+    row = [_item("steer", "look left", "s1")]
+    engine.load_queued(row, [])
+    note_placed(engine, ["s1"])
+    engine._steer_queue = []
+
+    engine.load_queued(row, [])
+
+    assert engine.queued() == []
+    assert engine.merge_queued(row, []).consumed == ["s1"]

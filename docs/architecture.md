@@ -1328,13 +1328,14 @@ the matching RC field says otherwise.
   that keeps the queues in a store calls `load_queued(steer, follow_up)` from
   its `reload_live_control` and `merge_queued(stored_steer, stored_follow_up)`
   from its `persist_live_control`, inside the store's transaction. The merge
-  applies the seen rule (`merge_queue`): a stored item the engine holds or was
-  handed by its last read is the engine's to decide about; any other stored
-  item arrived after that read and is kept behind the engine's remainder, so a
-  message that landed while the run held the queue is not overwritten. The
-  returned `QueueMerge` carries the lists to write and `consumed`, the ids the
-  engine was handed and placed (never one taken back). A withdrawal and a
-  promotion outlive a read that predates them until the next merge. Every
+  (`merge_queue`) writes the engine's remainder first and keeps behind it every
+  other stored item that was neither placed nor taken back, so a message that
+  landed while the run held the queue is not overwritten, and neither is one a
+  stop emptied out of the engine's lists to hand back. The returned
+  `QueueMerge` carries the lists to write and `consumed`: exactly the ids the
+  `queue_update` events since the last merge named as placed, never one that
+  merely left the engine's lists. A withdrawal, a promotion and a placement
+  outlive a read that predates them until the next merge. Every
   terminal `message_stop` lists the ids the engine still held unplaced as
   `leftover_queued`, so a host can open its next run with them.
 - `runtime/run_work_budget.py` — cumulative tree-lifetime budget

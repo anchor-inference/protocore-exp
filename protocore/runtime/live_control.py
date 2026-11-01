@@ -229,9 +229,10 @@ class QueueSync:
     A host that keeps the queues in a store reads them into the engine before a
     model call (:meth:`QueryEngine.load_queued`) and writes back what the engine
     did not place (:meth:`QueryEngine.merge_queued`). Between the two, the store
-    can gain an item the engine never saw, and the engine can lose one the host
-    took back. These four records are what lets the write-back tell those apart
-    from an item the model read.
+    can gain an item the engine never saw, the engine can lose one the host
+    took back, and a stop can empty the engine's lists to hand them back. These
+    records are what lets the write-back tell all of those apart from an item
+    the model read, which is only ever one a ``queue_update`` named.
     """
 
     #: The ids the last read handed the engine, per queue.
@@ -242,6 +243,9 @@ class QueueSync:
     withdrawn: list[str] = field(default_factory=list)
     #: Follow-ups turned into steers since that read, in the order turned.
     promoted: list[str] = field(default_factory=list)
+    #: Ids placed into the history since the last write-back, in the order of
+    #: the ``queue_update`` events that named them: the only consumed items.
+    placed: list[str] = field(default_factory=list)
 
     def seen(self) -> list[str]:
         return [*self.seen_steer, *self.seen_follow_up]
@@ -252,10 +256,11 @@ class QueueMerge:
     """What a host writes back to its store, and what it may say the model read.
 
     ``steer`` and ``follow_up`` are the engine's remainder followed by whatever
-    the store gained after the engine's last read. ``consumed`` are the ids the
-    engine was handed and no longer holds: placed into the history, and only
-    those. An item taken back is not consumed, and neither is one that arrived
-    after the read.
+    else the store still lists that was neither placed nor taken back.
+    ``consumed`` are the ids a ``queue_update`` named as placed into the
+    history, and only those. An item taken back is not consumed, nor one that
+    arrived after the read, nor one a stop emptied out of the engine's lists to
+    hand back.
     """
 
     steer: list[dict[str, Any]]
@@ -382,10 +387,12 @@ def load_queued(
     """Replace the engine's queues with a store's, and remember what it was handed.
 
     Withdrawn items stay out, and a promoted follow-up stays a steer, even when
-    the read returns a row written before the withdrawal or the promotion.
+    the read returns a row written before the withdrawal or the promotion. An
+    item placed since the last write-back stays out too: the store lists it
+    until that write-back, and a read in between would place it a second time.
     """
     sync = _queue_sync(engine)
-    withdrawn = set(sync.withdrawn)
+    withdrawn = set(sync.withdrawn) | set(sync.placed)
     promoted = set(sync.promoted)
     next_steer = [
         dict(item) for item in steer
@@ -417,26 +424,48 @@ def merge_queued(
 
     Call it with the row as the store holds it now, inside the store's own
     transaction, and write the result back. The engine then counts what it holds
-    as handed, and forgets its withdrawals and promotions: the write-back is the
-    record of both.
+    as handed, and forgets its withdrawals, promotions and placements: the
+    write-back is the record of all three.
+
+    Consumed is judged only by the ``queue_update`` events, never by an item
+    having left the engine's lists. A stop empties those lists to hand the items
+    back (:func:`restore_queued_items`) and then writes back; reading that as
+    "placed" told the host the model had read every waiting message and dropped
+    them from the store, while the model had read none. Such an item stays in
+    the store, where the host decides what becomes of it.
     """
     sync = _queue_sync(engine)
     kept_steer = [dict(raw) for raw in engine._steer_queue or [] if isinstance(raw, dict)]
     kept_follow_up = [dict(raw) for raw in engine._follow_up_queue or [] if isinstance(raw, dict)]
-    known = [*sync.seen(), *sync.withdrawn, *sync.promoted]
-    merged_steer = merge_queue(kept_steer, stored_steer, [*known, *map(_queue_item_id, kept_follow_up)])
-    merged_follow_up = merge_queue(kept_follow_up, stored_follow_up, [*known, *map(_queue_item_id, kept_steer)])
     held = {_queue_item_id(item) for item in [*kept_steer, *kept_follow_up]}
     withdrawn = set(sync.withdrawn)
     consumed: list[str] = []
-    for item_id in [*sync.seen(), *sync.promoted]:
+    for item_id in sync.placed:
         if item_id and item_id not in held and item_id not in withdrawn and item_id not in consumed:
             consumed.append(item_id)
+    # What the store lists and the engine neither holds nor placed nor gave up
+    # stays: an arrival after the read, and an item a stop handed back.
+    gone = [*consumed, *withdrawn]
+    merged_steer = merge_queue(kept_steer, stored_steer, [*gone, *map(_queue_item_id, kept_follow_up)])
+    merged_follow_up = merge_queue(kept_follow_up, stored_follow_up, [*gone, *map(_queue_item_id, kept_steer)])
     sync.seen_steer = [_queue_item_id(item) for item in kept_steer]
     sync.seen_follow_up = [_queue_item_id(item) for item in kept_follow_up]
     sync.withdrawn = []
     sync.promoted = []
+    sync.placed = []
     return QueueMerge(steer=merged_steer, follow_up=merged_follow_up, consumed=consumed)
+
+
+def note_placed(engine: Any, item_ids: Sequence[str]) -> None:
+    """Record that the items a ``queue_update`` names were placed into the history.
+
+    Called where that event is made, so the write-back's ``consumed`` is exactly
+    the ids the events reported, in their order.
+    """
+    sync = _queue_sync(engine)
+    for item_id in item_ids:
+        if item_id and item_id not in sync.placed:
+            sync.placed.append(item_id)
 
 
 def leftover_queued_ids(engine: Any) -> list[str]:
@@ -461,6 +490,7 @@ __all__ = [
     "merge_queue",
     "merge_queued",
     "new_queued_prompt",
+    "note_placed",
     "place_items",
     "placed_as_user_message",
     "promote_queued",
