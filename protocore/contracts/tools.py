@@ -118,6 +118,30 @@ class ToolPolicyDenied(ToolError):
     """Tool invocation blocked by safety policy."""
 
 
+class ExternalCallPauseRequested(ToolError):
+    """The call was handed to an executor outside the run, and that executor went away.
+
+    Raised by a tool whose work runs somewhere the run does not own (a machine
+    reached over a connection that can drop) when it cannot get an answer now.
+    Failing the call would tell the model that a command failed which may still
+    be running over there, and an "outcome unknown" result invites the model to
+    repeat a write. So the dispatcher parks the call as an ``external_call``
+    interrupt instead and the run waits; the host hands the same call to the
+    tool again with :func:`~protocore.runtime.query.redispatch_external_calls`
+    once the executor is back.
+
+    A tool that raises this owes the repeat the same answer: it must recognise
+    the call by its ``tool_call_id`` and answer from what the executor already
+    did, so a call that ran before the connection dropped is not run twice.
+    ``payload`` travels verbatim on the pending envelope and the interrupt, for
+    the host to say where the call went and how far it got.
+    """
+
+    def __init__(self, payload: dict[str, Any] | None = None) -> None:
+        super().__init__("external call paused: its executor is not reachable")
+        self.payload: dict[str, Any] = dict(payload or {})
+
+
 class ToolContext(BaseModel):
     """Per-invocation context — injected by the loop.
 
@@ -279,6 +303,7 @@ __all__ = [
     "SUBAGENT_DISPATCH_ORDER_METADATA_KEY",
     "SUBAGENT_TREE_PERMIT_METADATA_KEY",
     "TOOL_OUTPUT_UNTRUSTED_METADATA_KEY",
+    "ExternalCallPauseRequested",
     "Tool",
     "ToolContext",
     "ToolError",

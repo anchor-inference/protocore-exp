@@ -30,6 +30,12 @@ So the record is written before the call and carries an explicit lifecycle:
 ``PAUSED_ASK_USER``
     The tool began executing and asked the user a question. A resumed run must
     neither execute nor declare the outcome unknown; the answer settles it.
+``PAUSED_EXTERNAL``
+    The call was handed to an executor outside the run (another machine), which
+    went away before it answered. A resumed run must not declare the outcome
+    unknown: the call is handed to that executor again, and the executor, which
+    keeps its own journal of the calls it ran, answers it without running it a
+    second time.
 ``SETTLED``
     A result exists. Nothing to recover; repeats are no-ops.
 
@@ -53,7 +59,7 @@ from protocore.contracts.tool_roles import (
 
 ReplayPolicy = Literal["never", "safe"]
 IntentState = Literal[
-    "RESERVED", "PENDING_APPROVAL", "DISPATCHED", "PAUSED_ASK_USER", "SETTLED"
+    "RESERVED", "PENDING_APPROVAL", "DISPATCHED", "PAUSED_ASK_USER", "PAUSED_EXTERNAL", "SETTLED"
 ]
 IntentOutcome = Literal["pending", "known", "unknown"]
 
@@ -61,6 +67,7 @@ RESERVED: Final[IntentState] = "RESERVED"
 PENDING_APPROVAL: Final[IntentState] = "PENDING_APPROVAL"
 DISPATCHED: Final[IntentState] = "DISPATCHED"
 PAUSED_ASK_USER: Final[IntentState] = "PAUSED_ASK_USER"
+PAUSED_EXTERNAL: Final[IntentState] = "PAUSED_EXTERNAL"
 SETTLED: Final[IntentState] = "SETTLED"
 
 class IntentPauseMismatch(ValueError):
@@ -183,7 +190,7 @@ class IntentRecord:
 
 
 _STATES: Final[frozenset[str]] = frozenset(
-    {RESERVED, PENDING_APPROVAL, DISPATCHED, PAUSED_ASK_USER, SETTLED}
+    {RESERVED, PENDING_APPROVAL, DISPATCHED, PAUSED_ASK_USER, PAUSED_EXTERNAL, SETTLED}
 )
 _OUTCOMES: Final[frozenset[str]] = frozenset({"pending", "known", "unknown"})
 
@@ -258,6 +265,13 @@ def mark_paused_ask_user(
     if intent.state != SETTLED:
         intent.state = PAUSED_ASK_USER
         intent.pause_fingerprint = _fingerprint(intent.tool_name, pause_payload)
+    return intent
+
+
+def mark_paused_external(intent: IntentRecord) -> IntentRecord:
+    """The executor the call was handed to went away before it answered."""
+    if intent.state != SETTLED:
+        intent.state = PAUSED_EXTERNAL
     return intent
 
 
@@ -357,6 +371,7 @@ def refuse_intent_when_disabled(enabled: bool) -> None:
 __all__ = [
     "DISPATCHED",
     "PAUSED_ASK_USER",
+    "PAUSED_EXTERNAL",
     "PENDING_APPROVAL",
     "RESERVED",
     "SETTLED",
@@ -371,6 +386,7 @@ __all__ = [
     "fingerprint_arguments",
     "mark_dispatched",
     "mark_paused_ask_user",
+    "mark_paused_external",
     "mark_pending_approval",
     "orphaned_intents",
     "refuse_intent_when_disabled",

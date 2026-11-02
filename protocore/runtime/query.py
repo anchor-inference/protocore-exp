@@ -200,6 +200,7 @@ from protocore.runtime.intent import (
     find_intent,
     mark_dispatched,
     mark_paused_ask_user,
+    mark_paused_external,
     mark_pending_approval,
     orphaned_intents,
     settle_intent,
@@ -4400,6 +4401,20 @@ async def _stream_one_assistant_message(
                         )
                         engine.forget_tool_name(tool_call.id)
                         continue
+                    if outcome.external_call_required:
+                        # A read handed to an executor that went away: parked
+                        # like a held call, so its siblings keep their results
+                        # and the host hands this one over again later.
+                        flags.approval_pending = True
+                        async for evt in park_deferred_hold(
+                            engine,
+                            tool_call.id,
+                            events,
+                            park=_park_pause_interrupt,
+                            parked=parked_calls,
+                        ):
+                            yield evt
+                        continue
                     if outcome.approval_required:
                         # The hook match predicate should have steered any
                         # hook-gated tool onto the serial path, so this branch
@@ -4668,14 +4683,15 @@ async def _stream_one_assistant_message(
                             )
                             engine.forget_tool_name(tool_call.id)
                             continue
-                        if outcome.approval_required:
+                        if outcome.approval_required or outcome.external_call_required:
                             # The eligibility predicate steers a hook-gated
                             # delegation call onto the serial path, so this is
                             # a gate registered mid-turn. Every held child is
                             # parked, in the order the model asked for them —
                             # a group answered one decision at a time would
                             # cost one stop, one snapshot and one redraw per
-                            # child.
+                            # child. A child whose executor went away waits
+                            # the same way, to be handed over again.
                             flags.approval_pending = True
                             async for evt in park_deferred_hold(
                                 engine,
@@ -7036,7 +7052,12 @@ async def _drain_dispatch_tool_deferred(
         events.append(item)
     if outcome is not None:
         outcome = await _admit_fresh_result(engine, outcome)
-    if outcome is not None and not outcome.approval_required:
+    if outcome is not None and outcome.external_call_required:
+        # Its executor went away: the call is parked, not finished, and the
+        # record says so, so a restart hands it over again rather than calling
+        # its outcome unknown.
+        mark_paused_external(intent)
+    elif outcome is not None and not outcome.approval_required:
         # Durable now, in completion order, while an earlier sibling may still
         # be running: placement waits for the whole batch, the record does not.
         await _record_outcome_finished(engine, tool_call, intent, outcome)
@@ -10635,7 +10656,7 @@ def _replay_dispatch_state(
     surfaced error for this tool in LLM order. The caller must use the returned
     outcome for both SSE event text and history append.
     """
-    if outcome is None or outcome.approval_required:
+    if outcome is None or outcome.approval_required or outcome.external_call_required:
         return outcome
 
     # Gathered calls deliberately defer evidence admission so the immutable
@@ -11046,6 +11067,16 @@ def _park_pause_interrupt(
     name = tool_name or str(payload.get("tool_name") or "")
     if payload.get("ask_user") or payload.get("kind") == "ask_user":
         return engine.mark_awaiting_answer(tool_call_id, tool_name=name, payload=payload)
+    if payload.get("kind") == "external_call":
+        # Handed to an executor that went away: the host hands it over again
+        # when that executor is back, so the interrupt carries what the tool
+        # said about where the call went, not the whole envelope.
+        return engine.mark_awaiting_answer(
+            tool_call_id,
+            tool_name=name,
+            payload=dict(payload.get("external_call_payload") or {}),
+            kind=InterruptKind.external_call,
+        )
     return engine.mark_pending_approval(tool_call_id, tool_name=name, payload=payload)
 
 
@@ -11373,7 +11404,7 @@ async def _record_outcome_finished(
     question has no outcome yet, so nothing is recorded for it here.
     """
     store = engine.tool_outcome_store
-    if store is None or outcome.approval_required or outcome.ask_user_required:
+    if store is None or outcome.approval_required or outcome.ask_user_required or outcome.external_call_required:
         return
     await store.record_finished(
         _invocation_record(engine, tool_call, intent, outcome=outcome)
@@ -12360,6 +12391,29 @@ async def _dispatch_tool(
         engine.forget_tool_name(tool_call.id)
         await engine._persist_snapshot()
         return
+    elif outcome is not None and outcome.external_call_required:
+        # The call went to an executor outside the run, which went away before
+        # it answered. Like a question, it appends nothing to history and
+        # settles nothing: the parking walk records the wait off the pending
+        # envelope, and the host hands the call over again with
+        # ``redispatch_external_calls`` once the executor is back.
+        _assert_pause_envelope_matches_intent(intent, buffered)
+        mark_paused_external(intent)
+        # Parked here as well as by the walk, as a question is: a call handed
+        # over again from a resume, outside the walk, must still leave a wait.
+        engine.mark_awaiting_answer(
+            tool_call.id,
+            tool_name=tool_call.name,
+            payload=dict(outcome.external_call_payload or {}),
+            kind=InterruptKind.external_call,
+        )
+        if dispatch_tree_permit is not None:
+            await dispatch_tree_permit.reacquire()
+        for evt in buffered:
+            yield evt
+        engine.forget_tool_name(tool_call.id)
+        await engine._persist_snapshot()
+        return
     elif outcome is not None:
         # The result is durable from here even though history only takes it at
         # the end of this dispatch, after the hooks and the accounting.
@@ -12790,6 +12844,75 @@ async def resume_interrupts(
         )
         if not engine.is_terminal:
             engine.transition_to(LoopState.COMPLETED)
+
+
+async def redispatch_external_calls(engine: QueryEngine) -> AsyncIterator[TurnEvent]:
+    """Hand every parked external call to its tool again, now that its executor is back.
+
+    An ``external_call`` interrupt is a call whose executor went away before it
+    answered (:class:`~protocore.contracts.tools.ExternalCallPauseRequested`).
+    The call may have run over there, may still be running, or may never have
+    arrived, and only the executor knows which; so the resume is not an answer
+    the host composes but the same call dispatched again, through the whole
+    path a fresh call takes — hooks, result shaping, the history write — with
+    the gate skipped because it already let the call through once. The tool
+    owes the repeat the executor's own answer, keyed by the call's id: the
+    result of the run that already happened, the rest of a run still going, or
+    a first run of a call that never arrived.
+
+    The calls are handed over in the order they were parked, which is the order
+    the model asked for them. One whose executor is still away parks again
+    under the identity it already had, and the run stays ``AWAITING``. When
+    nothing is left parked the run is ``RUNNING`` and nothing is driven: the
+    caller opens the next turn with ``run(None)``, which reads the results as
+    the newest thing in the history.
+
+    A stopped run hands nothing over. A call whose result is already in the
+    history (written by a process that died before releasing the wait) is
+    released without running the tool again. Only external calls are touched;
+    an approval or a question parked beside them stays parked.
+    """
+    async with engine.driving_turn():
+        external = interrupts_of_kind(engine.pending_interrupts, InterruptKind.external_call)
+        if engine.stop_requested or not external:
+            return
+        if engine.state is LoopState.AWAITING:
+            engine.transition_to(LoopState.RUNNING)
+        reparked: list[PendingInterrupt] = []
+        for interrupt in external:
+            if engine.stop_requested:
+                break
+            if _history_has_tool_result(engine, interrupt.tool_call_id):
+                engine.release_interrupt(interrupt.interrupt_id)
+                continue
+            tool_call = _tool_call_from_history(engine, interrupt.tool_call_id)
+            # Released only once the call has an answer, not before it is
+            # dispatched: a call whose executor is still away parks again, and
+            # parking a call that is still recorded keeps the identity the host
+            # was handed (``park_interrupt``) instead of minting a second one
+            # for the same wait.
+            held = len(reparked)
+            async for evt in dispatch_parking_holds(
+                engine,
+                tool_call,
+                dispatch=_dispatch_tool_preapproved,
+                park=_park_pause_interrupt,
+                parked=reparked,
+            ):
+                yield evt
+            if len(reparked) == held:
+                engine.release_interrupt(interrupt.interrupt_id)
+        if reparked:
+            yield _interrupt_parked_event(engine, reparked[-1])
+        if engine.pending_interrupts:
+            if engine.state is LoopState.RUNNING:
+                engine.transition_to(LoopState.AWAITING)
+        await engine._persist_snapshot()
+
+
+def _dispatch_tool_preapproved(engine: QueryEngine, tool_call: ToolCall) -> AsyncIterator[TurnEvent]:
+    """A call the gate already let through once, dispatched again without asking it twice."""
+    return _dispatch_tool(engine, tool_call, preapproved=True)
 
 
 async def answer_pending(

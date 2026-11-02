@@ -104,6 +104,7 @@ def fence_untrusted_result(
     if (
         outcome.approval_required
         or outcome.ask_user_required
+        or outcome.external_call_required
         or not outcome.content
         or (outcome.metadata or {}).get(TOOL_OUTPUT_UNTRUSTED_METADATA_KEY) is not True
     ):
