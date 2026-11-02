@@ -95,6 +95,7 @@ from protocore.contracts.tool_registry import (
 from protocore.contracts.tool_roles import EMPTY_TOOL_ROLE_MAP, ToolRole, ToolRoleMap
 from protocore.contracts.tools import (
     TOOL_OUTPUT_UNTRUSTED_METADATA_KEY,
+    ExternalCallPauseRequested,
     Tool,
     ToolContext,
     ToolPolicyDenied,
@@ -698,6 +699,15 @@ class DispatchOutcome:
  path, emits the matching SSE envelope, and writes the pending
  interrupt to Redis. No ``tool_result`` is appended; the answer
  arrives on resume.
+ external_call_required:
+ ``True`` if the tool raised
+ :class:`~protocore.contracts.tools.ExternalCallPauseRequested`: the
+ call was handed to an executor outside the run that went away. The
+ loop parks it as an ``external_call`` interrupt and appends no
+ ``tool_result``; the host hands the call over again when the executor
+ is back.
+ external_call_payload:
+ What the tool said about where the call went, verbatim.
  ask_user_payload:
  Validated :class:`~protocore.tools.ask_user.AskUserInput`
  carried out of band (typed dict shape) so the host handler
@@ -748,6 +758,8 @@ class DispatchOutcome:
     approval_token: str | None = None
     ask_user_required: bool = False
     ask_user_payload: dict[str, Any] | None = None
+    external_call_required: bool = False
+    external_call_payload: dict[str, Any] | None = None
     duration_ms: int = 0
     metadata: dict[str, Any] | None = None
     evidence_records: tuple[EvidenceRecord, ...] = ()
@@ -1959,6 +1971,35 @@ class ToolDispatcher:
                 is_error=False,
                 ask_user_required=True,
                 ask_user_payload=payload_dict,
+                duration_ms=duration_ms,
+            )
+            return
+        except ExternalCallPauseRequested as pause:
+            # The executor the call was handed to is out of reach. Announced
+            # with the same ``tool_call_pending`` envelope as the other two
+            # pauses, tagged with its own kind so the loop parks it as an
+            # external call rather than as a question or a gate; no result is
+            # emitted, because the call may still be running over there.
+            duration_ms = int((loop.time() - started_at) * 1000)
+            yield TurnEvent(
+                type=EventType.TOOL_CALL_PENDING,
+                run_id=ctx.run_id,
+                payload={
+                    "tool_call_id": tool_call.id,
+                    "tool_name": tool_call.name,
+                    "tool_input": tool_call.arguments,
+                    "requires_approval": False,
+                    "kind": "external_call",
+                    "external_call_payload": dict(pause.payload),
+                },
+            )
+            yield DispatchOutcome(
+                tool_call=tool_call,
+                success=False,
+                content="",
+                is_error=False,
+                external_call_required=True,
+                external_call_payload=dict(pause.payload),
                 duration_ms=duration_ms,
             )
             return

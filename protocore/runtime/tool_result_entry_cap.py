@@ -104,7 +104,7 @@ async def cap_fresh_result(
     wraps around the text afterwards (the fence of an untrusted result), so
     the wrapped result still fits.
     """
-    if outcome.approval_required or outcome.ask_user_required or not outcome.content:
+    if outcome.approval_required or outcome.ask_user_required or outcome.external_call_required or not outcome.content:
         return outcome
     limit = max(1, derive_budgets(rc).tool_result_truncation_threshold - max(0, reserve_tokens))
     original_tokens = estimate_tokens(outcome.content, rc)

@@ -9,6 +9,7 @@ wire-format placeholders, chain parser, BM25 tool retrieval.
  - :func:`~protocore.runtime.query.resume_approved_tool` run a call held for approval
  - :func:`~protocore.runtime.query.resume_interrupts` answer everything a run waits on
  - :func:`~protocore.runtime.query.answer_pending` answer one parked question in place
+ - :func:`~protocore.runtime.query.redispatch_external_calls` hand parked external calls over again
  - :class:`~protocore.runtime.context.manager.ContextManager` + two-tier compaction
  - :class:`~protocore.runtime.events.types.EventType` + :class:`~protocore.runtime.events.envelope.TurnEvent`
  - :class:`~protocore.runtime.loop_state.LoopState` state machine
@@ -37,6 +38,7 @@ from protocore.runtime.loop_state import (
 )
 from protocore.runtime.query import (
     answer_pending,
+    redispatch_external_calls,
     resume,
     resume_approved_tool,
     resume_interrupts,
@@ -94,6 +96,7 @@ __all__ = [
     "consume_transport_down_injection_signal",
     "derive_budgets",
     "is_terminal",
+    "redispatch_external_calls",
     "resume",
     "resume_approved_tool",
     "resume_interrupts",
