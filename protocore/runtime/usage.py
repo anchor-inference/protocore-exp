@@ -52,15 +52,19 @@ class TokenUsage:
         return self.this_turn_input + self.this_turn_output
 
     def this_turn_cache_hit_rate(self) -> float:
-        """Cache hit rate ∈ [0, 1] for this turn.
+        """Cache hit rate ∈ [0, 1] for this turn: ``cache_read / input``.
 
-        Computed as ``cache_read / (cache_read + new_input_tokens)``. 0
-        when no input tokens were observed (avoids ZeroDivisionError).
+        ``input_tokens`` is the whole prompt with its cached part inside it,
+        which is what every adapter normalises to (an OpenAI-shaped
+        ``prompt_tokens`` already is; an Anthropic-shaped count is summed up
+        to it). Adding the cache reads on top once more counted them twice,
+        and a session that was 90 % cached reported 0.47. Clamped to 1 in
+        case a provider reports more cached tokens than prompt tokens; 0 when
+        no input was observed.
         """
-        total_input = self.this_turn_input + self.this_turn_cache_read
-        if total_input <= 0:
+        if self.this_turn_input <= 0:
             return 0.0
-        return self.this_turn_cache_read / total_input
+        return min(self.this_turn_cache_read / self.this_turn_input, 1.0)
 
     def to_dict(self) -> dict[str, int]:
         return {

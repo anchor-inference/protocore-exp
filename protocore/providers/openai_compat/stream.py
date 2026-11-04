@@ -64,7 +64,12 @@ def normalize_usage(raw: dict[str, Any]) -> dict[str, Any]:
 
     ``input_tokens`` is the whole prompt, cached part included, which is what
     the OpenAI shape's ``prompt_tokens`` already means; the cached part is
-    reported beside it, never added to it. The cache-hit count comes from
+    reported beside it, never added to it. An Anthropic-shaped count (no
+    ``prompt_tokens``, the cache named by ``cache_read_input_tokens`` or
+    ``cache_creation_input_tokens``) leaves the cache out of ``input_tokens``,
+    so it is summed up to the whole prompt here: read as it came, the hit
+    rate went past one and the cost charged the cached part nothing at the
+    input rate and then subtracted it again. The cache-hit count comes from
     ``prompt_tokens_details.cached_tokens`` (OpenAI, vLLM),
     ``prompt_cache_hit_tokens`` (DeepSeek) or ``cache_read_input_tokens``
     (Anthropic-shaped gateways). A ``cost`` the server reports (OpenRouter) is
@@ -78,6 +83,9 @@ def normalize_usage(raw: dict[str, Any]) -> dict[str, Any]:
         or (details.get("cached_tokens") if isinstance(details, dict) else None)
         or raw.get("cache_read_input_tokens")
     )
+    cache_write = _int(raw.get("cache_creation_input_tokens"))
+    if "prompt_tokens" not in raw and ("cache_read_input_tokens" in raw or "cache_creation_input_tokens" in raw):
+        prompt += _int(raw.get("cache_read_input_tokens")) + cache_write
     completion_details = raw.get("completion_tokens_details") or {}
     reasoning = _int(completion_details.get("reasoning_tokens") if isinstance(completion_details, dict) else None)
     normalized: dict[str, Any] = {
@@ -85,7 +93,7 @@ def normalize_usage(raw: dict[str, Any]) -> dict[str, Any]:
         "output_tokens": completion,
         "cache_read_tokens": cache_hit,
         "cache_read_input_tokens": cache_hit,
-        "cache_creation_input_tokens": _int(raw.get("cache_creation_input_tokens")),
+        "cache_creation_input_tokens": cache_write,
         "reasoning_tokens": reasoning,
         "total_tokens": _int(raw.get("total_tokens")) or prompt + completion,
     }

@@ -301,7 +301,15 @@ def test_usage_normalisation_handles_every_shape() -> None:
     )
     assert anthropic_shaped["cache_read_input_tokens"] == 7
     assert anthropic_shaped["cache_creation_input_tokens"] == 3
-    assert anthropic_shaped["total_tokens"] == 15
+    # Its input_tokens leaves the cache out; the core's input is the whole prompt, so it is summed.
+    assert anthropic_shaped["input_tokens"] == 20
+    assert anthropic_shaped["total_tokens"] == 25
+    # An OpenAI-shaped count that also names the cache (a LiteLLM-style gateway) is whole already.
+    both = normalize_usage({"prompt_tokens": 10, "completion_tokens": 5, "cache_read_input_tokens": 7})
+    assert both["input_tokens"] == 10 and both["cache_read_tokens"] == 7
+    # So is DeepSeek's, the one the under-reported hit rate came from.
+    deepseek = normalize_usage({"prompt_tokens": 1000, "completion_tokens": 5, "prompt_cache_hit_tokens": 900})
+    assert deepseek["input_tokens"] == 1000 and deepseek["cache_read_tokens"] == 900
     odd = normalize_usage({"prompt_tokens": "x", "completion_tokens": True, "cost": True, "prompt_tokens_details": []})
     assert odd["input_tokens"] == 0 and odd["output_tokens"] == 0 and "cost_usd" not in odd
 

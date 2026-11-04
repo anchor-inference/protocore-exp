@@ -382,6 +382,17 @@ def test_token_usage_reset_turn_does_not_clear_totals() -> None:
     assert usage.this_turn_input == 0
 
 
+def test_the_cache_hit_rate_is_the_cached_share_of_the_whole_prompt() -> None:
+    usage = TokenUsage()
+    # The session that reported 0.47: 2.97 M input of which 2.68 M came from the cache.
+    usage.add(input_tokens=2_970_000, cache_read_tokens=2_680_000, output_tokens=11_700)
+    assert usage.this_turn_cache_hit_rate() == pytest.approx(2_680_000 / 2_970_000)
+    assert TokenUsage().this_turn_cache_hit_rate() == 0.0
+    odd = TokenUsage()
+    odd.add(input_tokens=10, cache_read_tokens=12)
+    assert odd.this_turn_cache_hit_rate() == 1.0
+
+
 def test_engine_is_terminal_predicate(engine_factory) -> None:
     engine = engine_factory()
     assert not engine.is_terminal

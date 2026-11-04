@@ -61,6 +61,17 @@ def test_cost_reads_what_the_adapter_normalised() -> None:
     assert pricing.cost(normalize_usage(raw)) == pytest.approx(expected)
 
 
+def test_cached_tokens_are_charged_once_whichever_convention_the_provider_counts_in() -> None:
+    pricing = ModelPricing(input=1.0, output=2.0, cached_input=0.1)
+    expected = (100 * 1.0 + 900 * 0.1 + 10 * 2.0) / 1_000_000
+    # OpenAI-compatible: the prompt count holds the cached part.
+    inclusive = normalize_usage({"prompt_tokens": 1_000, "completion_tokens": 10, "prompt_tokens_details": {"cached_tokens": 900}})
+    # Anthropic-shaped: the input count is only what was not read from the cache.
+    exclusive = normalize_usage({"input_tokens": 100, "output_tokens": 10, "cache_read_input_tokens": 900})
+    assert pricing.cost(inclusive) == pytest.approx(expected)
+    assert pricing.cost(exclusive) == pytest.approx(expected)
+
+
 def test_cost_tolerates_missing_and_odd_counts() -> None:
     pricing = ModelPricing(input=1.0, output=1.0)
     assert pricing.cost({}) == 0.0
